@@ -74,12 +74,29 @@ process-queue Worker
       6. PATCH raw_ingestion status='done'
   → error: increment retry_count; status='error' after 3 failures (no backoff)
 
+Daily @ 6am UTC
+ingest-builders Worker
+  → fetch feed-x.json from https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json
+  → flattenFeed() — handles array or keyed-object structure
+  → filter valid tweets (id + text + url required)
+  → extract @author from tweet URL (x.com/<author>/status/...)
+  → INSERT INTO raw_ingestion (url=tweet.url, raw_content="@author: text") ON CONFLICT DO NOTHING
+
 Every 5 min
 embed-batch Worker
   → SELECT 45 articles WHERE embedding IS NULL
   → POST to Cohere batch (input_type='search_document', 2000-char input)
   → prefer article_content; fall back to summary
   → PATCH daily_news.embedding for each article
+
+Daily @ 9am UTC
+send-feishu-digest Worker
+  → Promise.all: fetch daily_news (last 24h, limit 10) + fetch sources (separate call — no join)
+  → build sourceMap[source_id] = source_name client-side
+  → buildFeishuCard(): msg_type="interactive", header template="blue"
+    → per article: lark_md with [title_en](url) + `SourceName` + first 2 bullets from summary_en
+  → POST to FEISHU_WEBHOOK_URL
+  → always sends (even if 0 articles — sends "No articles today")
 
 On user question (Supabase Edge Function)
 answer-question
@@ -227,6 +244,8 @@ RETURNS TABLE (id uuid, title text, summary text, score float)
 |------|---------|---------------|
 | `workers/ingest-rss/src/index.ts` | Daily RSS fetch → raw_ingestion | `parseRSS()`, `extract()` |
 | `workers/ingest-x/src/index.ts` | X/Twitter → raw_ingestion | Disabled (is_active=false; $100/mo) |
+| `workers/ingest-builders/src/index.ts` | follow-builders feed-x.json → raw_ingestion | Daily 6am UTC; no X API cost |
+| `workers/send-feishu-digest/src/index.ts` | daily_news → Feishu webhook card | Daily 9am UTC; FEISHU_WEBHOOK_URL secret required |
 | `workers/process-queue/src/index.ts` | Scrape + summarize + questions → daily_news | `fetchArticleContent()`, `processArticle()`, `generateQuestions()`, `insertAndMarkDone()`, `stripHtml()` |
 | `workers/embed-batch/src/index.ts` | Cohere batch embed → daily_news.embedding | Scheduled handler |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG Q&A | RAG + Groq SSE |

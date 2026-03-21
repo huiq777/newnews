@@ -22,6 +22,7 @@ This document is the authoritative reference for every secret in the system. Bef
 | `GROQ_API_KEY` | console.groq.com | Yes (`process-queue` worker) | Yes (`chat-live` + `chat-rag` functions) | **Never** |
 | `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`chat-rag` function) | **Never** |
 | `X_BEARER_TOKEN` | developer.twitter.com → Your App → Keys and Tokens | Yes (`ingest-x` worker) | No | **Never** |
+| `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-feishu-digest` worker) | No | **Never** |
 
 ---
 
@@ -48,6 +49,15 @@ wrangler secret put COHERE_API_KEY
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put X_BEARER_TOKEN
+
+# From workers/ingest-builders/:
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+
+# From workers/send-feishu-digest/:
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put FEISHU_WEBHOOK_URL
 ```
 
 To verify secrets are set (values are hidden):

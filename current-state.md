@@ -30,6 +30,8 @@ Every article card surfaces 3 pre-generated questions inline. The user clicks a 
 | `process-queue` | ⚠️ Deployed (old prompts) | Every 15 min | Question prompts upgraded locally — **must redeploy** |
 | `ingest-x` | ✅ Deployed (disabled) | Hourly | X API requires $100/mo; sources set is_active=false |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
+| `ingest-builders` | ❌ Not deployed | Daily 6am UTC | Reads follow-builders feed-x.json from GitHub → raw_ingestion; needs SQL + wrangler deploy |
+| `send-feishu-digest` | ❌ Not deployed | Daily 9am UTC | Queries daily_news last 24h → Feishu webhook card; needs FEISHU_WEBHOOK_URL secret |
 
 ### Supabase Edge Functions
 
