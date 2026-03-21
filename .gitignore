@@ -1,0 +1,36 @@
+# Environment files — never commit secrets
+.env
+.env.local
+.env*.local
+
+# Wrangler build cache
+.wrangler/
+
+# Node dependencies
+node_modules/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Expo / React Native build output
+dist/
+web-build/
+.expo/
+expo-env.d.ts
+/ios
+/android
+.kotlin/
+
+# Supabase local CLI temp files (contains project ref + connection strings)
+supabase/.temp/
+
+# Misc
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.orig.*
+*.pem

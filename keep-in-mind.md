@@ -1,0 +1,212 @@
+# Keep In Mind
+
+This file exists so that fixes and lessons learned across multiple conversations are captured once.
+Before helping with any task in this project, read this file first.
+Every entry here was discovered the hard way — do not repeat these mistakes.
+
+---
+
+## Cloudflare Workers — Local Testing
+
+### The correct way to test a worker locally (do this from day one)
+
+**Always use these flags together:**
+```bash
+wrangler dev --remote --test-scheduled
+```
+
+Then trigger the scheduled handler:
+```bash
+curl "http://localhost:8787/__scheduled?cron=0+7+*+*+*"
+```
+
+**Why `--remote`:** Worker secrets set via `wrangler secret put` are stored in Cloudflare's cloud. Local dev mode (`wrangler dev` without `--remote`) does not have access to them. Without `--remote`, any line that uses `env.SUPABASE_URL` or similar will throw `TypeError: Invalid URL string` because the value is undefined.
+
+**Why `--test-scheduled`:** Without this flag, the `/__scheduled` endpoint returns 200 but does NOT actually run the scheduled handler. The response takes ~2ms (a dead giveaway it didn't run). With this flag, it runs the real handler.
+
+**Without both flags:** You will waste time debugging errors that are purely an artifact of the local dev environment, not real bugs.
+
+---
+
+## Cloudflare Workers — Required Setup Per Worker
+
+Every worker needs these 4 files. Missing any one will cause errors.
+
+```
+workers/<worker-name>/
+├── wrangler.toml       ← name, main, cron trigger
+├── tsconfig.json       ← must reference @cloudflare/workers-types
+├── package.json        ← created by npm init -y
+└── src/index.ts        ← must export BOTH fetch() and scheduled()
+```
+
+### `tsconfig.json` (required for TypeScript types)
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ES2020",
+    "lib": ["ES2020"],
+    "types": ["@cloudflare/workers-types"],
+    "moduleResolution": "bundler",
+    "strict": false,
+    "noUnusedLocals": false
+  }
+}
+```
+
+### Install types (run once per worker directory)
+```bash
+npm init -y
+npm install -D @cloudflare/workers-types typescript
+```
+
+### Every worker must export a `fetch` handler
+Even if the worker only uses cron triggers, `wrangler dev` requires a `fetch` export or it throws:
+`Error: Handler does not export a fetch() function.`
+
+Add this stub to every worker:
+```typescript
+async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  return new Response('ok')
+},
+```
+
+---
+
+## Cloudflare Workers — Setting Secrets
+
+Secrets are set per worker. If you haven't `cd`'d into the worker directory, use `--name`:
+
+```bash
+wrangler secret put SUPABASE_URL --name ingest-rss
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name ingest-rss
+
+wrangler secret put SUPABASE_URL --name process-queue
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name process-queue
+wrangler secret put GROQ_API_KEY --name process-queue
+
+wrangler secret put SUPABASE_URL --name embed-batch
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name embed-batch
+wrangler secret put COHERE_API_KEY --name embed-batch
+```
+
+Verify secrets are set (values stay hidden):
+```bash
+wrangler secret list --name ingest-rss
+```
+
+---
+
+## Cloudflare Workers — Deploying
+
+```bash
+cd workers/ingest-rss && wrangler deploy
+cd workers/process-queue && wrangler deploy
+cd workers/embed-batch && wrangler deploy   # Phase 2
+```
+
+Deploy must be run from inside the worker directory (where `wrangler.toml` lives), or pass `--name`.
+
+---
+
+## Supabase — Data API & RLS Settings
+
+- **Enable Data API:** Yes, always. Required for both Cloudflare Workers (REST calls) and the Expo frontend (supabase-js).
+- **Enable automatic RLS:** Yes. Only affects future tables — does not retroactively change existing ones.
+- **RLS in MVP phase:** `daily_news`, `raw_ingestion`, `sources` have no RLS enabled yet. The anon key can read `daily_news` freely. Full RLS is added in Phase 2 via the migration in `docs/schema.md`.
+
+---
+
+## Supabase — RLS Blocks Anon Key Even With No Error
+
+**What happened:** The Expo frontend (using the anon key) fetched `sources` and got back `[]` — an empty array with no error. The table had 10 rows in it. Spent multiple sessions debugging why source names showed as `undefined`.
+
+**Root cause:** RLS was enabled on the `sources` table but the `public_read_sources` policy was never created. PostgREST silently returns 0 rows (not an error) when RLS filters everything out for the anon key. The Cloudflare Workers (which use the service role key) were unaffected because the service role bypasses RLS entirely — so the ingestion pipeline worked fine while the frontend couldn't read the same table.
+
+**How to detect immediately:**
+```sql
+SELECT policyname, cmd, qual FROM pg_policies WHERE tablename = 'sources';
+-- If this returns no rows, the anon key cannot read that table.
+```
+
+**Fix:**
+```sql
+CREATE POLICY "public_read_sources"
+  ON sources FOR SELECT
+  USING (true);
+```
+
+**Rule for every new table:** As soon as you create a table and enable RLS, immediately decide which policies it needs. If the Expo frontend (anon key) needs to read it, add `FOR SELECT USING (true)`. If only workers need it (service role), add no policy and leave it locked.
+
+**PostgREST embedded joins and schema cache:** A separate but related issue: selecting multiple columns from an embedded join (e.g. `sources(name, source_type)`) silently returns `null` for the entire joined object if PostgREST's schema cache doesn't recognise a column. Columns added via `ALTER TABLE` after the schema cache was last built are the usual culprit. Single-column joins (e.g. `sources(name)`) tend to be more forgiving. The workaround: fetch the related table separately and build a client-side lookup map — avoids the join entirely and is immune to schema cache staleness.
+
+**FlatList + async state:** When `renderItem` depends on state that loads asynchronously (like a `sourceMap` populated after mount), FlatList will NOT re-render existing items unless you pass `extraData`:
+```tsx
+<FlatList extraData={[sourceMap, lang]} ... />
+```
+Without `extraData`, items render once with the empty initial state and never update.
+
+---
+
+## Project Phase Status
+
+### Phase 1 (current) — MVP Ingestion + Rough Frontend
+- [x] Supabase DB: 3 tables created, 3 RSS sources seeded
+- [x] Worker 1 (`ingest-rss`): deployed, tested, 40 rows in `raw_ingestion`
+- [ ] Worker 2 (`process-queue`): deploy and test → should populate `daily_news`
+- [ ] Rough Expo frontend: single screen showing `daily_news`
+
+### Phase 2 (next)
+- Worker 3 (`embed-batch`): Cohere embeddings
+- Full RLS + auth
+- Both AI chatbots (Edge Functions)
+- Polished frontend
+
+---
+
+## Cloudflare Workers — Subrequest Limit (Free Tier)
+
+Free tier allows **50 subrequests per invocation**. Each `fetch()` call counts as one.
+
+The `process-queue` worker makes 4 fetch calls per article (lock + Groq + insert + update).
+Formula: `1 + (4 × batch_size) ≤ 50` → max safe batch size is **12 articles**, but use **5** for safe headroom.
+
+`limit=5` is set in `workers/process-queue/src/index.ts` (1 + 5×4 = 21 subrequests). Do not increase beyond 12 unless on a paid Cloudflare plan.
+
+---
+
+## Every New Worker Needs This Setup (run once per worker)
+
+```bash
+cd workers/<name>
+npm init -y
+npm install -D @cloudflare/workers-types typescript
+```
+
+Create `tsconfig.json` (see template in this file above).
+Add a stub `fetch` handler alongside `scheduled` (required by wrangler dev).
+
+---
+
+## Recovering Stuck 'processing' Rows
+
+If a worker crashes mid-run (e.g., subrequest limit hit), rows get stuck in `processing` status and are never picked up again. Symptom: worker says "No pending articles" but `daily_news` has fewer rows than expected.
+
+Fix — run this in Supabase SQL Editor:
+```sql
+UPDATE raw_ingestion SET status = 'pending' WHERE status = 'processing';
+```
+
+Then re-trigger the worker. Safe to run anytime — rows that genuinely finished will be in `done` status, not `processing`.
+
+---
+
+## Worker Testing Sequence (do this every time)
+
+1. `cd workers/<name>`
+2. `wrangler dev --remote --test-scheduled`
+3. In a second terminal: `curl "http://localhost:8787/__scheduled?cron=..."`
+4. Watch the first terminal for `console.log` output
+5. Check Supabase Table Editor to confirm rows were written
+6. Run the curl a second time — row count must NOT increase (idempotency check)
