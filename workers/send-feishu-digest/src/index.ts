@@ -14,21 +14,23 @@ interface Article {
   id: string
   title_en: string | null
   title_zh: string | null
-  summary_en: string | null
+  summary_zh: string | null
   url: string
   source_id: string
   created_at: string
+  engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number } | null
 }
 
 interface Source {
   id: string
   name: string
+  metadata?: { bio_map?: Record<string, string> }
 }
 
-// Extract first N bullet points from summary_en (format: "• **Label:** text")
-function extractBullets(summaryEn: string | null, count: number): string {
-  if (!summaryEn) return ''
-  return summaryEn
+// Extract first N bullet points from summary_zh (format: "• **Label:** text")
+function extractBullets(summaryZh: string | null, count: number): string {
+  if (!summaryZh) return ''
+  return summaryZh
     .split('\n')
     .map(l => l.trim())
     .filter(l => l.startsWith('•'))
@@ -39,6 +41,7 @@ function extractBullets(summaryEn: string | null, count: number): string {
 function buildFeishuCard(
   articles: Article[],
   sourceMap: Record<string, string>,
+  bioMap: Record<string, string>,
   today: string
 ) {
   const elements: object[] = [
@@ -63,15 +66,17 @@ function buildFeishuCard(
   }
 
   for (const article of articles) {
-    const sourceName = sourceMap[article.source_id] || 'Unknown'
-    const title = article.title_en || article.title_zh || 'Untitled'
-    const bullets = extractBullets(article.summary_en, 2)
+    const xHandle = article.url.match(/x\.com\/([^/]+)\/status\//)?.[1]
+    const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
+    const sourceName = xHandle ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}` : (sourceMap[article.source_id] || 'Unknown')
+    const title = article.title_zh || article.title_en || 'Untitled'
+    const bullets = extractBullets(article.summary_zh, 3)
 
     elements.push({
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**[${title}](${article.url})**\n\`${sourceName}\`${bullets ? '\n' + bullets : ''}`,
+        content: `**[${title}](${article.url})**\n\`${sourceName}\`${article.engagement?.likes ? ` · 🔥 ${article.engagement.likes} likes` : article.engagement?.hn_score ? ` · ▲ ${article.engagement.hn_score} HN` : ''}${bullets ? '\n' + bullets : ''}`,
       },
     })
     elements.push({ tag: 'hr' })
@@ -98,14 +103,14 @@ export default {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     const today = new Date().toISOString().split('T')[0]
 
-    // Fetch articles and sources in parallel — two separate calls (avoid PostgREST join staleness)
+    // Fetch articles and sources in parallel
     const [articlesRes, sourcesRes] = await Promise.all([
       fetch(
-        `${env.SUPABASE_URL}/rest/v1/daily_news?created_at=gte.${since}&order=created_at.desc&limit=10&select=id,title_en,title_zh,summary_en,url,source_id,created_at`,
+        `${env.SUPABASE_URL}/rest/v1/daily_news?created_at=gte.${since}&order=created_at.desc&limit=10&select=id,title_en,title_zh,summary_zh,url,source_id,created_at,engagement`,
         { headers: SB(env) }
       ),
       fetch(
-        `${env.SUPABASE_URL}/rest/v1/sources?select=id,name`,
+        `${env.SUPABASE_URL}/rest/v1/sources?select=id,name,metadata`,
         { headers: SB(env) }
       ),
     ])
@@ -116,9 +121,13 @@ export default {
     console.log(`Fetched ${articles.length} articles for digest`)
 
     const sourceMap: Record<string, string> = {}
-    for (const s of sources) sourceMap[s.id] = s.name
+    const bioMap: Record<string, string> = {}
+    for (const s of sources) {
+      sourceMap[s.id] = s.name
+      if (s.metadata?.bio_map) Object.assign(bioMap, s.metadata.bio_map)
+    }
 
-    const card = buildFeishuCard(articles, sourceMap, today)
+    const card = buildFeishuCard(articles, sourceMap, bioMap, today)
 
     try {
       const feishuRes = await fetch(env.FEISHU_WEBHOOK_URL, {

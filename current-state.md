@@ -1,4 +1,4 @@
-# Current State — 2026-03-20
+# Current State — 2026-03-22
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -6,17 +6,9 @@ This document is the single source of truth for where the project stands. Read t
 
 ## What Phase We Are In
 
-**Phase 2.1 (Auto-Questions) is mostly complete. RAG enhancement for `answer-question` is the active remaining task.**
+**Stage 2 data accumulation in progress (DB wiped 2026-03-22 — run audit after 3+ days). Stage 2.5 (podcast ingestion) is the active implementation target.**
 
-The frontend is fully built. All infrastructure is deployed. The one pending code change is adding RAG to `answer-question` so it can reference related articles when the primary article's summary lacks enough detail.
-
----
-
-## Phase 2.1 — What It Is
-
-Every article card surfaces 3 pre-generated questions inline. The user clicks a question → `llama-3.3-70b-versatile` streams an answer directly on the card. No login. No separate chat screen. Questions are generated at ingestion time by `process-queue` and stored as JSONB in `daily_news.questions`.
-
-> **Note:** DeepSeek-R1 (`deepseek-r1-distill-llama-70b`) was decommissioned by Groq. Replaced with `llama-3.3-70b-versatile`. This model does not emit `reasoning_content`, so thinking blocks are not shown — only `type:content` SSE events are emitted.
+All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Current focus: extend ingest-builders for podcast ingestion while waiting for sufficient data to run the source quality audit.
 
 ---
 
@@ -26,135 +18,154 @@ Every article card surfaces 3 pre-generated questions inline. The user clicks a 
 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
-| `ingest-rss` | ✅ Deployed | Daily 7am UTC | RSS + Atom feeds, batch insert, ON CONFLICT DO NOTHING |
-| `process-queue` | ⚠️ Deployed (old prompts) | Every 15 min | Question prompts upgraded locally — **must redeploy** |
-| `ingest-x` | ✅ Deployed (disabled) | Hourly | X API requires $100/mo; sources set is_active=false |
+| `ingest-rss` | ✅ Deployed | Every 4 hours | RSS + Atom feeds; batch insert; ON CONFLICT DO NOTHING |
+| `process-queue` | ✅ Deployed | Every 15 min | Groq llama-3.3-70b-versatile; bilingual summarize + questions; full article scraping; HN Algolia engagement enrichment; subrequest count ~41/50 |
+| `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads follow-builders feed-x.json (GitHub); bio extraction via Groq; stores metadata={likes,retweets} in raw_ingestion; subrequest count ~36/50 |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
-| `ingest-builders` | ❌ Not deployed | Daily 6am UTC | Reads follow-builders feed-x.json from GitHub → raw_ingestion; needs SQL + wrangler deploy |
-| `send-feishu-digest` | ❌ Not deployed | Daily 9am UTC | Queries daily_news last 24h → Feishu webhook card; needs FEISHU_WEBHOOK_URL secret |
+| `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; engagement badge (🔥 likes or ▲ HN) |
+| `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
 
 ### Supabase Edge Functions
 
 | Function | Status | Notes |
 |---|---|---|
-| `answer-question` | ✅ Deployed | Uses `llama-3.3-70b-versatile`; streams `type:content` only; RAG not yet added |
-| `refresh-questions` | ✅ Deployed | Returns new questions JSON; upgraded analytical prompts |
+| `answer-question` | ✅ Deployed | RAG active — Cohere query embed → match_articles RPC → top 3 related → Groq SSE streaming |
+| `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
 
-### Supabase Tables
+### Supabase Tables & RPC
 
-| Table | Status |
-|---|---|
-| `sources` | ✅ 10 rows (rss + wechat + x_api); public_read_sources RLS policy active |
-| `raw_ingestion` | ✅ Working |
-| `daily_news` | ✅ `questions JSONB` column added; `embedding` column being populated by embed-batch |
-| `match_articles` RPC | ❌ SQL not run yet — needed for RAG |
+| Component | Status | Notes |
+|---|---|---|
+| `sources` | ✅ Live | 11 rows (rss + wechat + github_feed); source_type + metadata JSONB columns active |
+| `raw_ingestion` | ✅ Live | State machine: pending → processing → done/error; metadata JSONB column active |
+| `daily_news` | ✅ Live | article_content, questions JSONB, title_en/zh, summary_en/zh, embedding, engagement JSONB all populated |
+| `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question |
+| `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
+| `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; `{hn_score, hn_comments}` for RSS; NULL for WeChat |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
-**Phase 2.1 UI complete.**
+**Phase 2.2 UI complete.**
 
 Working features:
 - Paginated feed (20/page, page number nav)
 - EN/中 language toggle — bilingual titles + summaries
 - Source label: `公众号 - Founder Park` (WeChat) or `TechCrunch` (RSS)
-- `ArticleCard` standalone component with per-card state
 - `? 3 Questions` pill (top-right) — only shows when `questions` non-null
-- Questions expand/collapse; `↻` refresh regenerates questions via `refresh-questions`
-- Click question → streams answer via `answer-question` SSE
-- `Thinking...` indicator while streaming, answer renders word-by-word with `▌` cursor
-- Language toggle resets open answers; switching language shows questions in correct language
+- Questions expand/collapse; `↻` refresh regenerates via `refresh-questions`
+- Click question → streams answer via `answer-question` SSE with RAG context
+- Answer renders word-by-word with `▌` cursor; `Thinking...` indicator while streaming
+- Language toggle resets open answers
 - `Read more →` is the only tap target that opens URL (card body tap disabled)
-- SSE parsed with line buffer (handles split chunks); `res.ok` check before stream read
+- SSE parsed with line buffer (handles split chunks)
+- Engagement badges: 🔥 N likes (amber pill) for tweets, ▲ N HN score (yellow pill) for RSS; K-suffix formatting via `fmtNum()`
+- Upgraded summaries: 2-3 sentences per bullet; specific metrics required; no vague generalizations
 
 ---
 
-## Immediate Next Steps (in order)
+## Active Next Steps
 
-### 1. Redeploy `process-queue` (upgraded question prompts not yet live)
-```bash
-cd workers/process-queue && wrangler deploy
-```
+### Stage 2 — Source Quality Audit ⏳ Pending (run after 2026-03-25)
 
-### 2. Run `match_articles` SQL (needed for RAG)
-In Supabase SQL Editor:
+DB wiped 2026-03-22. Run audit SQL once `daily_news` has 50+ articles across sources (3+ days of ingest).
+
 ```sql
-CREATE OR REPLACE FUNCTION match_articles(
-  query_embedding vector(1024),
-  match_count     int DEFAULT 5
-)
-RETURNS TABLE (id UUID, title TEXT, summary TEXT, score FLOAT)
-LANGUAGE sql STABLE AS $$
-  SELECT id, title, summary,
-         1 - (embedding <=> query_embedding) AS score
-  FROM daily_news
-  WHERE embedding IS NOT NULL
-  ORDER BY embedding <=> query_embedding
-  LIMIT match_count;
-$$;
+SELECT
+  s.name,
+  s.source_type,
+  COUNT(dn.id) AS articles,
+  ROUND(AVG(length(dn.article_content))) AS avg_scraped_chars,
+  ROUND(AVG(length(dn.summary_en))) AS avg_summary_chars,
+  COUNT(dn.id) FILTER (WHERE dn.article_content IS NULL) AS scrape_failures
+FROM daily_news dn
+JOIN sources s ON s.id = dn.source_id
+GROUP BY s.name, s.source_type
+ORDER BY avg_scraped_chars DESC NULLS LAST;
 ```
 
-### 3. Add `COHERE_API_KEY` to Supabase Edge Function secrets
-Supabase Dashboard → Edge Functions → Manage Secrets → add `COHERE_API_KEY`
+Per-source strategy:
+- **RSS** (TechCrunch, Ars, Verge): `avg_scraped_chars` + `scrape_failures` → keep or disable
+- **Hacker News**: disable regardless — scraper captures comment threads, not article text (structural, not quality)
+- **WeChat**: `avg_summary_chars` only; disable sources with empty `raw_content`
+- **Builder tweets**: no audit — KOL curation is the quality filter
 
-### 4. Update `answer-question` with RAG + redeploy
-Update `supabase/functions/answer-question/index.ts` to:
-1. Embed the question via Cohere (`input_type: search_query`)
-2. Call `match_articles` RPC → top 3 related articles (excluding primary)
-3. Append related summaries to system prompt as supplementary context
+### Stage 2.5 — Podcast Ingestion (feed-podcasts.json) ← next code task
 
-Then: `supabase functions deploy answer-question`
-
-### 5. Trigger embed-batch to backfill existing articles
+Inspect schema first, then extend `ingest-builders`:
 ```bash
-cd workers/embed-batch
-wrangler dev --remote --test-scheduled
-# second terminal:
-curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
+curl https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json | head -c 2000
 ```
-Verify: `SELECT COUNT(*) FROM daily_news WHERE embedding IS NOT NULL`
+See `AI-SWE-skill.md` Stage 2.5 for full implementation steps. Watch subrequest count (~36/50 today).
+
+### Stage 3 — UI Polish (after Stage 2)
+
+Use `superpowers:brainstorming` then `frontend-design` skill before touching any code.
+File: `news-app/App.tsx`
+
+Known pain points:
+1. Answer Markdown rendering — streams as plain text; bold/bullets should render (most impactful)
+2. Article card visual hierarchy — functional but sparse
+3. Source filter pills — no way to filter by source
+4. Language toggle UX — resets open answers; consider persisting
+5. Empty states — no articles/no questions shows blank
+
+### Stage 4 — Web Deployment (Cloudflare Pages)
+
+```bash
+cd news-app
+npx expo export --platform web          # outputs to dist/
+npx wrangler pages deploy dist --project-name news-app
+```
+
+`EXPO_PUBLIC_*` vars are baked at build time — must be set in `.env.local` before building, or in Pages CI dashboard for GitHub integration.
+
+### Stage 5 — iOS via Expo EAS
+
+Packaging step only — do last. Requires Apple Developer account ($99/yr).
 
 ---
 
 ## Active RSS Sources
 
 ```
-TechCrunch:    https://techcrunch.com/feed/                                          (rss)
-The Verge:     https://www.theverge.com/rss/index.xml                               (rss)
-Ars Technica:  https://feeds.arstechnica.com/arstechnica/index                      (rss)
-Hacker News:   https://news.ycombinator.com/rss                                     (rss)
-Founder Park:  https://wechat2rss.xlab.app/feed/e95ec80ad542565f0eeaf02a42c6d021a7ae51bc.xml  (wechat)
-GeekPark:      https://wechat2rss.xlab.app/feed/1a5aec98e71c707c8ca092bc2c255b9d4bac477d.xml  (wechat)
-财联社:         https://wewe-rss-latest-oau3.onrender.com/feeds/MP_WXS_*.atom         (wechat)
-中国新闻社:     https://wewe-rss-latest-oau3.onrender.com/feeds/MP_WXS_*.atom         (wechat)
-36氪:          https://wewe-rss-latest-oau3.onrender.com/feeds/MP_WXS_*.atom         (wechat)
+TechCrunch:    https://techcrunch.com/feed/                                           (rss)
+The Verge:     https://www.theverge.com/rss/index.xml                                (rss)
+Ars Technica:  https://feeds.arstechnica.com/arstechnica/index                       (rss)
+Hacker News:   https://news.ycombinator.com/rss                                      (rss)
+Founder Park:  https://wechat2rss.xlab.app/feed/e95ec80...xml                        (wechat)
+GeekPark:      https://wechat2rss.xlab.app/feed/1a5aec9...xml                        (wechat)
+财联社:         https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
+中国新闻社:     https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
+36氪:          https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
+follow-builders: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json (github_feed)
 ```
 
-WeChat detection in frontend: `item.url?.includes('mp.weixin.qq.com')` — do NOT rely on source_type join (PostgREST multi-column join issue; see keep-in-mind.md).
+WeChat scraping will always fail — RSS bridge content is the ceiling. Do not attempt to fix this.
 
 ---
 
 ## Supabase Info
 
 - **Project URL:** `https://exjbwdcxyrkxsmzaowkx.supabase.co`
-- **sources columns:** `id, name, rss_url, is_active, created_at, source_type`
-- **raw_ingestion columns:** `id, source_id, url, raw_content, fetched_at, status, retry_count, last_error, processed_at`
-- **daily_news columns:** `id, source_id, raw_ingestion_id, url, title, summary, title_en, summary_en, title_zh, summary_zh, published_at, embedding, created_at, questions`
+- **sources columns:** `id, name, rss_url (UNIQUE), is_active, created_at, source_type, metadata JSONB`
+- **raw_ingestion columns:** `id, source_id, url (UNIQUE), raw_content, fetched_at, status, retry_count, last_error, processed_at, metadata JSONB`
+- **daily_news columns:** `id, source_id, raw_ingestion_id, url (UNIQUE), title, summary, title_en, summary_en, title_zh, summary_zh, article_content, questions JSONB, embedding vector(1024), engagement JSONB, created_at`
 
 ---
 
 ## Key Technical Facts
 
-- **Groq model (summaries + questions):** `llama-3.3-70b-versatile` — 12K TPM free tier
-- **Groq model (answer streaming):** `llama-3.3-70b-versatile` — DeepSeek-R1 decommissioned; only `type:content` SSE events, no thinking blocks
-- **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG question embedding
-- **process-queue Groq calls per article:** 3 (summary + EN questions + ZH questions) — watch TPM limit
-- **Groq 429 TPM:** wait 1 min, re-trigger
-- **Cloudflare subrequest limit:** 50/invocation — process-queue uses ~31. Safe.
-- **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing';`
+- **Groq model (summaries + questions + bio extraction):** `llama-3.3-70b-versatile` — 12K TPM free tier
+- **Groq model (answer streaming):** `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
+- **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG — asymmetry is load-bearing, do not change
+- **process-queue Groq calls per article:** 3 (summary + EN questions + ZH questions)
+- **ingest-builders Groq calls per run:** 1 batch call for all bios
+- **Cloudflare cron limit:** 5 triggers (free tier hard limit) — all 5 slots used; ingest-x deleted to make room
+- **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
+- **Feishu digest:** Chinese content (title_zh, summary_zh); X articles show as `X - @handle - role` using bio_map from sources.metadata
 - **answer-question SSE events:** `{ type: "content", content: "..." }` chunks then `data: [DONE]`
 - **Streaming in Expo:** use `fetch` + `ReadableStream` with line buffer — do NOT use `supabase.functions.invoke()` (buffers entire response)
-- **FlatList extraData:** always pass `extraData={[sourceMap, lang]}` when renderItem depends on async state
-- **RAG pattern:** embed question with Cohere → call match_articles RPC → inject top 3 related summaries into system prompt; COHERE_API_KEY required as Edge Function secret
+- **PostgREST join staleness:** always fetch sources separately and join client-side — do not use embedded joins
 
 ---
 
@@ -162,24 +173,15 @@ WeChat detection in frontend: `item.url?.includes('mp.weixin.qq.com')` — do NO
 
 | File | Purpose |
 |---|---|
-| `workers/process-queue/src/index.ts` | Bilingual summary + questions generation — upgraded prompts, needs redeploy |
-| `workers/ingest-rss/src/index.ts` | RSS fetcher — deployed, working |
-| `workers/embed-batch/src/index.ts` | Cohere embedding worker — deployed, running every 5 min |
-| `supabase/functions/answer-question/index.ts` | Streaming answer — deployed; RAG update pending |
-| `supabase/functions/refresh-questions/index.ts` | On-demand question refresh — deployed, working |
-| `news-app/App.tsx` | Expo frontend — Phase 2.1 complete |
-| `phase2.1-auto-questions-current-task.md` | Full Phase 2.1 spec |
-| `instructions.md` | Command cheatsheet for all workers |
+| `workers/ingest-rss/src/index.ts` | RSS fetcher — every 4h |
+| `workers/process-queue/src/index.ts` | Scrape + bilingual summarize + questions + HN engagement enrichment |
+| `workers/ingest-builders/src/index.ts` | follow-builders feed-x.json → raw_ingestion + bio extraction + engagement metadata |
+| `workers/embed-batch/src/index.ts` | Cohere embeddings — every 5 min |
+| `workers/send-feishu-digest/src/index.ts` | Daily Feishu card — 17:00 UTC, Chinese |
+| `supabase/functions/answer-question/index.ts` | Streaming RAG answer — deployed with RAG |
+| `supabase/functions/refresh-questions/index.ts` | On-demand question refresh |
+| `news-app/App.tsx` | Expo frontend — Phase 2.2 complete |
+| `AI-SWE-skill.md` | Full technical reference — read before any code change |
 | `keep-in-mind.md` | Hard-won lessons — read before debugging anything |
 | `docs/architecture.md` | All major technical decisions with rationale |
 | `docs/api-keys-and-env.md` | Every secret and where it lives |
-
----
-
-## What Comes After (Phase 3)
-
-- iOS build via Expo EAS
-- Vercel deployment for web
-- UI design polish
-- Additional RSS sources
-- Push notifications for daily digest

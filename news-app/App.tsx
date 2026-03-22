@@ -43,9 +43,15 @@ type Article = {
   url: string
   created_at: string
   questions: { en: string[]; zh: string[] } | null
+  engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number } | null
 }
 
-function ArticleCard({ item, lang, sourceMap }: { item: Article; lang: 'en' | 'zh'; sourceMap: Record<string, string> }) {
+function fmtNum(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
+  return `${n}`
+}
+
+function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: 'en' | 'zh'; sourceMap: Record<string, string>; bioMap: Record<string, string> }) {
   const [questionsOpen, setQuestionsOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
@@ -56,8 +62,12 @@ function ArticleCard({ item, lang, sourceMap }: { item: Article; lang: 'en' | 'z
   const displaySummary = (lang === 'en' ? item.summary_en : item.summary_zh) || item.summary
   const sourceName = sourceMap[item.source_id]
   const isWechat = item.url?.includes('mp.weixin.qq.com')
+  const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
+  const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
   const sourceLabel = isWechat
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
+    : xHandle
+    ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}`
     : sourceName
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
@@ -165,14 +175,26 @@ function ArticleCard({ item, lang, sourceMap }: { item: Article; lang: 'en' | 'z
 
   return (
     <View style={styles.card}>
-      {/* Header row: source label + questions pill */}
+      {/* Header row: source label + engagement badge + questions pill */}
       <View style={styles.cardHeaderRow}>
-        <Text style={styles.sourceLabel}>{sourceLabel}</Text>
-        {localQuestions && (
-          <TouchableOpacity onPress={() => setQuestionsOpen(v => !v)} style={styles.questionsPill}>
-            <Text style={styles.questionsPillText}>{questionsOpen ? '✕ Close' : '? 3 Questions'}</Text>
-          </TouchableOpacity>
-        )}
+        <Text style={styles.sourceLabel} numberOfLines={2}>{sourceLabel}</Text>
+        <View style={styles.cardHeaderRight}>
+          {item.engagement?.likes != null && item.engagement.likes > 0 && (
+            <View style={styles.engagementPill}>
+              <Text style={styles.engagementText}>🔥 {fmtNum(item.engagement.likes)}</Text>
+            </View>
+          )}
+          {item.engagement?.hn_score != null && item.engagement.hn_score > 0 && (
+            <View style={[styles.engagementPill, styles.engagementPillHN]}>
+              <Text style={[styles.engagementText, styles.engagementTextHN]}>▲ {fmtNum(item.engagement.hn_score)}</Text>
+            </View>
+          )}
+          {localQuestions && (
+            <TouchableOpacity onPress={() => setQuestionsOpen(v => !v)} style={styles.questionsPill}>
+              <Text style={styles.questionsPillText}>{questionsOpen ? '✕ Close' : '? 3 Questions'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {/* Title */}
@@ -266,20 +288,27 @@ export default function App() {
   const [totalPages, setTotalPages] = useState(1)
   const [lang, setLang] = useState<'en' | 'zh'>('en')
   const [sourceMap, setSourceMap] = useState<Record<string, string>>({})
+  const [bioMap, setBioMap] = useState<Record<string, string>>({})
   const listRef = useRef<FlatList>(null)
 
   useEffect(() => {
     supabase
       .from('sources')
-      .select('id, name')
+      .select('id, name, metadata')
       .then(({ data }) => {
         if (data) {
-          const map: Record<string, string> = {}
-          data.forEach(s => { map[s.id] = s.name })
-          setSourceMap(map)
+          const sMap: Record<string, string> = {}
+          const bMap: Record<string, string> = {}
+          data.forEach((s: { id: string; name: string; metadata?: { bio_map?: Record<string, string> } }) => {
+            sMap[s.id] = s.name
+            if (s.metadata?.bio_map) Object.assign(bMap, s.metadata.bio_map)
+          })
+          setSourceMap(sMap)
+          setBioMap(bMap)
         }
       })
   }, [])
+
 
   useEffect(() => {
     supabase
@@ -294,7 +323,7 @@ export default function App() {
     setLoading(true)
     supabase
       .from('daily_news')
-      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, questions')
+      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, questions, engagement')
       .order('created_at', { ascending: false })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
       .then(({ data, error }) => {
@@ -345,7 +374,7 @@ export default function App() {
             extraData={[sourceMap, lang]}
             keyExtractor={item => item.id}
             renderItem={({ item }) => (
-              <ArticleCard item={item} lang={lang} sourceMap={sourceMap} />
+              <ArticleCard item={item} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
             )}
             ListFooterComponent={
               <View style={styles.pagination}>
@@ -379,8 +408,13 @@ const styles = StyleSheet.create({
   langBtnTextActive:    { color: '#fff', fontWeight: '600' },
   card:                 { backgroundColor: '#fff', margin: 8, padding: 16, borderRadius: 8 },
   cardHeaderRow:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
+  cardHeaderRight:      { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 },
   sourceLabel:          { fontSize: 12, color: '#aaa', marginTop: 2, flex: 1 },
-  questionsPill:        { backgroundColor: '#f0f0f0', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, marginLeft: 8 },
+  engagementPill:       { backgroundColor: '#FFF3E0', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3 },
+  engagementPillHN:     { backgroundColor: '#FFF8E1' },
+  engagementText:       { fontSize: 11, fontWeight: '600', color: '#E65100' },
+  engagementTextHN:     { color: '#FF6F00' },
+  questionsPill:        { backgroundColor: '#f0f0f0', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
   questionsPillText:    { fontSize: 12, color: '#555', fontWeight: '500' },
   source:               { fontSize: 12, color: '#888', marginBottom: 4 },
   title:                { fontSize: 16, fontWeight: '600', marginBottom: 8 },

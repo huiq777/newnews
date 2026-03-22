@@ -17,10 +17,10 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env) {
     const res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?status=eq.pending&limit=5&select=id,source_id,url,raw_content`,
+      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?status=eq.pending&limit=5&select=id,source_id,url,raw_content,metadata`,
       { headers: SB(env) }
     )
-    const articles: { id: string; source_id: string; url: string; raw_content: string }[] = await res.json()
+    const articles: { id: string; source_id: string; url: string; raw_content: string; metadata?: { likes?: number; retweets?: number } }[] = await res.json()
 
     if (articles.length === 0) {
       console.log('No pending articles.')
@@ -136,6 +136,21 @@ async function fetchArticleContent(url: string): Promise<string> {
   }
 }
 
+async function fetchHNEngagement(url: string): Promise<{ hn_score: number; hn_comments: number } | null> {
+  try {
+    const res = await fetch(
+      `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(url)}&restrictSearchableAttributes=url`
+    )
+    if (!res.ok) return null
+    const data = await res.json() as { hits: Array<{ points: number; num_comments: number }> }
+    const hit = data.hits?.[0]
+    if (!hit) return null
+    return { hn_score: hit.points ?? 0, hn_comments: hit.num_comments ?? 0 }
+  } catch {
+    return null
+  }
+}
+
 async function insertAndMarkDone(
   article: { id: string; source_id: string; url: string },
   title: string,
@@ -146,6 +161,7 @@ async function insertAndMarkDone(
   summary_zh: string,
   questions: { en: string[]; zh: string[] } | null,
   articleContent: string,
+  engagement: Record<string, number> | null,
   env: Env
 ) {
   await fetch(`${env.SUPABASE_URL}/rest/v1/daily_news`, {
@@ -163,6 +179,7 @@ async function insertAndMarkDone(
       summary_zh,
       questions,
       article_content: articleContent || null,
+      engagement,
     }),
   })
 
@@ -199,7 +216,7 @@ function parseSection(text: string, tag: string): string {
 }
 
 async function processArticle(
-  article: { id: string; source_id: string; url: string; raw_content: string },
+  article: { id: string; source_id: string; url: string; raw_content: string; metadata?: { likes?: number; retweets?: number } },
   env: Env
 ) {
   try {
@@ -213,6 +230,16 @@ async function processArticle(
       })
       console.log(`SKIP (empty): ${article.url}`)
       return
+    }
+
+    // Determine engagement: tweets carry likes/retweets from ingest-builders metadata;
+    // RSS/other articles get HN score if the article was posted to Hacker News
+    const isTweet = article.url.includes('x.com') && article.url.includes('/status/')
+    let engagement: Record<string, number> | null = null
+    if (isTweet && article.metadata) {
+      engagement = { likes: article.metadata.likes ?? 0, retweets: article.metadata.retweets ?? 0 }
+    } else if (!isTweet) {
+      engagement = await fetchHNEngagement(article.url)
     }
 
     // Attempt full article fetch; fall back to RSS snippet if scraping fails or content is thin
@@ -241,20 +268,20 @@ TITLE_EN: [Punchy English title under 60 characters. No clickbait.]
 TITLE_ZH: [Concise Chinese title under 20 characters.]
 
 SUMMARY_EN:
-• **[Core Event]:** [1-2 sentences on what happened or the main thesis.]
-• **[Crucial Detail]:** [1-2 sentences on the key data point, spec, or figure.]
-• **[The Impact]:** [1-2 sentences on why this matters to tech/business.]
+• **[Core Event]:** [2-3 sentences. Provide a thorough, accurate summary of the main thesis that deeply corresponds to the article's core narrative.]
+• **[Crucial Detail]:** [2-3 sentences. Extract and explain highly specific details. You must include precise metrics, technical specifications, financial figures, or critical mechanisms mentioned in the text.]
+• **[The Impact]:** [2-3 sentences. Provide a constructive, creative, and forward-looking analysis of the implications. DO NOT use vague generalizations like "this is a major milestone." Instead, explicitly state the specific strategic shifts, market disruptions, or future innovations this event triggers.]
 
 SUMMARY_ZH:
-• **[核心事件]:** [1-2句话说明发生了什么或主要论点。]
-• **[关键细节]:** [1-2句话说明最重要的数据点、技术规格或财务数字。]
-• **[影响]:** [1-2句话说明这对科技/商业领域意味着什么。]
+• **[核心事件]:** [2-3句话。提供全面且深度契合文章核心内容的准确摘要，拒绝表面概述。]
+• **[关键细节]:** [2-3句话。提取并解释高度具体的细节，必须包含精准的数据指标、技术规格、财务数据或核心机制。]
+• **[影响]:** [2-3句话。对事件的深远影响进行具建设性和前瞻性的深度分析。严禁使用"这是一个重要里程碑"等模糊的泛泛而谈，必须明确指出其引发的具体战略转变、市场颠覆或对未来创新的推动。]
 
 Strict rules:
 1. Start immediately with "TITLE_EN:". No intro or outro.
 2. CRITICAL — never translate proper nouns, brand names, or product names. They must appear character-for-character identical in both the English and Chinese versions. If the source text says "OpenClaw", write "OpenClaw" in TITLE_ZH and SUMMARY_ZH — not "开放爪" or any phonetic/semantic translation. If the source text says "飞书", write "飞书" in TITLE_EN and SUMMARY_EN — not "Feishu" or "FlyBook". Translating a proper noun is a critical error.
 3. Ignore boilerplate, ads, nav menus, and newsletter signups.
-4. If the text lacks enough signal, output exactly: INSUFFICIENT_CONTENT`,
+4. If the text lacks enough signal to generate these detailed 2-3 sentence summaries, output exactly: INSUFFICIENT_CONTENT`,
           },
           {
             role: 'user',
@@ -295,7 +322,7 @@ Strict rules:
 
     const questions = await generateQuestions(summary_en, summary_zh, env)
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, env)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, env)
     console.log(`OK: ${article.url}`)
 
   } catch (err: any) {
