@@ -1,0 +1,92 @@
+<h2>newsminimalist.com — Design Analysis</h2>
+<p class="subtitle">What it does, what works, what doesn't</p>
+
+<div class="section">
+  <h3>How it looks</h3>
+  <div class="mockup">
+    <div class="mockup-header">newsminimalist.com — collapsed state (what you first see)</div>
+    <div class="mockup-body" style="font-family: system-ui, sans-serif; padding: 0;">
+      <div style="background:#fff; border-bottom:1px solid #eee; padding:12px 20px; display:flex; align-items:center; gap:16px; font-size:13px; color:#666;">
+        <span style="font-weight:700; font-size:15px; color:#000;">News Minimalist</span>
+        <span style="flex:1"></span>
+        <span>Significance: <strong>1.8</strong> — <strong>10</strong> ▬▬▬◯</span>
+        <span>Categories: All · AI · Politics · Business · Science · Tech · World · Health · Climate</span>
+      </div>
+      <div style="padding:0 20px;">
+        <div style="padding:11px 0; border-bottom:1px solid #f0f0f0; display:flex; align-items:baseline; gap:12px; cursor:pointer;">
+          <span style="font-size:11px; color:#999; width:28px; flex-shrink:0;">9.2</span>
+          <span style="font-size:13px; color:#555; width:80px; flex-shrink:0;">Reuters</span>
+          <span style="font-size:14px; color:#111;">Russia launches largest drone attack on Ukraine in three months</span>
+        </div>
+        <div style="padding:11px 0; border-bottom:1px solid #f0f0f0; display:flex; align-items:baseline; gap:12px; cursor:pointer;">
+          <span style="font-size:11px; color:#999; width:28px; flex-shrink:0;">8.7</span>
+          <span style="font-size:13px; color:#555; width:80px; flex-shrink:0;">FT</span>
+          <span style="font-size:14px; color:#111;">Federal Reserve signals two rate cuts in 2025, markets rally</span>
+        </div>
+        <div style="padding:11px 0; border-bottom:1px solid #f0f0f0; display:flex; align-items:baseline; gap:12px; cursor:pointer; background:#fafafa;">
+          <span style="font-size:11px; color:#999; width:28px; flex-shrink:0;">8.1</span>
+          <span style="font-size:13px; color:#555; width:80px; flex-shrink:0;">TechCrunch</span>
+          <span style="font-size:14px; color:#111; font-weight:500;">OpenAI cuts API prices by 80% — expanded ↓</span>
+        </div>
+        <div style="padding:12px 20px 12px 120px; background:#fafafa; border-bottom:1px solid #e8e8e8; font-size:13px; color:#444; line-height:1.6;">
+          OpenAI has slashed API prices by up to 80% across all tiers. GPT-4o mini now costs less than competing models from Anthropic and Google. Enterprise customers on volume pricing see immediate savings. The move is seen as a response to growing competition from open-source models.
+        </div>
+        <div style="padding:11px 0; border-bottom:1px solid #f0f0f0; display:flex; align-items:baseline; gap:12px; cursor:pointer;">
+          <span style="font-size:11px; color:#999; width:28px; flex-shrink:0;">7.6</span>
+          <span style="font-size:13px; color:#555; width:80px; flex-shrink:0;">Ars Technica</span>
+          <span style="font-size:14px; color:#111;">Apple delays Vision Pro 2 to 2026 amid slow adoption</span>
+        </div>
+        <div style="padding:11px 0; border-bottom:1px solid #f0f0f0; display:flex; align-items:baseline; gap:12px; cursor:pointer;">
+          <span style="font-size:11px; color:#999; width:28px; flex-shrink:0;">6.9</span>
+          <span style="font-size:13px; color:#555; width:80px; flex-shrink:0;">WSJ</span>
+          <span style="font-size:14px; color:#111;">China unveils new semiconductor subsidy program worth $47B</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3 style="color:#2a9d2a;">✓ What your project should steal</h3>
+  <div style="background:#f0faf0; border-left:3px solid #2a9d2a; padding:14px 18px; border-radius:0 8px 8px 0; margin-bottom:12px;">
+    <strong>Title-only collapsed state</strong>
+    <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+      Articles show just the headline until clicked. Zero cognitive overhead on scan. The user controls depth. This is the right default — your current design shows all 3 bullets immediately, which creates visual fatigue when scanning 20+ items.
+    </p>
+  </div>
+  <div style="background:#f0faf0; border-left:3px solid #2a9d2a; padding:14px 18px; border-radius:0 8px 8px 0; margin-bottom:12px;">
+    <strong>Inline expansion (no navigation, no modal)</strong>
+    <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+      Clicking expands in-place. The feed stays in context — you never lose your scroll position. Keeps the mental model simple.
+    </p>
+  </div>
+  <div style="background:#f0faf0; border-left:3px solid #2a9d2a; padding:14px 18px; border-radius:0 8px 8px 0;">
+    <strong>Source name always visible</strong>
+    <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+      Before reading anything, you know where it came from. Trust signal before commitment.
+    </p>
+  </div>
+</div>
+
+<div class="section">
+  <h3 style="color:#c0392b;">✗ What your project should reject</h3>
+  <div style="background:#fff5f5; border-left:3px solid #c0392b; padding:14px 18px; border-radius:0 8px 8px 0; margin-bottom:12px;">
+    <strong>The significance score (1.8–10 slider)</strong>
+    <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+      Forces a meta-judgement — "is this significant enough to read?" — before you've even seen the headline. You've already solved this better: your curation (Ars, TechCrunch, Verge + builder tweets + WeChat) IS the quality filter. No score needed.
+    </p>
+  </div>
+  <div style="background:#fff5f5; border-left:3px solid #c0392b; padding:14px 18px; border-radius:0 8px 8px 0;">
+    <strong>Too many category tabs</strong>
+    <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+      9 categories creates a navigation burden. Your content is already meaningfully segmented by source type — EN/ZH toggle + source label does more work with less UI. The category bar also eats vertical space on every load.
+    </p>
+  </div>
+</div>
+
+<div style="background:#f8f6ff; border-left:3px solid #7c3aed; padding:14px 18px; border-radius:0 8px 8px 0; margin-top:16px;">
+  <strong style="color:#7c3aed;">Key design insight from this site:</strong>
+  <p style="margin:6px 0 0; font-size:14px; color:#444; line-height:1.5;">
+    <strong>Progressive disclosure is the right UX model.</strong> Show title → click to reveal summary + questions → click question to stream answer. Three levels of depth, each earned by a deliberate user action. The current design skips level 1 (collapses directly to level 2 open state).
+  </p>
+</div>

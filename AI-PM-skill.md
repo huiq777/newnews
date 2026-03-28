@@ -39,6 +39,7 @@ RSS Feeds + Builder Tweets → Cloudflare Workers → Groq LLM (summarize + ques
 - WeChat (via RSS bridge): Founder Park, GeekPark, 财联社, 中国新闻社, 36氪
 - Builder tweets: 25 AI builders via follow-builders `feed-x.json` (GitHub, no X API cost)
 - AI podcasts: 5 shows (Latent Space, Training Data, No Priors, Unsupervised Learning, Data Driven NYC) via follow-builders `feed-podcasts.json` (YouTube transcripts, no API cost)
+- Apify-scraped tweets: 6 curated AI/tech figures (Chris Olah, Dario Amodei, Simon Willison, @xai, Paul Graham, Ethan Mollick) via Apify Twitter scraper (~$1.08/mo)
 
 **Delivery channels:**
 - Web app (Expo) — full feed with inline RAG Q&A
@@ -60,10 +61,13 @@ RSS Feeds + Builder Tweets → Cloudflare Workers → Groq LLM (summarize + ques
 | `send-feishu-digest` worker | ✅ Live (daily 17:00 UTC / 12pm EST; Chinese content; X - @handle - role format; all 3 ZH bullets; engagement badge) |
 | Engagement data pipeline | ✅ Live (`raw_ingestion.metadata` + `daily_news.engagement`; tweets: likes/retweets; RSS: HN score via Algolia API) |
 | Upgraded summary prompt | ✅ Live (2-3 sentences/bullet; specific metrics required; no vague generalizations) |
-| Engagement UI badges | ✅ Live (🔥 likes amber pill for tweets; ▲ HN yellow pill for RSS; `fmtNum()` K-suffix) |
+| Engagement UI badges | ✅ Live (🔥 likes amber pill for tweets only; HN badge disabled) |
 | Feishu all 3 ZH bullets | ✅ Live (was showing 2 bullets) |
-| Web deployment | ❌ Dev only — Cloudflare Pages (next milestone) |
-| iOS build (Expo EAS) | ❌ Phase 3 |
+| Podcast ingestion (feed-podcasts.json) | ✅ Live (ingest-builders; YouTube transcripts; `podcast` source_type; batch INSERT) |
+| Stage 3 UI redesign | ✅ Live (warm editorial; `MarkdownText`; answer Markdown; proportional scroll position) |
+| Web deployment | ❌ Dev only — Cloudflare Pages ← NEXT |
+| Apify tweet ingestion | ❌ Not started — Stage 4.5 (6 curated handles via Supabase Edge Function webhook) |
+| iOS build (Expo EAS) | ❌ Phase 5 |
 
 ---
 
@@ -83,21 +87,27 @@ RSS Feeds + Builder Tweets → Cloudflare Workers → Groq LLM (summarize + ques
 - SQL + judgment only; no code
 - Per-source strategy: RSS → avg_scraped_chars + scrape_failures; HN → disable (structural); WeChat → avg_summary_chars; Builders → skip
 
-**2.5. Podcast Ingestion (feed-podcasts.json)** ← next code task
-- Extend `ingest-builders` to also fetch `feed-podcasts.json`
-- Inspect schema first before writing any code
-- Watch subrequest count (~36/50 today — podcast inserts add more)
-- See `AI-SWE-skill.md` Stage 2.5 for full steps
+**~~2.5. Podcast Ingestion (feed-podcasts.json)~~** ✅ Complete
+- `ingest-builders` fetches both `feed-x.json` and `feed-podcasts.json` in one scheduled run
+- Podcast episodes batch-inserted; `podcast` source_type; subrequest count 36 → 38/50
 
-**3. UI Polish + Design Pass**
-- Use `superpowers:brainstorming` then `frontend-design` skill before writing any code
-- File: `/news-app/App.tsx`
-- Known pain points: Answer Markdown rendering (#1 most impactful), article card visual hierarchy, source filter pills, language toggle UX, empty states
+**~~3. UI Polish + Design Pass~~** ✅ Complete
+- Warm editorial redesign delivered; `MarkdownText` for bullet+bold; answer Markdown; scroll position fix
+- HN engagement badge removed (HN source disabled)
 
-**4. Web Deployment via Cloudflare Pages**
+**4. Web Deployment via Cloudflare Pages** ← NEXT
 - `npx expo export --platform web` → `npx wrangler pages deploy dist --project-name news-app`
 - `EXPO_PUBLIC_*` vars baked at build time — set in `.env.local` or Pages CI dashboard
-- See `AI-SWE-skill.md` Stage 3 for full commands
+- See `AI-SWE-skill.md` Stage 4 for full commands
+
+**4.5. Apify Tweet Ingestion (6 curated handles)**
+- **Why:** 5 CF cron slots exhausted; 6 high-signal handles not in follow-builders feed (Chris Olah, Dario Amodei, Simon Willison, @xai, Paul Graham, Ethan Mollick)
+- **Architecture:** Apify runs scraper on its own schedule (6:30am UTC) → `RUN_SUCCEEDED` webhook → Supabase Edge Function `ingest-apify-tweets` → `raw_ingestion` → existing `process-queue` unchanged
+- **Cost:** ~$1.08/mo (15 tweets × 6 handles × 30 days = 2,700 tweets at $0.40/1K)
+- **Tweet prompt:** Dedicated Groq prompt for tweets — title format `"@original said X, retweeted by @handle"` or `"@handle said X"` — same 3-bullet summary structure as articles but tweet-aware
+- **No CF cron slot used:** Apify scheduler is external; Edge Function is webhook-triggered (event-driven)
+- **Deduplication:** `ON CONFLICT (url) DO NOTHING` — re-fetched tweets silently skipped
+- See `AI-SWE-skill.md` Stage 4.5 for full technical spec
 
 **5. iOS via Expo EAS**
 - Packaging step, not product work — do last
@@ -148,6 +158,11 @@ Before adding any feature, ask:
 | 2026-03-22 | Implemented engagement pipeline (reversed 2026-03-21 deferral) | HN Algolia API is free + zero auth; tweet likes already in feed-x.json; badges add visible quality signal to UI with zero ongoing cost |
 | 2026-03-22 | Upgraded summary prompt to 2-3 sentences/bullet with specific metrics | Vague summaries ("discusses X") provide less value than concrete ones ("X grew 40% YoY") |
 | 2026-03-22 | DB wiped for clean data start | Engagement columns added required migration; fresh start ensures all articles have engagement data populated consistently |
+| 2026-03-22 | Podcast ingestion merged into ingest-builders (not a new worker) | All 5 CF cron slots used; ingest-builders already runs daily 6am UTC; batch INSERT keeps subrequest count at ~38/50 |
+| 2026-03-22 | Stage 3 UI redesign complete — warm editorial aesthetic | MarkdownText renders bullet+bold; answer Markdown with streaming cursor; proportional scroll fix on lang toggle |
+| 2026-03-22 | HN engagement badge disabled alongside HN source | HN source disabled (is_active=false); badge no longer meaningful; tweets-only 🔥 badge remains |
+| 2026-03-23 | Apify scraper chosen for 6 curated handles not in follow-builders feed | All 5 CF cron slots exhausted; Apify has its own scheduler + webhook; Supabase Edge Function as webhook receiver avoids pg_cron/pg_net (rejected in architecture.md); ~$1.08/mo well within $5 budget |
+| 2026-03-23 | Dedicated tweet Groq prompt added to process-queue | Article prompt demands "precise metrics/financial figures" → `INSUFFICIENT_CONTENT` on short tweet text; tweet prompt uses same 3-bullet structure but tweet-aware title and bullet framing |
 
 ---
 

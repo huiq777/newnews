@@ -1,6 +1,6 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-03-22. Always verify against the deployed Supabase DB — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-03-22 and is current. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
@@ -48,7 +48,7 @@ CREATE TABLE sources (
     rss_url     TEXT        UNIQUE NOT NULL,
     is_active   BOOLEAN     NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    source_type TEXT        NOT NULL DEFAULT 'rss',   -- 'rss' | 'wechat' | 'x_api' | 'github_feed'
+    source_type TEXT        NOT NULL DEFAULT 'rss',   -- 'rss' | 'wechat' | 'x_api' | 'github_feed' | 'podcast'
     metadata    JSONB                                  -- {bio_map: {handle: "role"}} for github_feed; NULL for others
 );
 

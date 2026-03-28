@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { FlatList, Text, StyleSheet, ActivityIndicator, SafeAreaView, TouchableOpacity, Linking, View } from 'react-native'
+import { FlatList, Text, StyleSheet, ActivityIndicator, SafeAreaView, TouchableOpacity, Pressable, Linking, View } from 'react-native'
 import { createClient } from '@supabase/supabase-js'
 
 const supabase = createClient(
@@ -11,17 +11,28 @@ const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!
 const PAGE_SIZE = 20
 
-function BoldText({ text, style }: { text: string; style?: object }) {
-  const parts = text.split(/\*\*([^*]+)\*\*/)
-  return (
+function MarkdownText({ text, style }: { text: string; style?: object }) {
+  const isBullet = text.trimStart().startsWith('•')
+  const content = isBullet ? text.replace(/^\s*•\s*/, '') : text
+  const parts = content.split(/\*\*([^*]+)\*\*/)
+  const inner = (
     <Text style={style}>
       {parts.map((part, i) =>
         i % 2 === 1
-          ? <Text key={i} style={{ fontWeight: 'bold' }}>{part}</Text>
+          ? <Text key={i} style={{ fontWeight: '700' }}>{part}</Text>
           : part
       )}
     </Text>
   )
+  if (isBullet) {
+    return (
+      <View style={{ flexDirection: 'row', marginBottom: 6, alignItems: 'flex-start' }}>
+        <Text style={[style, { marginRight: 8, color: '#9E9690', lineHeight: 22 }]}>•</Text>
+        <View style={{ flex: 1 }}>{inner}</View>
+      </View>
+    )
+  }
+  return inner
 }
 
 type AnswerState = {
@@ -52,6 +63,8 @@ function fmtNum(n: number): string {
 }
 
 function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: 'en' | 'zh'; sourceMap: Record<string, string>; bioMap: Record<string, string> }) {
+  const [isExpanded, setIsExpanded] = useState(false)
+  const [isHovered, setIsHovered] = useState(false)
   const [questionsOpen, setQuestionsOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
@@ -75,8 +88,11 @@ function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: '
     setAnswers({})
   }, [lang])
 
+  useEffect(() => {
+    if (!isExpanded) setQuestionsOpen(false)
+  }, [isExpanded])
+
   async function handleAsk(index: number, question: string) {
-    // Toggle off if already answered and not streaming
     if (answers[index]?.content && !answers[index]?.streaming) {
       setAnswers(prev => {
         const next = { ...prev }
@@ -141,7 +157,6 @@ function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: '
           } catch {}
         }
       }
-      // Stream ended without [DONE] — mark as done
       setAnswers(prev => ({ ...prev, [index]: { ...prev[index], streaming: false } }))
     } catch (e) {
       console.error('handleAsk error:', e)
@@ -174,8 +189,8 @@ function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: '
   }
 
   return (
-    <View style={styles.card}>
-      {/* Header row: source label + engagement badge + questions pill */}
+    <View style={[styles.card, isExpanded && styles.cardExpanded, isHovered && styles.cardHovered]}>
+      {/* Header row: source label + fire badge */}
       <View style={styles.cardHeaderRow}>
         <Text style={styles.sourceLabel} numberOfLines={2}>{sourceLabel}</Text>
         <View style={styles.cardHeaderRight}>
@@ -184,98 +199,113 @@ function ArticleCard({ item, lang, sourceMap, bioMap }: { item: Article; lang: '
               <Text style={styles.engagementText}>🔥 {fmtNum(item.engagement.likes)}</Text>
             </View>
           )}
-          {item.engagement?.hn_score != null && item.engagement.hn_score > 0 && (
-            <View style={[styles.engagementPill, styles.engagementPillHN]}>
-              <Text style={[styles.engagementText, styles.engagementTextHN]}>▲ {fmtNum(item.engagement.hn_score)}</Text>
-            </View>
-          )}
-          {localQuestions && (
-            <TouchableOpacity onPress={() => setQuestionsOpen(v => !v)} style={styles.questionsPill}>
-              <Text style={styles.questionsPillText}>{questionsOpen ? '✕ Close' : '? 3 Questions'}</Text>
-            </TouchableOpacity>
-          )}
         </View>
       </View>
 
-      {/* Title */}
-      <Text style={styles.title}>{displayTitle}</Text>
-
-      {/* Summary */}
-      <View style={{ marginBottom: 4 }}>
-        {displaySummary.split('\n').filter((l: string) => l.trim()).map((line: string, i: number) => (
-          <BoldText key={i} text={line} style={styles.summary} />
-        ))}
+      {/* Title row: title (tap/hover) + questions pill when expanded */}
+      <View style={styles.titleRow}>
+        <Pressable
+          onPress={() => setIsExpanded(v => !v)}
+          onHoverIn={() => setIsHovered(true)}
+          onHoverOut={() => setIsHovered(false)}
+          style={{ flex: 1 }}
+        >
+          <Text style={styles.title}>{displayTitle}</Text>
+        </Pressable>
+        {isExpanded && (
+          localQuestions ? (
+            <TouchableOpacity onPress={() => setQuestionsOpen(v => !v)} style={[styles.questionsPill, { marginLeft: 8, alignSelf: 'flex-start' }]}>
+              <Text style={styles.questionsPillText}>{questionsOpen ? '✕ Close' : '? Questions'}</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity onPress={handleRefresh} disabled={refreshing} style={[styles.noQuestionsPill, { marginLeft: 8, alignSelf: 'flex-start' }]}>
+              <Text style={styles.noQuestionsText}>{refreshing ? '…' : '↻'}</Text>
+            </TouchableOpacity>
+          )
+        )}
       </View>
 
-      {/* Read more — only this opens the URL */}
-      <TouchableOpacity onPress={() => Linking.openURL(item.url)}>
-        <Text style={styles.readMore}>Read more →</Text>
-      </TouchableOpacity>
+      {/* Expanded content: summary + read more */}
+      {isExpanded && (
+        <>
+          {/* Summary — tap to collapse */}
+          <TouchableOpacity onPress={() => setIsExpanded(false)} activeOpacity={1}>
+            <View style={{ marginTop: 6, marginBottom: 6 }}>
+              {displaySummary.split('\n').filter((l: string) => l.trim()).map((line: string, i: number) => (
+                <MarkdownText key={i} text={line} style={styles.summary} />
+              ))}
+            </View>
+          </TouchableOpacity>
 
-      {/* Questions section */}
-      {questionsOpen && localQuestions && (
-        <View style={styles.questionsSection}>
-          {/* Divider + refresh */}
-          <View style={styles.questionsDivider}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>Questions</Text>
-            <TouchableOpacity onPress={handleRefresh} disabled={refreshing}>
-              <Text style={[styles.refreshIcon, refreshing && styles.refreshDisabled]}>↻</Text>
-            </TouchableOpacity>
-            <View style={styles.dividerLine} />
-          </View>
+          {/* Read more */}
+          <TouchableOpacity onPress={() => Linking.openURL(item.url)}>
+            <Text style={styles.readMore}>Read more →</Text>
+          </TouchableOpacity>
 
-          {/* Question rows */}
-          {questions.map((q, i) => {
-            const ans = answers[i]
-            return (
-              <View key={i}>
-                <TouchableOpacity onPress={() => handleAsk(i, q)} style={styles.questionRow}>
-                  <Text style={styles.questionText}>Q: {q}</Text>
+          {/* Questions section */}
+          {questionsOpen && localQuestions && (
+            <View style={styles.questionsSection}>
+              <View style={styles.questionsDivider}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>Questions</Text>
+                <TouchableOpacity onPress={handleRefresh} disabled={refreshing}>
+                  <Text style={[styles.refreshIcon, refreshing && styles.refreshDisabled]}>↻</Text>
                 </TouchableOpacity>
+                <View style={styles.dividerLine} />
+              </View>
 
-                {ans && (
-                  <View style={styles.answerBlock}>
-                    {/* Thinking block — show while streaming and no content yet */}
-                    {ans.streaming && !ans.content && (
-                      <View style={styles.thinkingBlock}>
-                        <Text style={styles.thinkingText}>
-                          {ans.thinking.length > 0 ? ans.thinking : 'Thinking...'}
-                        </Text>
-                      </View>
-                    )}
+              {questions.map((q, i) => {
+                const ans = answers[i]
+                return (
+                  <View key={i}>
+                    <TouchableOpacity onPress={() => handleAsk(i, q)} style={styles.questionRow}>
+                      <Text style={styles.questionText}>Q: {q}</Text>
+                    </TouchableOpacity>
 
-                    {/* Thought process accordion — show after content arrives if there was thinking */}
-                    {ans.thinking.length > 0 && ans.thinkingDone && (
-                      <TouchableOpacity
-                        onPress={() => setThinkingExpanded(prev => ({ ...prev, [i]: !prev[i] }))}
-                        style={styles.thinkingHeader}
-                      >
-                        <Text style={styles.thinkingHeaderText}>
-                          {thinkingExpanded[i] ? 'Thought process ▲' : 'Thought process ▼'}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                    {ans.thinking.length > 0 && ans.thinkingDone && thinkingExpanded[i] && (
-                      <View style={styles.thinkingBlock}>
-                        <Text style={styles.thinkingText}>{ans.thinking}</Text>
-                      </View>
-                    )}
+                    {ans && (
+                      <View style={styles.answerBlock}>
+                        {ans.streaming && !ans.content && (
+                          <View style={styles.thinkingBlock}>
+                            <Text style={styles.thinkingText}>
+                              {ans.thinking.length > 0 ? ans.thinking : 'Thinking...'}
+                            </Text>
+                          </View>
+                        )}
 
-                    {/* Answer content */}
-                    {ans.content.length > 0 && (
-                      <View style={styles.contentBlock}>
-                        <Text style={styles.contentText}>
-                          {ans.content}{ans.streaming ? ' ▌' : ''}
-                        </Text>
+                        {ans.thinking.length > 0 && ans.thinkingDone && (
+                          <TouchableOpacity
+                            onPress={() => setThinkingExpanded(prev => ({ ...prev, [i]: !prev[i] }))}
+                            style={styles.thinkingHeader}
+                          >
+                            <Text style={styles.thinkingHeaderText}>
+                              {thinkingExpanded[i] ? 'Thought process ▲' : 'Thought process ▼'}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                        {ans.thinking.length > 0 && ans.thinkingDone && thinkingExpanded[i] && (
+                          <View style={styles.thinkingBlock}>
+                            <Text style={styles.thinkingText}>{ans.thinking}</Text>
+                          </View>
+                        )}
+
+                        {ans.content.length > 0 && (
+                          <View style={styles.contentBlock}>
+                            {(ans.streaming ? ans.content + ' ▌' : ans.content)
+                              .split('\n')
+                              .filter((l: string) => l.trim())
+                              .map((line: string, j: number) => (
+                                <MarkdownText key={j} text={line} style={styles.contentText} />
+                              ))}
+                          </View>
+                        )}
                       </View>
                     )}
                   </View>
-                )}
-              </View>
-            )
-          })}
-        </View>
+                )
+              })}
+            </View>
+          )}
+        </>
       )}
     </View>
   )
@@ -289,26 +319,35 @@ export default function App() {
   const [lang, setLang] = useState<'en' | 'zh'>('en')
   const [sourceMap, setSourceMap] = useState<Record<string, string>>({})
   const [bioMap, setBioMap] = useState<Record<string, string>>({})
+  const [categoryMap, setCategoryMap] = useState<Record<string, string>>({})
+  const [activeCategory, setActiveCategory] = useState<'all' | 'industry' | 'technical_frontier' | 'career_community'>('all')
   const listRef = useRef<FlatList>(null)
+  const scrollOffsetRef = useRef(0)
+  const contentHeightRef = useRef<{ en: number; zh: number }>({ en: 0, zh: 0 })
+  const pendingProportionRef = useRef<number | null>(null)
+  const langRef = useRef(lang)
+  useEffect(() => { langRef.current = lang }, [lang])
 
   useEffect(() => {
     supabase
       .from('sources')
-      .select('id, name, metadata')
+      .select('id, name, metadata, category')
       .then(({ data }) => {
         if (data) {
           const sMap: Record<string, string> = {}
           const bMap: Record<string, string> = {}
-          data.forEach((s: { id: string; name: string; metadata?: { bio_map?: Record<string, string> } }) => {
+          const cMap: Record<string, string> = {}
+          data.forEach((s: { id: string; name: string; category?: string; metadata?: { bio_map?: Record<string, string> } }) => {
             sMap[s.id] = s.name
             if (s.metadata?.bio_map) Object.assign(bMap, s.metadata.bio_map)
+            if (s.category) cMap[s.id] = s.category
           })
           setSourceMap(sMap)
           setBioMap(bMap)
+          setCategoryMap(cMap)
         }
       })
   }, [])
-
 
   useEffect(() => {
     supabase
@@ -339,6 +378,15 @@ export default function App() {
     setPage(p)
   }
 
+  const handleCategoryChange = (cat: typeof activeCategory) => {
+    setActiveCategory(cat)
+    setPage(0)
+  }
+
+  const displayArticles = activeCategory === 'all'
+    ? articles
+    : articles.filter(a => categoryMap[a.source_id] === activeCategory)
+
   const pageNumbers = () => {
     const pages = []
     const start = Math.max(0, page - 2)
@@ -350,32 +398,76 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.headerRow}>
-        <Text style={styles.header}>News Feed</Text>
+        <Text style={styles.header}>Daily Feed</Text>
         <View style={styles.langToggle}>
           <TouchableOpacity
-            onPress={() => setLang('en')}
+            onPress={() => {
+              if (lang === 'en') return
+              const h = contentHeightRef.current.zh
+              pendingProportionRef.current = h > 0 ? scrollOffsetRef.current / h : 0
+              setLang('en')
+            }}
             style={[styles.langBtn, lang === 'en' && styles.langBtnActive]}
           >
             <Text style={[styles.langBtnText, lang === 'en' && styles.langBtnTextActive]}>EN</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={() => setLang('zh')}
+            onPress={() => {
+              if (lang === 'zh') return
+              const h = contentHeightRef.current.en
+              pendingProportionRef.current = h > 0 ? scrollOffsetRef.current / h : 0
+              setLang('zh')
+            }}
             style={[styles.langBtn, lang === 'zh' && styles.langBtnActive]}
           >
             <Text style={[styles.langBtnText, lang === 'zh' && styles.langBtnTextActive]}>中</Text>
           </TouchableOpacity>
         </View>
       </View>
+      <View style={styles.categoryBar}>
+        {([
+          ['all',                'All'],
+          ['industry',           'Industry'],
+          ['technical_frontier', 'Frontier'],
+          ['career_community',   'Career'],
+        ] as const).map(([key, label]) => (
+          <TouchableOpacity
+            key={key}
+            onPress={() => handleCategoryChange(key)}
+            style={[styles.categoryTab, activeCategory === key && styles.categoryTabActive]}
+          >
+            <Text style={[styles.categoryTabText, activeCategory === key && styles.categoryTabTextActive]}>
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
       {loading
-        ? <ActivityIndicator style={{ flex: 1 }} />
+        ? <ActivityIndicator style={{ flex: 1 }} color="#1A1A1A" />
         : <FlatList
             ref={listRef}
-            data={articles}
-            extraData={[sourceMap, lang]}
+            data={displayArticles}
+            extraData={[sourceMap, categoryMap, lang, activeCategory]}
             keyExtractor={item => item.id}
+            onScroll={({ nativeEvent }) => { scrollOffsetRef.current = nativeEvent.contentOffset.y }}
+            scrollEventThrottle={16}
+            onContentSizeChange={(_, h) => {
+              contentHeightRef.current[langRef.current] = h
+              if (pendingProportionRef.current !== null) {
+                const targetOffset = pendingProportionRef.current * h
+                pendingProportionRef.current = null
+                listRef.current?.scrollToOffset({ offset: targetOffset, animated: false })
+              }
+            }}
             renderItem={({ item }) => (
               <ArticleCard item={item} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
             )}
+            ListEmptyComponent={
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateText}>No articles yet.</Text>
+                <Text style={styles.emptyStateSubtext}>Check back after the next ingest cycle.</Text>
+              </View>
+            }
             ListFooterComponent={
               <View style={styles.pagination}>
                 <TouchableOpacity onPress={() => goTo(page - 1)} disabled={page === 0} style={[styles.pageBtn, page === 0 && styles.pageBtnDisabled]}>
@@ -398,47 +490,61 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container:            { flex: 1, backgroundColor: '#f5f5f5' },
-  headerRow:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12 },
-  header:               { fontSize: 24, fontWeight: 'bold' },
-  langToggle:           { flexDirection: 'row', borderRadius: 8, borderWidth: 1, borderColor: '#ddd', overflow: 'hidden' },
+  container:            { flex: 1, backgroundColor: '#F7F6F2' },
+  headerRow:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 14 },
+  header:               { fontSize: 22, fontWeight: '800', color: '#1A1A1A', letterSpacing: -0.5 },
+  langToggle:           { flexDirection: 'row', borderRadius: 8, borderWidth: 1, borderColor: '#E0DDD6', overflow: 'hidden' },
   langBtn:              { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#fff' },
-  langBtnActive:        { backgroundColor: '#007AFF' },
-  langBtnText:          { fontSize: 14, color: '#333', fontWeight: '500' },
+  langBtnActive:        { backgroundColor: '#1A1A1A' },
+  langBtnText:          { fontSize: 13, color: '#6B6560', fontWeight: '500' },
   langBtnTextActive:    { color: '#fff', fontWeight: '600' },
-  card:                 { backgroundColor: '#fff', margin: 8, padding: 16, borderRadius: 8 },
-  cardHeaderRow:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
-  cardHeaderRight:      { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 },
-  sourceLabel:          { fontSize: 12, color: '#aaa', marginTop: 2, flex: 1 },
+  card:                 { backgroundColor: '#fff', marginHorizontal: 12, marginVertical: 6, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#E0DDD6' },
+  cardExpanded:         { backgroundColor: '#F0EDE8' },
+  cardHovered:          { backgroundColor: '#EAE7E2' },
+  cardHeaderRow:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 },
+  cardHeaderRight:      { flexDirection: 'row', alignItems: 'center', flexShrink: 0, marginLeft: 8 },
+  titleRow:             { flexDirection: 'row', alignItems: 'flex-start' },
+  sourceLabel:          { fontSize: 11, color: '#9E9690', fontWeight: '500', letterSpacing: 0.3, marginTop: 2, flex: 1 },
   engagementPill:       { backgroundColor: '#FFF3E0', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3 },
   engagementPillHN:     { backgroundColor: '#FFF8E1' },
   engagementText:       { fontSize: 11, fontWeight: '600', color: '#E65100' },
   engagementTextHN:     { color: '#FF6F00' },
-  questionsPill:        { backgroundColor: '#f0f0f0', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  questionsPillText:    { fontSize: 12, color: '#555', fontWeight: '500' },
-  source:               { fontSize: 12, color: '#888', marginBottom: 4 },
-  title:                { fontSize: 16, fontWeight: '600', marginBottom: 8 },
-  summary:              { fontSize: 14, color: '#333', lineHeight: 20 },
-  readMore:             { fontSize: 12, color: '#007AFF', marginTop: 8 },
-  questionsSection:     { marginTop: 12 },
-  questionsDivider:     { flexDirection: 'row', alignItems: 'center', marginBottom: 10, gap: 8 },
-  dividerLine:          { flex: 1, height: 1, backgroundColor: '#eee' },
-  dividerText:          { fontSize: 12, color: '#999', fontWeight: '500' },
-  refreshIcon:          { fontSize: 16, color: '#007AFF' },
-  refreshDisabled:      { fontSize: 16, color: '#ccc' },
+  expandChevron:        { fontSize: 12, color: '#9E9690', marginLeft: 6 },
+  questionsPillRow:     { flexDirection: 'row' as const, marginTop: 10 },
+  questionsPill:        { backgroundColor: '#1A1A1A', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  questionsPillText:    { fontSize: 12, color: '#fff', fontWeight: '600' },
+  noQuestionsPill:      { borderWidth: 1, borderColor: '#E0DDD6', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4 },
+  noQuestionsText:      { fontSize: 13, color: '#9E9690' },
+  title:                { fontSize: 18, fontWeight: '700', color: '#1A1A1A', letterSpacing: -0.3, marginBottom: 10 },
+  summary:              { fontSize: 14, color: '#3D3935', lineHeight: 22 },
+  readMore:             { fontSize: 12, color: '#6B6560', fontWeight: '500', marginTop: 10 },
+  questionsSection:     { marginTop: 14 },
+  questionsDivider:     { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 8 },
+  dividerLine:          { flex: 1, height: 1, backgroundColor: '#E0DDD6' },
+  dividerText:          { fontSize: 11, color: '#9E9690', fontWeight: '600', letterSpacing: 0.5 },
+  refreshIcon:          { fontSize: 16, color: '#1A1A1A' },
+  refreshDisabled:      { fontSize: 16, color: '#C8C4BE' },
   questionRow:          { paddingVertical: 8 },
-  questionText:         { fontSize: 14, color: '#333', lineHeight: 20 },
+  questionText:         { fontSize: 14, color: '#3D3935', lineHeight: 20 },
   answerBlock:          { marginBottom: 8 },
   thinkingHeader:       { paddingVertical: 4 },
-  thinkingHeaderText:   { fontSize: 12, color: '#999', fontStyle: 'italic' },
-  thinkingBlock:        { backgroundColor: '#f8f8f8', borderRadius: 6, padding: 10, marginTop: 4 },
-  thinkingText:         { fontSize: 12, color: '#999', fontStyle: 'italic', lineHeight: 18 },
-  contentBlock:         { backgroundColor: '#f0f4ff', borderRadius: 6, padding: 10, marginTop: 6 },
-  contentText:          { fontSize: 14, color: '#1a1a2e', lineHeight: 22 },
+  thinkingHeaderText:   { fontSize: 12, color: '#9E9690', fontStyle: 'italic' },
+  thinkingBlock:        { backgroundColor: '#F0EDE8', borderRadius: 8, padding: 10, marginTop: 4 },
+  thinkingText:         { fontSize: 12, color: '#9E9690', fontStyle: 'italic', lineHeight: 18 },
+  contentBlock:         { backgroundColor: '#F0EDE8', borderRadius: 8, padding: 12, marginTop: 6 },
+  contentText:          { fontSize: 14, color: '#3D3935', lineHeight: 22 },
+  emptyState:           { alignItems: 'center', justifyContent: 'center', padding: 48 },
+  emptyStateText:       { fontSize: 16, fontWeight: '600', color: '#1A1A1A', marginBottom: 6 },
+  emptyStateSubtext:    { fontSize: 14, color: '#9E9690', textAlign: 'center' },
   pagination:           { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', padding: 16, gap: 8 },
-  pageBtn:              { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#ddd' },
-  pageBtnActive:        { backgroundColor: '#007AFF', borderColor: '#007AFF' },
+  pageBtn:              { width: 36, height: 36, borderRadius: 18, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#E0DDD6' },
+  pageBtnActive:        { backgroundColor: '#1A1A1A', borderColor: '#1A1A1A' },
   pageBtnDisabled:      { opacity: 0.3 },
-  pageBtnText:          { fontSize: 16, color: '#333' },
+  pageBtnText:          { fontSize: 16, color: '#3D3935' },
   pageBtnTextActive:    { color: '#fff', fontWeight: '600' },
+  categoryBar:          { flexDirection: 'row', paddingHorizontal: 12, paddingBottom: 10, gap: 6 },
+  categoryTab:          { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 16, borderWidth: 1, borderColor: '#E0DDD6', backgroundColor: '#fff' },
+  categoryTabActive:    { backgroundColor: '#1A1A1A', borderColor: '#1A1A1A' },
+  categoryTabText:      { fontSize: 12, color: '#6B6560', fontWeight: '500' },
+  categoryTabTextActive: { color: '#fff', fontWeight: '600' },
 })

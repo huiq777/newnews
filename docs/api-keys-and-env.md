@@ -16,12 +16,11 @@ This document is the authoritative reference for every secret in the system. Bef
 
 | Variable | Where to Get It | Cloudflare Workers secrets | Supabase Edge Function Secrets | Expo Frontend Env |
 |---|---|---|---|---|
-| `SUPABASE_URL` | Supabase → Settings → API | Yes (all 3 workers) | No (use built-in Supabase client) | Yes (`EXPO_PUBLIC_SUPABASE_URL`) |
+| `SUPABASE_URL` | Supabase → Settings → API | Yes (all workers) | No (use built-in Supabase client) | Yes (`EXPO_PUBLIC_SUPABASE_URL`) |
 | `SUPABASE_ANON_KEY` | Supabase → Settings → API | No | No | Yes (`EXPO_PUBLIC_SUPABASE_ANON_KEY`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API | **Yes — all 3 workers. ONLY HERE.** | No | **Never** |
-| `GROQ_API_KEY` | console.groq.com | Yes (`process-queue` worker) | Yes (`chat-live` + `chat-rag` functions) | **Never** |
-| `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`chat-rag` function) | **Never** |
-| `X_BEARER_TOKEN` | developer.twitter.com → Your App → Keys and Tokens | Yes (`ingest-x` worker) | No | **Never** |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API | **Yes — all workers. ONLY HERE.** | No | **Never** |
+| `GROQ_API_KEY` | console.groq.com | Yes (`process-queue`, `ingest-builders`) | Yes (`answer-question`, `refresh-questions`) | **Never** |
+| `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
 | `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-feishu-digest` worker) | No | **Never** |
 
 ---
@@ -45,14 +44,10 @@ wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put COHERE_API_KEY
 
-# From workers/ingest-x/:
-wrangler secret put SUPABASE_URL
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put X_BEARER_TOKEN
-
 # From workers/ingest-builders/:
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put GROQ_API_KEY
 
 # From workers/send-feishu-digest/:
 wrangler secret put SUPABASE_URL
@@ -77,8 +72,8 @@ wrangler secret put GROQ_API_KEY
 Go to: Supabase Dashboard → Edge Functions → Manage Secrets
 
 Add:
-- `GROQ_API_KEY` (used by `chat-live` and `chat-rag`)
-- `COHERE_API_KEY` (used by `chat-rag`)
+- `GROQ_API_KEY` (used by `answer-question` and `refresh-questions`)
+- `COHERE_API_KEY` (used by `answer-question` for query embedding)
 
 These are accessible inside Edge Functions via `Deno.env.get('COHERE_API_KEY')`.
 
@@ -95,7 +90,7 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOi...
 
 The `EXPO_PUBLIC_` prefix is required by Expo to make variables available in client-side code. Variables without this prefix are not accessible in the browser bundle.
 
-For Vercel deployment, add these same two variables in: Vercel → Project → Settings → Environment Variables.
+For Cloudflare Pages deployment, add these same two variables in: Pages → Settings → Environment variables → Production. They are baked into the static bundle at build time — must be present before `npx expo export --platform web` runs.
 
 ---
 
@@ -107,8 +102,8 @@ For Vercel deployment, add these same two variables in: Vercel → Project → S
 | `GROQ_API_KEY` in Expo env | Your Groq API quota is exposed to anyone who views your frontend bundle |
 | `SUPABASE_ANON_KEY` missing from Expo env | Frontend cannot connect to Supabase — auth and data fetching both fail |
 | `COHERE_API_KEY` missing from Worker secrets | `embed-batch` Worker fails silently — articles never get embeddings |
-| `GROQ_API_KEY` missing from Edge Function secrets | `chat-live` and `chat-rag` cannot call Groq — both chatbots return 500 |
-| `COHERE_API_KEY` missing from Edge Function secrets | `chat-rag` cannot generate query embeddings — chatbot returns 500 |
+| `GROQ_API_KEY` missing from Edge Function secrets | `answer-question` and `refresh-questions` cannot call Groq — both return 500 |
+| `COHERE_API_KEY` missing from Edge Function secrets | `answer-question` cannot generate query embeddings — RAG returns 500 |
 
 ---
 
@@ -120,6 +115,6 @@ For Vercel deployment, add these same two variables in: Vercel → Project → S
 | Cloudflare Workers | 100,000 requests/day | ~300/day |
 | Groq | Free (rate-limited) | ~50–100 API calls/day |
 | Cohere | 1,000 API calls/month | ~30 batch calls/month |
-| Vercel | 100GB bandwidth | Minimal |
+| Cloudflare Pages | Unlimited bandwidth | Static site hosting |
 
 **Cohere free trial note:** The trial API key expires after 90 days. After expiry it becomes pay-as-you-go (~$0.0001/1K tokens — negligible at v1 scale, but no longer free). Set a calendar reminder.

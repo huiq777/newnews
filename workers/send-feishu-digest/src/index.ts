@@ -68,7 +68,7 @@ function buildFeishuCard(
   for (const article of articles) {
     const xHandle = article.url.match(/x\.com\/([^/]+)\/status\//)?.[1]
     const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
-    const sourceName = xHandle ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}` : (sourceMap[article.source_id] || 'Unknown')
+    const sourceName = xHandle ? `X - @${xHandle}${xBio ? ` - **${xBio}**` : ''}` : (sourceMap[article.source_id] || 'Unknown')
     const title = article.title_zh || article.title_en || 'Untitled'
     const bullets = extractBullets(article.summary_zh, 3)
 
@@ -76,7 +76,7 @@ function buildFeishuCard(
       tag: 'div',
       text: {
         tag: 'lark_md',
-        content: `**[${title}](${article.url})**\n\`${sourceName}\`${article.engagement?.likes ? ` · 🔥 ${article.engagement.likes} likes` : article.engagement?.hn_score ? ` · ▲ ${article.engagement.hn_score} HN` : ''}${bullets ? '\n' + bullets : ''}`,
+        content: `**[${title}](${article.url})**\n${sourceName}${article.engagement?.likes ? ` · 🔥 **${article.engagement.likes}** likes` : ''}${bullets ? '\n' + bullets : ''}`,
       },
     })
     elements.push({ tag: 'hr' })

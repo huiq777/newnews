@@ -34,28 +34,36 @@ When operating as AI SWE on this project:
 
 ---
 
-## Current Implementation State (as of 2026-03-21)
+## Current Implementation State (as of 2026-03-23)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| RSS ingestion | ✅ Live | Every 4h (`0 */4 * * *`); 10 sources |
+| RSS ingestion | ✅ Live | Every 4h (`0 */4 * * *`); active sources only |
 | Full article scraping | ✅ Live | HTMLRewriter in process-queue; 8s timeout; paywall fallback |
-| LLM summarization | ✅ Live | Groq llama-3.3-70b-versatile; bilingual EN+ZH |
-| Question generation | ✅ Live | 3 EN + 3 ZH per article; all-or-nothing |
+| LLM summarization | ✅ Live | Groq llama-3.3-70b-versatile; bilingual EN+ZH; 2-3 sentences/bullet; specific metrics required |
+| Question generation | ✅ Live | 3 EN + 3 ZH per article; all-or-nothing; `↻` pill to regenerate |
 | Cohere embeddings | ✅ Live | embed-batch; 2000-char input; article_content preferred |
 | RAG Q&A | ✅ Live | match_articles RPC; top 3 related; Groq streaming SSE |
 | article_content column | ✅ Live | daily_news.article_content TEXT; NULL for WeChat (bridge handles) |
 | match_articles RPC | ✅ Live | pgvector cosine similarity; HNSW index active |
-| `ingest-builders` worker | ✅ Live | Daily 6am UTC; 32 builder tweets from follow-builders feed-x.json; GROQ_API_KEY required |
-| `send-feishu-digest` worker | ✅ Live | Daily 12pm EST (17:00 UTC); Chinese (summary_zh + title_zh); `X - @handle - role` format |
+| `ingest-builders` worker | ✅ Live | Daily 6am UTC; fetches feed-x.json (tweets) + feed-podcasts.json (episodes); GROQ_API_KEY required |
+| `send-feishu-digest` worker | ✅ Live | Daily 12pm EST (17:00 UTC); Chinese (summary_zh + title_zh); `X - @handle - role` format; all 3 ZH bullets |
 | AI bio extraction | ✅ Live | Batch Groq call in ingest-builders; verbatim role extraction; cached in sources.metadata |
 | `sources.metadata` JSONB | ✅ Live | Stores `bio_map: {handle: "role"}` — shared by Feishu + App.tsx |
 | `ingest-x` worker | ❌ Deleted | Removed to free Cloudflare cron slot (5-trigger free tier limit hit) |
-| Engagement data pipeline | ✅ Live | `raw_ingestion.metadata JSONB` + `daily_news.engagement JSONB`; tweets: `{likes, retweets}`; RSS: `{hn_score, hn_comments}` via HN Algolia API |
-| Upgraded summary prompt | ✅ Live | 2-3 sentences per bullet; specific metrics required; no vague generalizations |
-| Engagement UI badges | ✅ Live | App.tsx: 🔥 N likes (amber pill) or ▲ N HN (yellow pill); `fmtNum()` K-suffix formatting |
-| Feishu all 3 ZH bullets | ✅ Live | Was showing 2 bullets; now all 3 from summary_zh |
-| Web deployment | ❌ Dev only | Cloudflare Pages deployment is Stage 4 |
+| Hacker News source | ❌ Disabled | `is_active=false`; content was comment threads not articles; HN Algolia engagement fetch commented out in process-queue |
+| Engagement data pipeline | ✅ Live | `raw_ingestion.metadata JSONB` + `daily_news.engagement JSONB`; tweets: `{likes, retweets}` only |
+| Engagement UI badges | ✅ Live | App.tsx: 🔥 N likes (amber pill) for tweets; HN badge disabled |
+| Podcast ingestion | ✅ Live | `ingest-builders` fetches `feed-podcasts.json`; schema: `{podcasts:[{name,title,url,transcript}]}`; batch INSERT; `podcast` source_type |
+| Stage 3 UI redesign | ✅ Live | Warm editorial aesthetic; `MarkdownText` component (bullets + bold); answer Markdown; empty states; `scrollToOffset` lang toggle |
+| Web deployment | ❌ Dev only | Cloudflare Pages deployment is Stage 4 ← NEXT |
+| Apify tweet ingestion | ✅ Live | `supabase/functions/ingest-apify-tweets`; Apify webhook (RUN_SUCCEEDED); validates APIFY_WEBHOOK_SECRET; fetches dataset; batch-inserts into raw_ingestion; 6 handles: ch402, DarioAmodei, simonw, xai, paulg, emollick |
+| Tweet-specific Groq prompt | ✅ Live | `process-queue` branches on `isTweet` (x.com/status URL); `TWEET_SYSTEM_PROMPT` constant at module top; title: `@handle said X` / `@original said X, retweeted by @handle`; same 3-bullet body |
+| GitHub Trending ingestion | ✅ Live | Added to ingest-builders; HTML scrape of `github.com/trending?spoken_language_code=`; regex parse per `<article`; no auth |
+| Product Hunt ingestion | ✅ Live | Added to ingest-builders; GraphQL API top 30 by VOTES; `PRODUCTHUNT_API_TOKEN` wrangler secret required |
+| Nowcoder ingestion | ✅ Live | Added to ingest-builders; public JSON API `gw-c.nowcoder.com`; type 74 → feed detail, type 0 → discuss; no auth |
+| arXiv ingestion | ✅ Live | Added to ingest-builders; cs.AI + cs.LG; top 10 per category; Atom API; no auth |
+| Reddit ingestion | ✅ Live | Added to ingest-builders; r/MachineLearning, r/cscareerquestions, r/layoffs; public JSON API; no auth |
 | iOS build | ❌ Not started | Expo EAS is Stage 5 |
 
 ---
@@ -78,28 +86,59 @@ process-queue Worker
          fallback: stripHtml(raw_content) if scraped < 500 chars
       2. Determine engagement:
          - x.com/status URL → read article.metadata → {likes, retweets}
-         - other URLs → fetchHNEngagement() via HN Algolia API → {hn_score, hn_comments} or null
+         - other URLs → engagement = null (HN Algolia disabled; HN source is inactive)
       3. POST to Groq → bilingual title + 3-bullet summary (2-3 sentences/bullet; specific metrics required)
       4. POST to Groq ×2 parallel → 3 EN + 3 ZH questions
       5. INSERT INTO daily_news (article_content, summaries, questions, engagement)
       6. PATCH daily_news.article_content for existing URLs (duplicate URL = silent no-op on INSERT)
       7. PATCH raw_ingestion status='done'
   → error: increment retry_count; status='error' after 3 failures (no backoff)
-  (subrequest count: ~41/50 — monitor; approaching limit)
+  (subrequest count: ~36/50 — HN fetch removed)
 
 Daily @ 6am UTC
 ingest-builders Worker (requires GROQ_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-  → GET sources WHERE source_type='github_feed' → get source.id
+  → GET sources WHERE source_type IN (github_feed, podcast) AND is_active=true (1 subrequest)
+      split into: builderSource (github_feed) + podcastSource (podcast)
+  ── Builder tweets ──
   → fetch feed-x.json from GitHub (public, no auth)
   → extractAccounts(rawData) → [{handle, bio, tweets:[]}]  (reads data.x array)
   → ONE batch Groq call: extractBioMap() — all bios in one prompt
       system prompt: verbatim extraction; people = role @ company; products = "Name is X @Co"
       response: flat JSON {"handle": "role"} — JSONL fallback parser handles both formats
-  → PATCH sources.metadata = {bio_map: {...}} for source.id
-  → flatMap(accounts → tweets) → filter valid (id + text + url)
-  → INSERT raw_ingestion (url=tweet.url, raw_content="@handle: tweet text",
-      metadata={likes, retweets}) ON CONFLICT DO NOTHING
-  (subrequest count: ~36/50 — do NOT add per-tweet batch ops or limit will be exceeded)
+  → PATCH sources.metadata = {bio_map: {...}} for builderSource.id
+  → filter valid tweets (id + text + url) → Promise.all INSERT one per tweet
+      raw_content = "@handle: tweet text"; metadata = {likes, retweets}; ON CONFLICT DO NOTHING
+  ── Podcasts ──
+  → fetch feed-podcasts.json from GitHub (public, no auth)
+  → extractPodcasts(rawData) → [{name, title, url, transcript}]  (reads data.podcasts array)
+  → filter episodes with url + transcript
+  → ONE batch POST to raw_ingestion — all episodes in single subrequest; ON CONFLICT DO NOTHING
+      raw_content = "${episode.name}: ${episode.title}\n\n${episode.transcript}"
+  ── GitHub Trending ──
+  → fetch https://github.com/trending?spoken_language_code= (HTML, no auth)
+  → split on <article; regex-extract repo path, col-9 description, stargazers count
+  → raw_content = "owner/repo: description (★ N stars today)"
+  ── Product Hunt ──
+  → POST https://api.producthunt.com/v2/api/graphql (top 30 by VOTES)
+  → headers: Authorization Bearer PRODUCTHUNT_API_TOKEN, Accept: application/json
+  → raw_content = "name: tagline (△ N votes)"
+  ── Nowcoder ──
+  → GET gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc?size=20&_={ts}&t=
+  → type 74 → nowcoder.com/feed/main/detail/{uuid}; type 0 → nowcoder.com/discuss/{id}
+  → raw_content = title text
+  ── arXiv ──
+  → loop over all arxiv sources (cs.AI, cs.LG)
+  → GET export.arxiv.org/api/query?search_query=cat:{category}&max_results=10&sortBy=submittedDate&sortOrder=descending
+  → Atom XML; regex-extract <entry> blocks → id, title, summary
+  → url = https://arxiv.org/abs/{id}; raw_content = "{title}\n\n{abstract}"; metadata = { category }
+  ── Reddit ──
+  → loop over all reddit sources (r/MachineLearning, r/cscareerquestions, r/layoffs)
+  → GET reddit.com/r/{subreddit}/hot.json?limit=25 with User-Agent: NewsProject/1.0
+  → parse data.children[*].data; link posts → post.url; self-posts → https://reddit.com{permalink}
+  → raw_content = "r/{subreddit}: {title}"; metadata = { score, num_comments, subreddit }
+  ── Combined batch INSERT ──
+  → all 5 sources in one POST to raw_ingestion (ON CONFLICT DO NOTHING)
+  (subrequest count: ~47/50)
 
 Every 5 min
 embed-batch Worker
@@ -119,9 +158,22 @@ send-feishu-digest Worker (requires SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, FEI
         sourceName = xHandle ? "X - @handle - role" : sourceMap[source_id]
         title = title_zh || title_en
         bullets = all 3 bullets from summary_zh
-        engagement badge = "🔥 N likes" (tweets) or "▲ N HN" (RSS) if engagement exists
+        engagement badge = "🔥 N likes" for tweets only (HN badge disabled)
   → POST to FEISHU_WEBHOOK_URL
   → always sends (even if 0 articles — sends "No articles today")
+
+Daily @ 6:30am UTC (Apify Scheduler — external, no CF cron slot)
+ingest-apify-tweets Edge Function (webhook-triggered on RUN_SUCCEEDED)
+  → Apify fires POST to https://<project>.supabase.co/functions/v1/ingest-apify-tweets
+  → validate Authorization: Bearer <APIFY_WEBHOOK_SECRET>
+  → extract eventData.datasetId from webhook body
+  → GET https://api.apify.com/v2/datasets/{datasetId}/items?token={APIFY_API_KEY}
+  → SELECT sources WHERE source_type='apify_tweet' AND is_active=true → source.id
+  → map each tweet: url=item.url, raw_content="@{item.author.userName}: {item.text}",
+                    metadata={likes: item.likeCount, retweets: item.retweetCount}
+  → batch POST to raw_ingestion (Prefer: resolution=ignore-duplicates)
+  → process-queue picks up rows automatically (next 15-min cycle)
+      → isTweet=true → tweet-specific Groq prompt (title + 3-bullet summary)
 
 On user question (Supabase Edge Function)
 answer-question
@@ -140,11 +192,18 @@ answer-question
 | Source | Scraping | Raw Content | Notes |
 |--------|----------|-------------|-------|
 | TechCrunch, Ars Technica, The Verge | ✅ Scrapes well | RSS snippet ~200-500 chars | Full prose 3000-15000 chars |
-| Hacker News | ⚠️ Scrapes HN page, not linked article | RSS discussion text ~6000 chars | HN = link aggregator; no article body |
+| Hacker News | ❌ **Disabled** (`is_active=false`) | — | Content was HN comment threads, not linked articles. Re-enable only after fixing scraper to follow the linked URL instead of the HN discussion page |
 | Founder Park (wechat2rss) | ❌ WeChat blocks fetch | Bridge HTML ~23K raw → ~2600 stripped | stripHtml() gives usable Chinese text |
 | 极客公园 (wechat2rss) | ❌ WeChat blocks fetch | Bridge HTML ~42K raw → ~6000 stripped | Better bridge extraction |
 | Short WeChat URLs (mp.weixin.qq.com/s/...) | ❌ Blocked | Sometimes empty raw_content | SKIP (empty) — expected behavior |
-| follow-builders (github_feed) | ❌ Not attempted | Tweet text ~280 chars via `@handle: text` | Groq summarizes tweet directly; quality lower than articles; bio extracted separately |
+| follow-builders tweets (github_feed) | ❌ Not attempted | Tweet text ~280 chars via `@handle: text` | Groq summarizes tweet directly; quality lower than articles; bio extracted separately |
+| follow-builders podcasts (podcast) | ❌ Not attempted | Full YouTube transcript (very long) | Groq summarizes transcript directly; high content quality; `process-queue` handles automatically |
+| Apify-scraped tweets (apify_tweet) | ❌ Not attempted | Tweet text ~280 chars via `@handle: text`; quote-tweets include retweeted handle in title | Same `isTweet` detection via `x.com/status` URL; tweet-specific Groq prompt; engagement from `item.likeCount`/`item.retweetCount` |
+| GitHub Trending (github_trending) | ❌ Not attempted | `owner/repo: description (★ N stars today)` | process-queue scrapes github.com/owner/repo for README; falls back to raw_content |
+| Product Hunt (producthunt) | ❌ Not attempted | `name: tagline (△ N votes)` | process-queue scrapes producthunt.com post; raw_content is solid fallback |
+| Nowcoder (nowcoder) | ❌ Not attempted | title text only | process-queue scrapes full discussion page |
+| arXiv (arxiv) | ✅ process-queue scrapes abstract page | `{title}\n\n{abstract}` (~300–500 words) | High-quality academic abstracts; process-queue scrapes arxiv.org/abs/{id} for full abstract HTML |
+| Reddit (reddit) | ✅ link posts scrape external URL; self-posts use title | `r/{subreddit}: {title}` | Link posts (`is_self=false`): process-queue scrapes the external article; self-posts: raw_content is the ceiling |
 
 WeChat scraping will always fail. RSS bridge content after `stripHtml()` is the ceiling. Do not attempt to fix this — it is by design.
 
@@ -236,11 +295,20 @@ WHERE status IN ('done', 'error');
 ### 13. Cloudflare Workers subrequest limit: 50 per invocation
 - Free tier hard cap: **50 subrequests** per Worker invocation (scheduled or fetch trigger)
 - Count every outbound `fetch()`: DB reads, DB writes, Groq, Cohere, GitHub, HN Algolia, etc.
-- **ingest-builders** current count: 1 (sources GET) + 1 (feed-x.json) + 1 (Groq bio) + 1 (PATCH sources.metadata) + 32 (raw_ingestion INSERTs) = **36/50**
-- **process-queue** current count: 1 (SELECT) + 5 (PATCH processing) + 5×(1 scrape + 1 HN + 1 Groq summary + 2 Groq questions + 1 INSERT + 1 PATCH content + 1 PATCH done) = **~41/50**
+- **ingest-builders** current count: 1 (sources GET — combined 7 source_types) + 1 (feed-x.json) + 1 (Groq bio) + 1 (PATCH sources.metadata) + 32 (tweet INSERTs) + 1 (feed-podcasts.json) + 1 (podcast batch INSERT) + 1 (GitHub Trending HTML) + 1 (Product Hunt GraphQL) + 1 (Nowcoder API) + 1 (arXiv cs.AI) + 1 (arXiv cs.LG) + 1 (Reddit r/MachineLearning) + 1 (Reddit r/cscareerquestions) + 1 (Reddit r/layoffs) + 1 (combined batch INSERT) = **47/50**
+- **process-queue** current count: 1 (SELECT) + 5 (PATCH processing) + 5×(1 scrape + 1 Groq summary + 2 Groq questions + 1 INSERT + 1 PATCH content + 1 PATCH done) = **~36/50** (HN fetch removed)
 - When limit is hit: Worker throws immediately — no partial completion, no error row written
 - Do NOT add per-item batch loops (e.g., 32 PATCH calls) — they blow the limit instantly
 - Upgrade path: Cloudflare Workers Paid ($5/mo) raises limit to 1,000 subrequests
+
+### 14. Apify webhook payload structure
+- Webhook body: `{ eventType: "ACTOR.RUN.SUCCEEDED", eventData: { actorId, runId, datasetId } }`
+- Extract `datasetId` from `eventData`, NOT from top-level
+- Dataset items endpoint: `GET /v2/datasets/{datasetId}/items?token={APIFY_API_KEY}`
+- Tweet fields used: `url` (unique key), `text` (content), `author.userName` (handle), `likeCount`, `retweetCount`
+- Quote-tweet detection: item has `isRetweet` or `quotedTweet` field — the retweeted person's handle comes from `quotedTweet.author.userName`
+- Webhook security: validate `Authorization: Bearer <APIFY_WEBHOOK_SECRET>` header — reject 401 if missing/wrong
+- `include:nativeretweets: false` in Apify config means pure RTs are excluded; quote-tweets (commentary added) are included
 
 ### 12. Groq format inconsistency in structured output
 - Groq may return JSONL (newline-delimited objects `{"handle": "karpathy", "role": "Director"}`) instead of a flat JSON object `{"karpathy": "Director"}` even when the system prompt explicitly specifies flat JSON
@@ -271,7 +339,7 @@ engagement JSONB,                        -- {likes, retweets} for tweets | {hn_s
 created_at TIMESTAMPTZ
 
 -- sources: feed registry (public read via RLS)
-id, name, rss_url (UNIQUE), source_type (rss/x_api/wechat/github_feed), is_active,
+id, name, rss_url (UNIQUE), source_type (rss/x_api/wechat/github_feed/podcast), is_active,
 metadata JSONB   -- {bio_map: {handle: "role"}} for github_feed sources; NULL for others
 
 -- match_articles RPC
@@ -288,13 +356,14 @@ RETURNS TABLE (id uuid, title text, summary text, score float)
 |------|---------|---------------|
 | `workers/ingest-rss/src/index.ts` | Daily RSS fetch → raw_ingestion | `parseRSS()`, `extract()` |
 | `workers/ingest-x/src/index.ts` | **Deleted** — freed cron slot; was disabled anyway ($100/mo X API) | — |
-| `workers/ingest-builders/src/index.ts` | follow-builders feed-x.json → raw_ingestion + bio extraction + engagement metadata | `extractAccounts()`, `extractBioMap()`, `extractAuthor()` |
-| `workers/send-feishu-digest/src/index.ts` | daily_news → Feishu webhook card | Daily 12pm EST (17:00 UTC); all 3 ZH bullets; engagement badge; FEISHU_WEBHOOK_URL required |
-| `workers/process-queue/src/index.ts` | Scrape + summarize + questions + engagement → daily_news | `fetchArticleContent()`, `fetchHNEngagement()`, `processArticle()`, `generateQuestions()`, `insertAndMarkDone()`, `stripHtml()` |
+| `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (episodes) + GitHub Trending (HTML) + Product Hunt (GraphQL) + Nowcoder (JSON API) + arXiv (Atom API) + Reddit (JSON API) → raw_ingestion | `extractAccounts()`, `extractBioMap()`, `extractAuthor()`, `extractPodcasts()` |
+| `workers/send-feishu-digest/src/index.ts` | daily_news → Feishu webhook card | Daily 12pm EST (17:00 UTC); all 3 ZH bullets; 🔥 likes badge for tweets only |
+| `workers/process-queue/src/index.ts` | Scrape + summarize + questions + engagement → daily_news | `fetchArticleContent()`, `processArticle()`, `generateQuestions()`, `insertAndMarkDone()`, `stripHtml()` — `fetchHNEngagement()` disabled |
 | `workers/embed-batch/src/index.ts` | Cohere batch embed → daily_news.embedding | Scheduled handler |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG Q&A | RAG + Groq SSE |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question regeneration | No RAG dependency |
-| `news-app/App.tsx` | Full Expo frontend | `handleAsk()`, pagination, bilingual toggle |
+| `supabase/functions/ingest-apify-tweets/index.ts` | ✅ Live — Stage 4.5 | Apify webhook receiver; validates `APIFY_WEBHOOK_SECRET`; reads `resource.defaultDatasetId`; batch-inserts into `raw_ingestion`; deploy with `--no-verify-jwt` |
+| `news-app/App.tsx` | Full Expo frontend — warm editorial redesign | `MarkdownText()` (bullets+bold), `handleAsk()`, `handleRefresh()`, `scrollToOffset` lang toggle, pagination |
 | `docs/architecture.md` | Design decisions + rationale | Read before changing patterns |
 | `docs/schema.md` | DB schema (partially outdated — verify against deployed) | Reference for migrations |
 | `current-state.md` | Live deployment status | Update after every deploy |
@@ -448,7 +517,9 @@ Expected log: `Feishu digest sent: N articles for YYYY-MM-DD` → check Feishu g
 
 ---
 
-### Stage 2 — Source Quality Audit ⏳ PENDING (data wiped 2026-03-22 — re-run after 3+ days of ingest)
+### Stage 2 — Source Quality Audit ⏳ PENDING (data wiped 2026-03-22 — re-run after 2026-03-25)
+
+**Note: Hacker News already manually disabled** — exclude from audit. Only RSS + WeChat sources need review.
 
 **Problem:** Unknown which feeds produce high-signal vs low-signal content. Need data before deciding to add/remove sources.
 
@@ -489,54 +560,256 @@ ORDER BY compression_ratio DESC NULLS LAST;
 
 ---
 
-### Stage 2.5 — follow-builders Podcast Ingestion (feed-podcasts.json) ← NEXT
+### Stage 2.5 — follow-builders Podcast Ingestion ✅ COMPLETE
 
-**Gate:** After Stage 2 audit decision is made. Podcast schema must be inspected before implementing.
+**Schema discovered:** `{ podcasts: [{source, name, title, videoId, url, publishedAt, transcript}] }` — YouTube transcripts, full text, very long.
 
-**Context:** AI-PM-skill.md lists 5 podcasts (Latent Space, Training Data, No Priors, etc.). follow-builders provides `feed-podcasts.json`. `ingest-builders` only fetches `feed-x.json` today — podcasts not wired.
+**What was built:**
+- `ingest-builders` now fetches both `feed-x.json` AND `feed-podcasts.json` in one scheduled run
+- Combined sources query: `source_type IN (github_feed, podcast)` — saves 1 subrequest vs two separate queries
+- `extractPodcasts()` function reads `data.podcasts` array
+- Podcast episodes batch-inserted in ONE PostgREST POST (not per-episode like tweets)
+- `raw_content = "${episode.name}: ${episode.title}\n\n${episode.transcript}"`
+- `process-queue` handles summarization + questions + embedding automatically — no extra code needed
+- **SQL to run once:** `INSERT INTO sources (name, rss_url, source_type, is_active) VALUES ('follow-builders-podcasts', 'https://...feed-podcasts.json', 'podcast', true)`
+- **Verified:** 1 episode ingested, appeared in raw_ingestion as pending, processed by process-queue
 
-**First step — inspect the feed schema before writing code:**
-```bash
-curl https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json | head -c 2000
+**Subrequest impact:** 36 → 38/50 (+1 for feed-podcasts.json fetch, +1 for batch INSERT, -0 because combined sources query was already 1 call)
+
+---
+
+### Stage 3 — UI Polish ✅ COMPLETE
+
+**What was delivered:**
+- `MarkdownText` component: handles `• **Label:** text` bullet lines with bullet character indentation + bold inline parsing — replaces old `BoldText`
+- Answer content rendered with Markdown: split on `\n`, each line passed through `MarkdownText`
+- Streaming cursor `▌` appended to last non-empty line during streaming
+- `↻` pill in card header when `questions === null` (tap to regenerate); `? Questions` pill when questions exist
+- Empty state: message shown when no articles loaded
+- Full warm editorial redesign: `#F7F6F2` background, `#1A1A1A` accent/pills, `#E0DDD6` borders, `#F0EDE8` answer blocks, 18px/700 title weight, `letterSpacing: -0.3`
+- Lang toggle scroll position: proportional mapping — on button press, capture `proportion = currentOffset / contentHeightRef[currentLang]`; after re-render, `onContentSizeChange` fires with new lang's height → `scrollToOffset(proportion × newHeight)`; handles first-ever toggle where new lang height is unknown until render completes; refs: `contentHeightRef`, `pendingProportionRef`, `langRef`
+- HN engagement badge removed; 🔥 likes badge for tweets only
+
+---
+
+### Stage 4.5 — Apify Tweet Ingestion + Tweet Prompt Redesign ✅ COMPLETE
+
+**Why after Stage 4:** Web deployment first so the app is publicly accessible before expanding sources. Stage 4.5 enriches the feed with 6 high-signal handles not covered by follow-builders.
+
+**Problem:** All 5 Cloudflare cron slots are used. The follow-builders `feed-x.json` covers 25 AI builders but excludes key figures: Chris Olah (ch402), Dario Amodei (DarioAmodei), Simon Willison (simonw), @xai, Paul Graham (paulg), Ethan Mollick (emollick). The article Groq prompt also fails on tweet content — demands metrics/financial figures → `INSUFFICIENT_CONTENT` on 280-char posts.
+
+**Solution parts:**
+1. **`supabase/functions/ingest-apify-tweets`** — webhook receiver that inserts Apify-scraped tweets into `raw_ingestion`
+2. **Tweet Groq prompt branch** in `process-queue` — dedicated prompt for `isTweet=true` rows
+
+---
+
+**Part 1 — `supabase/functions/ingest-apify-tweets/index.ts` (new file)**
+
 ```
-The structure is unknown until fetched. Builder tweet schema (`{x: [{handle, bio, tweets}]}`) does NOT necessarily match podcast schema.
+POST (webhook from Apify on RUN_SUCCEEDED)
+Body: { eventType: "ACTOR.RUN.SUCCEEDED", eventData: { actorId, runId, datasetId } }
 
-**Implementation (after schema is known):**
-- Add second fetch in `ingest-builders` for `feed-podcasts.json`
-- Parse episode schema (likely: title, transcript excerpt, YouTube/podcast URL, published_at)
-- Insert into `raw_ingestion` under a new `podcast` source row (separate from `github_feed`) — episode transcripts are much longer than tweets, better content quality
-- `process-queue` handles the rest automatically (summarize + questions + embed)
-- Watch subrequest count: adding podcast inserts on top of 36 existing may approach the 50 limit
+Flow:
+1. Validate Authorization: Bearer <APIFY_WEBHOOK_SECRET> → 401 if wrong
+2. Parse body → extract eventData.datasetId
+3. GET https://api.apify.com/v2/datasets/{datasetId}/items?token={APIFY_API_KEY}
+4. SELECT sources WHERE source_type='apify_tweet' AND is_active=true → source.id
+5. Map each tweet item to raw_ingestion row:
+   - url: item.url  (e.g. https://x.com/DarioAmodei/status/...)
+   - raw_content: "@{item.author.userName}: {item.text}"
+   - metadata: { likes: item.likeCount ?? 0, retweets: item.retweetCount ?? 0 }
+   - source_id: apifySource.id
+   - status: 'pending'
+6. Batch POST to /rest/v1/raw_ingestion
+   Headers: Prefer: resolution=ignore-duplicates
+   Body: array of all tweet rows (one subrequest)
+7. Return 200 { inserted: N }
 
-**File:** `workers/ingest-builders/src/index.ts`
+Secrets required:
+  APIFY_API_KEY          — Apify account token
+  APIFY_WEBHOOK_SECRET   — shared secret set in Apify webhook config
+  SUPABASE_URL           — available as Deno.env built-in
+  SUPABASE_SERVICE_ROLE_KEY — available as Deno.env built-in
+```
+
+**SQL to run once:**
+```sql
+INSERT INTO sources (name, rss_url, source_type, is_active, metadata)
+VALUES (
+  'apify-tweets',
+  'https://api.apify.com/v2/acts/kwaHHHxgk6HcbRQsM',
+  'apify_tweet',
+  true,
+  '{"handles": ["ch402", "DarioAmodei", "simonw", "xai", "paulg", "emollick"]}'
+);
+SELECT id, name, source_type, metadata FROM sources WHERE source_type = 'apify_tweet';
+```
+
+**Apify actor config (saved in Apify console):**
+```json
+{
+  "filter:blue_verified": false, "filter:consumer_video": false, "filter:has_engagement": false,
+  "filter:hashtags": false, "filter:images": false, "filter:links": false, "filter:media": false,
+  "filter:mentions": false, "filter:native_video": false, "filter:nativeretweets": false,
+  "filter:news": false, "filter:pro_video": false, "filter:quote": false, "filter:replies": false,
+  "filter:safe": false, "filter:spaces": false, "filter:twimg": false, "filter:videos": false,
+  "filter:vine": false, "include:nativeretweets": false,
+  "lang": "en", "maxItems": 15, "queryType": "Latest",
+  "searchTerms": ["from:ch402","from:DarioAmodei","from:simonw","from:xai","from:paulg","from:emollick"],
+  "min_retweets": 0, "min_faves": 0, "min_replies": 0
+}
+```
+Note: no `since`/`until` — deduplication via `ON CONFLICT (url)` handles re-fetched tweets.
+
+**Apify one-time setup:**
+1. Apify Console → actor → Input → paste config above → Save & Run (verify dataset has `url`, `text`, `likeCount`, `retweetCount`, `author.userName` fields)
+2. Schedule → Add → `0 30 6 * * *` (6:30am UTC daily, 30min after ingest-rss)
+3. Webhooks → Add → Event: `RUN_SUCCEEDED` → URL: `https://<project>.supabase.co/functions/v1/ingest-apify-tweets` → Header: `Authorization: Bearer <APIFY_WEBHOOK_SECRET>`
+
+**Deploy:**
+```bash
+supabase functions deploy ingest-apify-tweets
+supabase secrets set APIFY_API_KEY=apify_xxxx --project-ref <ref>
+supabase secrets set APIFY_WEBHOOK_SECRET=your-secret --project-ref <ref>
+```
 
 ---
 
-### Stage 3 — UI Polish
+**Part 2 — Tweet Groq prompt branch in `workers/process-queue/src/index.ts`**
 
-**Gate:** Intelligence layer (scraping + RAG) validated solid first.
+The `isTweet` variable (line 238) already exists. After it's determined, select the system prompt before the Groq call (currently at line 264):
 
-**Mandatory:** Use `superpowers:brainstorming` then `frontend-design` skill before writing any code. Do not design ad-hoc.
+```typescript
+const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
+```
 
-**File:** `news-app/App.tsx`
+**`TWEET_SYSTEM_PROMPT` (replace `ARTICLE_SYSTEM_PROMPT` block when `isTweet=true`):**
 
-**Known pain points (priority order):**
-1. **Answer rendering** — streams as plain text; Markdown bold/bullets should render (most impactful — summaries and answers use `**bold**` formatting that displays as raw characters)
-2. **Article card design** — functional but sparse; needs visual hierarchy
-3. **Source filter pills** — no way to filter by source; consider filter-by-source pill bar at top
-4. **Language toggle UX** — toggle resets open answers; consider persisting answer across switch
-5. **Empty states** — no questions / no articles shows blank; needs placeholder UI
+```
+You are an expert tech editor. Analyze the tweet or quote-tweet and produce a bilingual title and summary for a mobile news feed.
 
-**Already implemented (do not re-implement):**
-- Engagement badges: 🔥 likes (amber) + ▲ HN score (yellow) — live in App.tsx
-- `X - @handle - role` source label — live
-- Bilingual toggle with `公众号` WeChat detection — live
+Output EXACTLY this structure — no deviations, no extra text:
 
-**Constraint:** Expo web + React Native — StyleSheet only, no CSS. Use `context7` before adding any library.
+TITLE_EN: [For original tweets: "@handle said [core claim]." For quote-tweets: "@original said [original claim], retweeted by @handle [with their commentary]." Under 400 characters.]
+TITLE_ZH: [原创推文："@handle 表示 [核心观点]。" 转推评论："@original 表示 [原推观点]，由 @handle 转推[并附评论]。" 400字符以内。]
+
+SUMMARY_EN:
+• **[Core Event]:** [2-3 sentences. Provide a thorough, accurate summary of what the author said — their exact perspective or reaction. If it's a quote-tweet, lead with their commentary, not the original.]
+• **[Crucial Detail]:** [2-3 sentences. Extract and explain highly specific details. Include precise metrics, technical claims, or critical mechanisms mentioned in the tweet or the content being shared.]
+• **[The Impact]:** [2-3 sentences. Forward-looking analysis of implications. DO NOT use vague generalizations. Explicitly state specific strategic shifts, market disruptions, or future innovations this perspective triggers.]
+
+SUMMARY_ZH:
+• **[核心事件]:** [2-3句话。全面准确总结作者所说——具体立场或反应。如为转推评论，优先呈现其评论内容。]
+• **[关键细节]:** [2-3句话。提取高度具体的细节，必须包含精准数据、技术主张或核心机制。]
+• **[影响]:** [2-3句话。前瞻性深度分析。严禁模糊泛谈，必须明确指出具体战略转变、市场颠覆或创新推动。]
+
+Strict rules:
+1. Start immediately with "TITLE_EN:". No intro or outro.
+2. CRITICAL — never translate proper nouns, brand names, or product names.
+3. The author's @handle must appear in TITLE_EN and TITLE_ZH.
+4. If the tweet lacks signal (purely promotional, spam, single emoji), output: INSUFFICIENT_CONTENT
+```
+
+The `parseSection()` function (line 214) is unchanged — same TITLE_EN/ZH and SUMMARY_EN/ZH tags work for both prompts.
+
+**Cost:** 15 tweets × 6 handles × 30 days = 2,700 tweets/month = **~$1.08/month** (well within $5 budget).
+
+**Verify end-to-end:**
+```sql
+-- After Apify run + webhook fires:
+SELECT COUNT(*), s.source_type
+FROM raw_ingestion ri JOIN sources s ON s.id = ri.source_id
+WHERE s.source_type = 'apify_tweet'
+GROUP BY s.source_type;
+
+-- After process-queue picks up rows:
+SELECT url, title_en, left(summary_en, 200)
+FROM daily_news dn JOIN sources s ON s.id = dn.source_id
+WHERE s.source_type = 'apify_tweet'
+ORDER BY created_at DESC LIMIT 5;
+```
+
+**Deployed:** 2026-03-23
+
+**Gotchas discovered during setup:**
+- Deploy must use `--no-verify-jwt` — Apify sends a custom Bearer token, not a Supabase JWT; without this flag Apify gets 401 even with the correct secret
+- Apify "Send test notification" button sends a fake payload (Chuck Norris joke in `resource`, no `datasetId`) — safe to ignore; 400 on test webhook is expected
+- Dataset ID is at `body.resource.defaultDatasetId` in production payloads; code also falls back to `body.eventData.datasetId` for safety
+- Authorization header in Apify webhook Headers template must be JSON: `{"Authorization": "Bearer your-secret"}`
 
 ---
 
-### Stage 4 — Web Deployment (Cloudflare Pages)
+### Stage 4.7 — Multi-Source Feed Expansion ✅ COMPLETE
+
+**What was added:** GitHub Trending, Product Hunt, Nowcoder — all ingested inside `ingest-builders` (no new cron slot used).
+
+**Source categories (from `design-inspiration-log.md`):**
+- GitHub Trending → Technical Frontier (open-source signal)
+- Product Hunt → Industry (AI/tech launches + vote quality signal)
+- Nowcoder → Developer Community (Chinese developer discussions)
+
+**Fetch patterns (from [newsnow](https://github.com/ourongxing/newsnow) repo):**
+- **GitHub Trending:** HTML scrape of `github.com/trending?spoken_language_code=`; split on `<article`; regex-extract href (repo path), `p.col-9` description, `[href$=stargazers]` star count; no Cheerio in CF Workers → raw regex on text
+- **Product Hunt:** GraphQL POST to `api.producthunt.com/v2/api/graphql`; headers: `Authorization Bearer PRODUCTHUNT_API_TOKEN` + `Accept: application/json`; query top 30 by VOTES; fields: name, tagline, votesCount, url
+- **Nowcoder:** GET `gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc?size=20&_={timestamp}&t=`; response at `data.result` (NOT `data.hotInfos` as newsnow source suggests — confirmed via live API); `id` is a `string`; type 74 → `/feed/main/detail/{uuid}`; type 0 → `/discuss/{id}`
+
+**Engagement metadata stored in `raw_ingestion.metadata`:**
+- GitHub Trending: `{ stars: N }` (integer; commas stripped from `"1,234"` format before `parseInt`)
+- Product Hunt: `{ votes: N }`
+- Nowcoder: `null` (title only; no engagement signal available)
+
+**Secret added:** `PRODUCTHUNT_API_TOKEN` wrangler secret for `ingest-builders` (free API — register at producthunt.com → settings → API)
+
+**Subrequest budget:** 38/50 → **42/50** (+3 fetches + 1 combined batch INSERT)
+
+**Gotchas discovered during setup:**
+- Nowcoder response key is `data.result`, not `data.hotInfos` — always `console.log` raw response keys when a new undocumented API returns 0 items
+- PostgREST batch INSERT requires ALL row objects to have identical keys — if any row omits a key that others have, the entire batch fails with `PGRST102: All object keys must match`; fix by setting missing keys to `null`
+- GitHub star counts are comma-formatted strings (`"1,234"`) — strip commas before `parseInt` or the value becomes `NaN`
+
+---
+
+### Stage 4.8 — arXiv + Reddit Sources ✅ COMPLETE
+
+**What was added:** arXiv preprints (cs.AI + cs.LG) and Reddit community posts (r/MachineLearning, r/cscareerquestions, r/layoffs) — all ingested inside `ingest-builders` (no new cron slot used).
+
+**Why:** Teamblind is not statically scrapeable (Next.js, no RSS, no public API — requires headless browser). arXiv covers frontier AI research (all top lab preprints from Anthropic, OpenAI, DeepMind, Meta AI appear here first, free). Reddit covers career/industry signal (layoffs, ML discussions, job market) as a Teamblind replacement.
+
+**Source categories:**
+- arXiv cs.AI + cs.LG → Frontier AI Research
+- Reddit r/MachineLearning → Technical community discussion
+- Reddit r/cscareerquestions + r/layoffs → Career/industry signal
+
+**Fetch patterns:**
+- **arXiv:** GET `https://export.arxiv.org/api/query?search_query=cat:{category}&max_results=10&sortBy=submittedDate&sortOrder=descending` — returns Atom XML; loop over `<entry>` blocks; regex-extract ID from `<id>`, title from `<title>`, abstract from `<summary>`; URL = `https://arxiv.org/abs/{id}`; raw_content = `{title}\n\n{abstract}`; metadata = `{ category: "cs.AI" }`
+- **Reddit:** GET `https://www.reddit.com/r/{subreddit}/hot.json?limit=25` with `User-Agent: NewsProject/1.0`; parse `data.children[*].data`; link posts (`is_self=false`) → `post.url` (external article); self-posts (`is_self=true`) → `https://reddit.com{post.permalink}`; raw_content = `r/{subreddit}: {title}`; metadata = `{ score, num_comments, subreddit }`
+
+**Source name encodes subreddit:** `src.name.replace('Reddit r/', '')` extracts subreddit at runtime — adding a new subreddit only requires a DB INSERT, no code change.
+
+**SQL to run once:**
+```sql
+INSERT INTO sources (name, rss_url, source_type, is_active) VALUES
+  ('arXiv cs.AI', 'https://export.arxiv.org/api/query?search_query=cat:cs.AI', 'arxiv', true),
+  ('arXiv cs.LG',  'https://export.arxiv.org/api/query?search_query=cat:cs.LG',  'arxiv', true),
+  ('Reddit r/MachineLearning',   'https://www.reddit.com/r/MachineLearning/hot.json',   'reddit', true),
+  ('Reddit r/cscareerquestions', 'https://www.reddit.com/r/cscareerquestions/hot.json', 'reddit', true),
+  ('Reddit r/layoffs',           'https://www.reddit.com/r/layoffs/hot.json',           'reddit', true);
+```
+
+**Secrets required:** None — both arXiv and Reddit are public APIs.
+
+**Subrequest budget:** 42/50 → **47/50** (+2 arXiv + 3 Reddit; combined batch INSERT already counted)
+
+**Gotchas:**
+- arXiv `<id>` tag contains full URL (`https://arxiv.org/abs/2501.12345`) — regex must extract numeric ID only; arXiv IDs do not have version suffix in the `<id>` field at this API endpoint
+- Reddit **requires** `User-Agent` header — Cloudflare Worker default UA is blocked by Reddit with 429; always set `User-Agent: NewsProject/1.0`
+- Reddit self-posts (`is_self=true`) have `post.url` pointing back to `reddit.com` — use `post.permalink` instead, or two entirely different self-posts could share a base domain collision
+- PostgREST batch INSERT key uniformity applies here too — all rows must include `metadata` key; both arXiv and Reddit rows already do
+
+---
+
+### Stage 4 — Web Deployment (Cloudflare Pages) ← NEXT
 
 **Prerequisite:** UI polish done; no console errors in `npx expo start --web`.
 
@@ -604,10 +877,10 @@ eas build --platform ios --profile production
 | Retry backoff in process-queue | Error rate > 10% |
 | Fix questions all-or-nothing (return partial EN/ZH) | questions null rate > 20% |
 | Return `article_content` from `match_articles` for richer RAG context | After Stage 2 UI done |
+| Add more Apify handles (e.g. Yann LeCun, Jensen Huang) | After Stage 4.5 stable; budget allows ~12 handles at $5/mo |
 | Add more CN sources (少数派, 虎嗅, 晚点LatePost) | After source audit |
 | Fix HN scraping to follow linked URL (not HN page) | If HN re-enabled after structural fix |
 | Engagement sorting/filtering in App.tsx | After enough engagement data accumulates (1+ week) |
-| HN enrichment reliability check | If `hn_score` is null for most RSS articles after 1 week |
 | Cloudflare Workers Paid ($5/mo) | When subrequest count approaches 45/50 or new workers needed |
 | Push notifications (daily digest) | Phase 4 |
 | Remove `reasoning_content` dead code in answer-question | When reasoning model added |
@@ -640,3 +913,6 @@ eas build --platform ios --profile production
 | Groq JSONL format in bio extraction | Groq ignores flat-JSON instruction sometimes | Handled via fallback parser in `extractBioMap()` |
 | Existing builder tweets have NULL engagement | Tweets inserted before metadata column; ON CONFLICT DO NOTHING prevents re-insert | Resolves naturally as new tweets come in daily; existing rows not backfilled |
 | `docs/schema.md` outdated | Not updated as columns were added (metadata, engagement, article_content, etc.) | Always verify schema against deployed DB; do not trust docs/schema.md |
+| HN `article_content` is comment threads, not articles | `ingest-rss` fetches HN discussion page; HN is a link aggregator | Source disabled (`is_active=false`); fix requires scraper to follow the linked URL — see Backlog |
+| EN↔ZH toggle scroll position | EN and ZH cards render at different heights — raw pixel offset maps to wrong position after lang change | Fixed: proportional mapping via `onContentSizeChange` + `pendingProportionRef` in `news-app/App.tsx` |
+| PostgREST batch INSERT fails with mixed keys | `PGRST102: All object keys must match` — all row objects in a batch must have identical key sets | Always include every key in every row; use `null` for absent values (e.g. `metadata: null`) |

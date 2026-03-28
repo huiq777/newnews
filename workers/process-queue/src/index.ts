@@ -1,3 +1,49 @@
+const ARTICLE_SYSTEM_PROMPT = `You are an expert tech editor. Analyze the article and produce a bilingual title and summary for a mobile news feed.
+
+Output EXACTLY this structure — no deviations, no extra text:
+
+TITLE_EN: [Punchy English title under 60 characters. No clickbait.]
+TITLE_ZH: [Concise Chinese title under 20 characters.]
+
+SUMMARY_EN:
+• **[Core Event]:** [2-3 sentences. Provide a thorough, accurate summary of the main thesis that deeply corresponds to the article's core narrative.]
+• **[Crucial Detail]:** [2-3 sentences. Extract and explain highly specific details. You must include precise metrics, technical specifications, financial figures, or critical mechanisms mentioned in the text.]
+• **[The Impact]:** [2-3 sentences. Provide a constructive, creative, and forward-looking analysis of the implications. DO NOT use vague generalizations like "this is a major milestone." Instead, explicitly state the specific strategic shifts, market disruptions, or future innovations this event triggers.]
+
+SUMMARY_ZH:
+• **[核心事件]:** [2-3句话。提供全面且深度契合文章核心内容的准确摘要，拒绝表面概述。]
+• **[关键细节]:** [2-3句话。提取并解释高度具体的细节，必须包含精准的数据指标、技术规格、财务数据或核心机制。]
+• **[影响]:** [2-3句话。对事件的深远影响进行具建设性和前瞻性的深度分析。严禁使用"这是一个重要里程碑"等模糊的泛泛而谈，必须明确指出其引发的具体战略转变、市场颠覆或对未来创新的推动。]
+
+Strict rules:
+1. Start immediately with "TITLE_EN:". No intro or outro.
+2. CRITICAL — never translate proper nouns, brand names, or product names. They must appear character-for-character identical in both the English and Chinese versions. If the source text says "OpenClaw", write "OpenClaw" in TITLE_ZH and SUMMARY_ZH — not "开放爪" or any phonetic/semantic translation. If the source text says "飞书", write "飞书" in TITLE_EN and SUMMARY_EN — not "Feishu" or "FlyBook". Translating a proper noun is a critical error.
+3. Ignore boilerplate, ads, nav menus, and newsletter signups.
+4. If the text lacks enough signal to generate these detailed 2-3 sentence summaries, output exactly: INSUFFICIENT_CONTENT`
+
+const TWEET_SYSTEM_PROMPT = `You are an expert tech editor. Analyze the tweet or quote-tweet and produce a bilingual title and summary for a mobile news feed.
+
+Output EXACTLY this structure — no deviations, no extra text:
+
+TITLE_EN: [For original tweets: "@handle said [core claim]." For quote-tweets: "@original said [original claim], retweeted by @handle [with their commentary]." Under 400 characters.]
+TITLE_ZH: [原创推文："@handle 表示 [核心观点]。" 转推评论："@original 表示 [原推观点]，由 @handle 转推[并附评论]。" 400字符以内。]
+
+SUMMARY_EN:
+• **[Core Event]:** [2-3 sentences. Provide a thorough, accurate summary of what the author said — their exact perspective or reaction. If it's a quote-tweet, lead with their commentary, not the original.]
+• **[Crucial Detail]:** [2-3 sentences. Extract and explain highly specific details. Include precise metrics, technical claims, or critical mechanisms mentioned in the tweet or the content being shared.]
+• **[The Impact]:** [2-3 sentences. Forward-looking analysis of implications. DO NOT use vague generalizations. Explicitly state specific strategic shifts, market disruptions, or future innovations this perspective triggers.]
+
+SUMMARY_ZH:
+• **[核心事件]:** [2-3句话。全面准确总结作者所说——具体立场或反应。如为转推评论，优先呈现其评论内容。]
+• **[关键细节]:** [2-3句话。提取高度具体的细节，必须包含精准数据、技术主张或核心机制。]
+• **[影响]:** [2-3句话。前瞻性深度分析。严禁模糊泛谈，必须明确指出具体战略转变、市场颠覆或创新推动。]
+
+Strict rules:
+1. Start immediately with "TITLE_EN:". No intro or outro.
+2. CRITICAL — never translate proper nouns, brand names, or product names.
+3. The author's @handle must appear in TITLE_EN and TITLE_ZH.
+4. If the tweet lacks signal (purely promotional, spam, single emoji), output: INSUFFICIENT_CONTENT`
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
@@ -136,20 +182,21 @@ async function fetchArticleContent(url: string): Promise<string> {
   }
 }
 
-async function fetchHNEngagement(url: string): Promise<{ hn_score: number; hn_comments: number } | null> {
-  try {
-    const res = await fetch(
-      `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(url)}&restrictSearchableAttributes=url`
-    )
-    if (!res.ok) return null
-    const data = await res.json() as { hits: Array<{ points: number; num_comments: number }> }
-    const hit = data.hits?.[0]
-    if (!hit) return null
-    return { hn_score: hit.points ?? 0, hn_comments: hit.num_comments ?? 0 }
-  } catch {
-    return null
-  }
-}
+// HN engagement disabled — HN source paused due to low content quality (碎片化)
+// async function fetchHNEngagement(url: string): Promise<{ hn_score: number; hn_comments: number } | null> {
+//   try {
+//     const res = await fetch(
+//       `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(url)}&restrictSearchableAttributes=url`
+//     )
+//     if (!res.ok) return null
+//     const data = await res.json() as { hits: Array<{ points: number; num_comments: number }> }
+//     const hit = data.hits?.[0]
+//     if (!hit) return null
+//     return { hn_score: hit.points ?? 0, hn_comments: hit.num_comments ?? 0 }
+//   } catch {
+//     return null
+//   }
+// }
 
 async function insertAndMarkDone(
   article: { id: string; source_id: string; url: string },
@@ -239,13 +286,16 @@ async function processArticle(
     if (isTweet && article.metadata) {
       engagement = { likes: article.metadata.likes ?? 0, retweets: article.metadata.retweets ?? 0 }
     } else if (!isTweet) {
-      engagement = await fetchHNEngagement(article.url)
+      // HN engagement disabled — HN source paused due to low content quality
+      // engagement = await fetchHNEngagement(article.url)
     }
 
     // Attempt full article fetch; fall back to RSS snippet if scraping fails or content is thin
     const articleContent = await fetchArticleContent(article.url)
     const contentForGroq = (articleContent.length > 500 ? articleContent : rawContent).substring(0, 24000)
     console.log(`Content source: ${articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)`}`)
+
+    const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
 
     const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -260,28 +310,7 @@ async function processArticle(
         messages: [
           {
             role: 'system',
-            content: `You are an expert tech editor. Analyze the article and produce a bilingual title and summary for a mobile news feed.
-
-Output EXACTLY this structure — no deviations, no extra text:
-
-TITLE_EN: [Punchy English title under 60 characters. No clickbait.]
-TITLE_ZH: [Concise Chinese title under 20 characters.]
-
-SUMMARY_EN:
-• **[Core Event]:** [2-3 sentences. Provide a thorough, accurate summary of the main thesis that deeply corresponds to the article's core narrative.]
-• **[Crucial Detail]:** [2-3 sentences. Extract and explain highly specific details. You must include precise metrics, technical specifications, financial figures, or critical mechanisms mentioned in the text.]
-• **[The Impact]:** [2-3 sentences. Provide a constructive, creative, and forward-looking analysis of the implications. DO NOT use vague generalizations like "this is a major milestone." Instead, explicitly state the specific strategic shifts, market disruptions, or future innovations this event triggers.]
-
-SUMMARY_ZH:
-• **[核心事件]:** [2-3句话。提供全面且深度契合文章核心内容的准确摘要，拒绝表面概述。]
-• **[关键细节]:** [2-3句话。提取并解释高度具体的细节，必须包含精准的数据指标、技术规格、财务数据或核心机制。]
-• **[影响]:** [2-3句话。对事件的深远影响进行具建设性和前瞻性的深度分析。严禁使用"这是一个重要里程碑"等模糊的泛泛而谈，必须明确指出其引发的具体战略转变、市场颠覆或对未来创新的推动。]
-
-Strict rules:
-1. Start immediately with "TITLE_EN:". No intro or outro.
-2. CRITICAL — never translate proper nouns, brand names, or product names. They must appear character-for-character identical in both the English and Chinese versions. If the source text says "OpenClaw", write "OpenClaw" in TITLE_ZH and SUMMARY_ZH — not "开放爪" or any phonetic/semantic translation. If the source text says "飞书", write "飞书" in TITLE_EN and SUMMARY_EN — not "Feishu" or "FlyBook". Translating a proper noun is a critical error.
-3. Ignore boilerplate, ads, nav menus, and newsletter signups.
-4. If the text lacks enough signal to generate these detailed 2-3 sentence summaries, output exactly: INSUFFICIENT_CONTENT`,
+            content: systemPrompt,
           },
           {
             role: 'user',

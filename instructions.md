@@ -6,7 +6,7 @@
 ---
 
 ## ingest-rss
-**Runs automatically:** daily at 7:00 UTC
+**Runs automatically:** Every 4 hours (`0 */4 * * *`)
 
 ```bash
 cd workers/ingest-rss
@@ -18,15 +18,44 @@ wrangler deploy
 wrangler dev --remote --test-scheduled
 
 # Trigger (Terminal 2)
-curl "http://localhost:8787/__scheduled?cron=0+7+*+*+*"
+curl "http://localhost:8787/__scheduled?cron=0+*/4+*+*+*"
 ```
 
 **Verify:** Supabase → `raw_ingestion` — new rows with `status=pending`
 
 ---
 
+## ingest-builders
+**Runs automatically:** Daily 6am UTC
+
+Fetches `feed-x.json` (builder tweets) + `feed-podcasts.json` (podcast episodes) in one run. Performs one Groq batch call for bio extraction. Stores tweet engagement metadata `{likes, retweets}`.
+
+```bash
+cd workers/ingest-builders
+
+# Deploy
+wrangler deploy
+
+# Test locally (Terminal 1)
+wrangler dev --remote --test-scheduled
+
+# Trigger (Terminal 2)
+curl "http://localhost:8787/__scheduled?cron=0+6+*+*+*"
+```
+
+**Verify:** Supabase → `raw_ingestion` — new rows with `source_type=github_feed` (tweets) or `source_type=podcast` (episodes); `status=pending`
+
+**Secrets required:**
+```bash
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put GROQ_API_KEY
+```
+
+---
+
 ## process-queue
-**Runs automatically:** every 15 minutes
+**Runs automatically:** Every 15 minutes
 
 ```bash
 cd workers/process-queue
@@ -41,48 +70,27 @@ wrangler dev --remote --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=*/15+*+*+*+*"
 ```
 
-**Verify:** Supabase → `daily_news` — new rows with title + summary
+**Verify:** Supabase → `daily_news` — new rows with `title_en`, `title_zh`, `summary_en`, `summary_zh`, `questions JSONB`
 
 **Reset stuck rows (if worker crashed mid-run):**
 ```sql
-UPDATE raw_ingestion SET status='pending' WHERE status='processing';
+UPDATE raw_ingestion SET status='pending', retry_count=0, last_error=NULL
+WHERE status='processing' AND processed_at IS NULL;
 ```
 
 **Reprocess specific articles:**
 ```sql
-UPDATE raw_ingestion SET status='pending', retry_count=0
-WHERE id IN (SELECT id FROM raw_ingestion WHERE status='done' LIMIT 5);
-
-DELETE FROM daily_news
-WHERE id IN (SELECT id FROM daily_news ORDER BY created_at DESC LIMIT 5);
-```
-
----
-
-## ingest-x
-**Runs automatically:** every hour
-**Note:** Requires X API Basic tier ($100/mo). Disable sources if not subscribed:
-```sql
-UPDATE sources SET is_active=false WHERE source_type='x_api';
-```
-
-```bash
-cd workers/ingest-x
-
-# Deploy
-wrangler deploy
-
-# Test locally (Terminal 1)
-wrangler dev --remote --test-scheduled
-
-# Trigger (Terminal 2)
-curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"
+-- 1. Delete from daily_news first (ON DELETE RESTRICT on raw_ingestion)
+DELETE FROM daily_news WHERE id IN (SELECT id FROM daily_news ORDER BY created_at DESC LIMIT 5);
+-- 2. Reset raw_ingestion
+UPDATE raw_ingestion SET status='pending', retry_count=0, last_error=NULL, processed_at=NULL
+WHERE status='done' ORDER BY processed_at DESC LIMIT 5;
 ```
 
 ---
 
 ## embed-batch
-**Runs automatically:** every 5 minutes (Phase 2)
+**Runs automatically:** Every 5 minutes
 
 ```bash
 cd workers/embed-batch
@@ -97,7 +105,39 @@ wrangler dev --remote --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
 ```
 
-**Verify:** Supabase → `article_embeddings` — new rows
+**Verify:** Supabase → `daily_news` — `embedding` column populated (non-null) on recent rows
+
+---
+
+## send-feishu-digest
+**Runs automatically:** Daily 17:00 UTC (12pm EST)
+
+```bash
+cd workers/send-feishu-digest
+
+# Deploy
+wrangler deploy
+
+# Test locally (Terminal 1)
+wrangler dev --remote --test-scheduled
+
+# Trigger (Terminal 2)
+curl "http://localhost:8787/__scheduled?cron=0+17+*+*+*"
+```
+
+**Verify:** Feishu group shows a blue interactive card with articles (Chinese content; 🔥 likes for tweets; 3 ZH bullets per article)
+
+**Secrets required:**
+```bash
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put FEISHU_WEBHOOK_URL
+```
+
+---
+
+## ingest-x
+**Status: Deleted** — freed the 5th Cloudflare cron slot. X API costs $100/mo. Builder tweets are now sourced via `ingest-builders` (reads follow-builders `feed-x.json` from GitHub at zero API cost). The `workers/ingest-x/` directory still exists in the repo but the worker is not deployed.
 
 ---
 
@@ -106,36 +146,38 @@ curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
 ```bash
 cd news-app
 
-# Start dev server
-npx expo start
+# Start dev server (web)
+npx expo start --web
 
 # Run on iOS simulator
 npx expo start --ios
-
-# Run on Android simulator
-npx expo start --android
 ```
 
 ---
 
-## Supabase Edge Functions (Phase 2)
+## Supabase Edge Functions
 
 ```bash
-# Deploy both functions
-supabase functions deploy chat-live
-supabase functions deploy chat-rag
+# Deploy
+supabase functions deploy answer-question
+supabase functions deploy refresh-questions
 
-# Test chat-live
-curl -X POST https://<project>.supabase.co/functions/v1/chat-live \
+# Test answer-question (streaming)
+curl -X POST https://<project>.supabase.co/functions/v1/answer-question \
   -H "Authorization: Bearer <anon-key>" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"What is happening in AI today?"}'
+  -d '{"article_id":"<uuid>","question":"What is this about?","lang":"en"}'
 
-# Test chat-rag
-curl -X POST https://<project>.supabase.co/functions/v1/chat-rag \
-  -H "Authorization: Bearer <user-jwt>" \
+# Test refresh-questions (non-streaming JSON)
+curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
+  -H "Authorization: Bearer <anon-key>" \
   -H "Content-Type: application/json" \
-  -d '{"question":"Summarize recent GPU news","session_id":"abc123"}'
+  -d '{"article_id":"<uuid>"}'
+
+# Add secrets
+supabase secrets set GROQ_API_KEY=... --project-ref <ref>
+supabase secrets set COHERE_API_KEY=... --project-ref <ref>
+supabase secrets list
 ```
 
 ---
@@ -146,12 +188,10 @@ curl -X POST https://<project>.supabase.co/functions/v1/chat-rag \
 # Set a secret for a specific worker
 wrangler secret put GROQ_API_KEY --name process-queue
 wrangler secret put COHERE_API_KEY --name embed-batch
-wrangler secret put X_BEARER_TOKEN --name ingest-x
+wrangler secret put FEISHU_WEBHOOK_URL --name send-feishu-digest
 
 # List secrets for a worker
 wrangler secret list --name process-queue
-
-# Supabase Edge Function secrets: Dashboard → Edge Functions → Manage Secrets
 ```
 
 ---
@@ -162,7 +202,8 @@ wrangler secret list --name process-queue
 |---|---|
 | `Invalid URL` error in wrangler dev | Add `--remote` flag |
 | Scheduled handler not running | Add `--test-scheduled` flag |
-| Rows stuck in `processing` | `UPDATE raw_ingestion SET status='pending' WHERE status='processing'` |
-| 429 Groq rate limit | Wait 1 min, re-trigger. Long articles hit 12K TPM limit |
-| 402 X API error | X free tier is write-only. Disable X sources or upgrade to Basic |
+| Rows stuck in `processing` | `UPDATE raw_ingestion SET status='pending', retry_count=0, last_error=NULL WHERE status='processing' AND processed_at IS NULL` |
+| 429 Groq rate limit | Wait 1 min (TPM) or until midnight UTC (TPD 100K/day). Do not retry in a loop — burns retry_count. |
 | Batch insert 409 conflict | Normal — `ON CONFLICT DO NOTHING` skips existing URLs |
+| Worker throws immediately with no error row | Subrequest limit (50/invocation) hit — see gotcha #13 in `AI-SWE-skill.md` |
+| `questions` null on article | EN+ZH generation all-or-nothing; use ↻ pill to regenerate after TPD resets |

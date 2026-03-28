@@ -114,7 +114,7 @@ Deploy must be run from inside the worker directory (where `wrangler.toml` lives
 
 - **Enable Data API:** Yes, always. Required for both Cloudflare Workers (REST calls) and the Expo frontend (supabase-js).
 - **Enable automatic RLS:** Yes. Only affects future tables — does not retroactively change existing ones.
-- **RLS in MVP phase:** `daily_news`, `raw_ingestion`, `sources` have no RLS enabled yet. The anon key can read `daily_news` freely. Full RLS is added in Phase 2 via the migration in `docs/schema.md`.
+- **RLS (current state):** All 3 tables have RLS enabled. `daily_news` and `sources` have `public_read_*` policies (anon key can read). `raw_ingestion` has no policies — locked to service role only. See `docs/schema.md` for the exact policy SQL.
 
 ---
 
@@ -151,17 +151,9 @@ Without `extraData`, items render once with the empty initial state and never up
 
 ## Project Phase Status
 
-### Phase 1 (current) — MVP Ingestion + Rough Frontend
-- [x] Supabase DB: 3 tables created, 3 RSS sources seeded
-- [x] Worker 1 (`ingest-rss`): deployed, tested, 40 rows in `raw_ingestion`
-- [ ] Worker 2 (`process-queue`): deploy and test → should populate `daily_news`
-- [ ] Rough Expo frontend: single screen showing `daily_news`
+All pipeline stages through Stage 3 (UI redesign) are complete and deployed. Stage 4 (web deployment via Cloudflare Pages) is next.
 
-### Phase 2 (next)
-- Worker 3 (`embed-batch`): Cohere embeddings
-- Full RLS + auth
-- Both AI chatbots (Edge Functions)
-- Polished frontend
+See `current-state.md` for the live deployment status of every component.
 
 ---
 
@@ -169,10 +161,9 @@ Without `extraData`, items render once with the empty initial state and never up
 
 Free tier allows **50 subrequests per invocation**. Each `fetch()` call counts as one.
 
-The `process-queue` worker makes 4 fetch calls per article (lock + Groq + insert + update).
-Formula: `1 + (4 × batch_size) ≤ 50` → max safe batch size is **12 articles**, but use **5** for safe headroom.
+Current counts: ingest-builders ~38/50, process-queue ~36/50. See gotcha #13 in `AI-SWE-skill.md` for exact per-worker breakdown.
 
-`limit=5` is set in `workers/process-queue/src/index.ts` (1 + 5×4 = 21 subrequests). Do not increase beyond 12 unless on a paid Cloudflare plan.
+Upgrade path: Cloudflare Workers Paid ($5/mo) raises limit to 1,000 subrequests.
 
 ---
 
@@ -199,6 +190,23 @@ UPDATE raw_ingestion SET status = 'pending' WHERE status = 'processing';
 ```
 
 Then re-trigger the worker. Safe to run anytime — rows that genuinely finished will be in `done` status, not `processing`.
+
+---
+
+## Supabase Edge Functions — External Webhook Receivers
+
+When an external service (e.g. Apify, Stripe, GitHub) POSTs to a Supabase Edge Function, **always deploy with `--no-verify-jwt`:**
+
+```bash
+supabase functions deploy <function-name> --no-verify-jwt
+```
+
+By default, Supabase validates the `Authorization` header as a Supabase JWT. External webhooks send their own Bearer token — Supabase rejects it as an invalid JWT and returns 401 before your code even runs.
+
+**Apify-specific gotchas:**
+- "Send test notification" in Apify sends a fake payload (Chuck Norris joke in `resource`, no `datasetId`) — 400 on test is expected and safe to ignore
+- Real `RUN_SUCCEEDED` payloads include `resource.defaultDatasetId` — that's the dataset to fetch
+- Authorization header in Apify's Headers template must be JSON format: `{"Authorization": "Bearer your-secret"}`
 
 ---
 

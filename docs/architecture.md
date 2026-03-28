@@ -31,19 +31,34 @@ await Promise.all(articles.map(article => callGroq(article)))
 
 Note: network I/O (fetch API calls) does not count against the 10ms CPU time limit. Only JavaScript execution counts. Parsing RSS XML and building JSON payloads is microseconds of CPU. The CPU limit is not a concern for this workload.
 
+### Supabase Edge Functions for webhooks and user-facing APIs
+
+The pipeline is split: **Cloudflare Workers** handle all scheduled, internal processing (cron). **Supabase Edge Functions** handle anything that requires an inbound HTTP endpoint — either from external services (webhooks) or the frontend (streaming APIs).
+
+| Use case | Where it runs | Why |
+|---|---|---|
+| Apify webhook receiver (`ingest-apify-tweets`) | Supabase Edge Function | Workers have no inbound HTTP trigger; cron limit already at 5/5 free tier |
+| Streaming Q&A (`answer-question`) | Supabase Edge Function | Requires POST from frontend; Workers don't expose inbound endpoints without a paid plan |
+| Question regeneration (`refresh-questions`) | Supabase Edge Function | Same — user-triggered, requires HTTP |
+| RSS ingestion, summarization, embedding | Cloudflare Workers | Cron-scheduled; no inbound HTTP needed |
+
+**Critical gotcha for external webhooks:** Supabase Edge Functions validate the `Authorization` header as a Supabase JWT by default. External services (Apify, Stripe, GitHub) send their own Bearer token — Supabase rejects it as an invalid JWT and returns 401 before your code runs. Always deploy external-facing webhook receivers with:
+```bash
+supabase functions deploy <function-name> --no-verify-jwt
+```
+
 ### Groq (Llama 3 70B) for summarization
 Speed. Groq's hardware delivers LLM inference at throughputs that make batch article processing feasible within a tight cron window. The summarization task (3 bullet points from article text) doesn't require reasoning depth — it requires speed and reliability.
 
 ### Cohere embed-english-v3.0 for embeddings
 The model produces 1024-dimensional embeddings, which directly defines the `vector(1024)` column in `daily_news`. The model supports an `input_type` parameter that distinguishes between indexing and querying — this distinction is load-bearing for retrieval quality (see below). It is available from both Cloudflare Workers (for indexing) and Supabase Edge Functions (for query-time embedding), keeping the embedding symmetric.
 
-### Groq for both chatbots (MVP)
-Both chatbots use Groq's free API tier in the MVP. Groq hosts open-source models on their inference hardware — the model weights are the same as running locally.
+### Groq `llama-3.3-70b-versatile` for all LLM tasks
+All LLM work uses a single model on Groq's free API tier: bilingual summarization, question generation, bio extraction, and streaming Q&A answers (`answer-question` Edge Function).
 
-- **Chatbot 1 (`chat-live`):** `llama-3.3-70b-versatile` — general assistant. No live web search in MVP.
-  - **Upgrade path:** swap to Perplexity Sonar ($5/mo) or add Tavily search (free, 1K/mo) for live web results. One URL + one model name change.
-- **Chatbot 2 (`chat-rag`):** `deepseek-r1-distill-llama-70b` — reasoning model for RAG over stored articles. Exposes chain-of-thought reasoning via the `reasoning_content` field in the streaming response, which powers the "View reasoning" collapsible accordion in the UI.
-  - **Upgrade path:** swap to DeepSeek API directly (`deepseek-reasoner`, ~$0.55/1M tokens) for the full model. Same API format, same response structure.
+- **Summarization + questions:** `process-queue` makes 3 Groq calls per article (summary + EN questions + ZH questions). Free tier: 12K TPM, 100K TPD.
+- **Q&A (answer-question):** Streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
+- **Upgrade path for reasoning:** DeepSeek API directly (`deepseek-reasoner`) or any model that emits `reasoning_content`. Same API format — one model name change in `answer-question`.
 
 ---
 
@@ -139,7 +154,7 @@ Raw article text is passed directly to an LLM. Two rules apply:
 | Operation | Where | `input_type` |
 |---|---|---|
 | Indexing article summaries | Cloudflare Worker (`embed-batch`) | `search_document` |
-| Embedding user's question at query time | `chat-rag` Edge Function | `search_query` |
+| Embedding user's question at query time | `answer-question` Edge Function | `search_query` |
 
 These two values produce vectors optimized for their respective roles. Embedding both with the same `input_type` (a common mistake) means the dot product similarity scores are lower and less discriminative — the wrong articles get retrieved, and the final answer is confidently wrong.
 
