@@ -1,6 +1,6 @@
 # Edge Functions
 
-Two Supabase Edge Functions serve as the secure bridge between the frontend and AI providers. Both are stateless, article-scoped, and **require no authentication** — they read/write only public article data already accessible via the anon key.
+Supabase Edge Functions serve as the secure bridge between the frontend and AI providers. They are stateless and operate on public article data accessible via the anon key. The `ingest-apify-tweets` function is the exception — it is webhook-triggered (not called by the frontend) and requires a custom Bearer token.
 
 **No `supabase.functions.invoke()` for streaming.** It buffers the full response. Use native `fetch` with `ReadableStream` instead — see the streaming pattern below.
 
@@ -211,4 +211,105 @@ The line buffer (splitting on `\n`, keeping the incomplete tail) is required bec
 supabase functions logs answer-question --tail
 supabase functions logs refresh-questions --tail
 supabase functions logs ingest-apify-tweets --tail
+supabase functions logs generate-trend-brief --tail
 ```
+
+---
+
+## `generate-trend-brief` — Cross-Window Trend Synthesis *(planned)*
+
+### Purpose
+Fetches all articles in a selected time window (ALL categories), clusters them by semantic similarity, selects up to 12 representative articles, enriches with historically related articles via pgvector, and streams a synthesis prose analysis via MiMo-V2-Flash. Result cached in `trend_briefs` for 6 hours. Only called on cache miss — cache hit renders immediately from the DB.
+
+### Request
+
+```
+GET /functions/v1/generate-trend-brief?anchor_date=2026-03-28&step_days=7
+Authorization: Bearer <supabase_anon_key>
+```
+
+Query params:
+- `anchor_date` — ISO date (upper bound of window, inclusive)
+- `step_days` — window width in days (1, 7, 30, 90)
+
+### Response
+
+```
+Content-Type: text/event-stream
+
+data: {"type": "content", "content": "The AI inference cost war"}
+data: {"type": "content", "content": " is accelerating faster..."}
+data: [DONE]
+```
+
+Frontend AbortController fires on window change — `req.signal` is propagated to the upstream Groq fetch, killing generation within ~1s. Returns HTTP 499 on abort; writes to `trend_briefs` only on full completion.
+
+### Internal Flow
+
+```
+1. Check trend_briefs cache (anchor_date, step_days, expires_at > now())
+   → HIT: return synthesis directly (no generation)
+   → MISS: proceed
+
+2. Fetch all daily_news rows in window (published_at BETWEEN anchor_date-step_days AND anchor_date)
+   Include: id, title, summary_en, published_at, embedding, engagement JSONB
+
+3. Two-pass clustering in Deno memory (effectiveTarget = min(totalArticles, 12)):
+   PASS 1 — cosine_similarity > 0.82 grouping; engagement DESC tiebreak (likes→votes→score→0)
+   PASS 2 — proportional slot allocation:
+     dominantCap (≥20% of total) = ceil(effectiveTarget × 0.40)
+     mediumCap   (≥5% of total)  = ceil(effectiveTarget × 0.20)
+     smallCap    (all others)    = 1
+
+4. Historical enrichment: for each selected article WITH embedding:
+   → match_articles(embedding, match_count=5)
+   → post-query filter: exclude published_at within current window, score < 0.82
+   → deduplicate across seeds
+   → result: 5–10 historical articles (title + published_at + bullet 1 only)
+   Articles WITHOUT embedding: included in prompt as text, skip historical retrieval
+
+5. Compress articles for prompt:
+   Current:    [N] title | date | bullet1 | bullet2 | bullet3
+   Historical: [N] title | date | bullet1
+
+6. Stream to MiMo-V2-Flash (stream_options: { include_usage: true })
+   System prompt: ruthless senior tech analyst; structural shift + blast radius + weak signals + citations + catalyst
+
+7. On full completion: INSERT into trend_briefs (synthesis, sources_json, tokens_used, expires_at = now() + 6h)
+   On abort (AbortError): log { event: 'client_disconnected', ... }, return 499; do NOT write to DB
+
+8. Stream SSE back to frontend
+```
+
+### Structured Logging
+
+```ts
+// Success
+{ event: 'brief_generated', duration_ms, tokens_used, source_count, historical_count, anchor_date, step_days }
+// Abort
+{ event: 'client_disconnected', duration_ms, chars_streamed, anchor_date, step_days }
+// Rate limit
+{ event: 'rate_limited_429', anchor_date, step_days }
+```
+
+### Required Secrets
+- `MIMO_API_KEY` (or `GROQ_API_KEY` with MiMo model endpoint)
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+### Deploy *(when implemented)*
+```bash
+supabase functions deploy generate-trend-brief
+supabase secrets set MIMO_API_KEY=... --project-ref <ref>
+```
+
+### Token Budget
+| Content | ~Tokens |
+|---|---|
+| 12 current articles (title + 3 bullets) | ~2,000 |
+| 5–8 historical articles (title + date + bullet 1) | ~400 |
+| System prompt | ~300 |
+| Output (synthesis prose) | ~550 |
+| **Total** | **~3,250** |
+
+`article_content` is never sent — summaries are purpose-built for this use case.

@@ -1,0 +1,4 @@
+{"type":"server-started","port":55252,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:55252","screen_dir":"/Users/hui/Desktop/projects/News Project/.superpowers/brainstorm/67882-1774732713"}
+{"type":"screen-added","file":"/Users/hui/Desktop/projects/News Project/.superpowers/brainstorm/67882-1774732713/drum-wheel.html"}
+{"type":"screen-added","file":"/Users/hui/Desktop/projects/News Project/.superpowers/brainstorm/67882-1774732713/drum-wheel-v2.html"}
+{"type":"server-stopped","reason":"owner process exited"}

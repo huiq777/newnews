@@ -49,6 +49,8 @@ export default {
       url: item.url,
       raw_content: item.content,
       status: 'pending',
+      metadata: null,
+      published_at: item.published_at ?? null,
     }))
 
     const insertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
@@ -65,8 +67,8 @@ export default {
   },
 }
 
-function parseRSS(xml: string): { url: string; content: string }[] {
-  const items: { url: string; content: string }[] = []
+function parseRSS(xml: string): { url: string; content: string; published_at: string | null }[] {
+  const items: { url: string; content: string; published_at: string | null }[] = []
   // Support both RSS <item> and Atom <entry>
   const itemRegex = /<(?:item|entry)>([\s\S]*?)<\/(?:item|entry)>/g
   let match
@@ -80,7 +82,9 @@ function parseRSS(xml: string): { url: string; content: string }[] {
       extract(block, 'content:encoded') ||
       extract(block, 'description') ||
       extract(block, 'summary') || ''
-    if (url) items.push({ url: url.trim(), content: content.trim() })
+    const pubDate = extract(block, 'pubDate') || extract(block, 'published') || extract(block, 'dc:date') || ''
+    const published_at = pubDate ? pubDate.trim() : null
+    if (url) items.push({ url: url.trim(), content: content.trim(), published_at })
   }
   return items
 }

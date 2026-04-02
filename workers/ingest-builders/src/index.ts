@@ -193,6 +193,7 @@ export default {
                 raw_content: rawContent,
                 status: 'pending',
                 metadata: { likes: tweet.likes ?? 0, retweets: tweet.retweets ?? 0 },
+                published_at: tweet.createdAt ?? null,
               }),
             })
           })
@@ -230,6 +231,8 @@ export default {
       url: ep.url,
       raw_content: `${ep.name}: ${ep.title}\n\n${ep.transcript}`,
       status: 'pending',
+      metadata: null,
+      published_at: ep.publishedAt ?? null,
     }))
 
     const podcastInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
@@ -258,20 +261,24 @@ export default {
       if (ghRes.ok) {
         const html = await ghRes.text()
         const chunks = html.split(/<article\b/i).slice(1)
+        const ghRepos: { repoPath: string; desc: string; stars: string }[] = []
         for (const chunk of chunks) {
           const hrefMatch = chunk.match(/href="(\/[^"\/]+\/[^"\/]+)"/)
           const descMatch = chunk.match(/<p[^>]*col-9[^>]*>([\s\S]*?)<\/p>/i)
           const starsMatch = chunk.match(/stargazers[^>]*>[\s\S]*?<\/svg>\s*([\d,]+)/i)
           if (!hrefMatch) continue
           const repoPath = hrefMatch[1]
-          const url = `https://github.com${repoPath}`
-          const repoName = repoPath.slice(1)
           const desc = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : ''
           const stars = starsMatch ? starsMatch[1].replace(/,/g, '') : ''
+          ghRepos.push({ repoPath, desc, stars })
+        }
+        for (const { repoPath, desc, stars } of ghRepos) {
+          const url = `https://github.com${repoPath}`
+          const repoName = repoPath.slice(1)
           const raw_content = `${repoName}${desc ? ': ' + desc : ''}${stars ? ' (★ ' + stars + ' stars today)' : ''}`
           newRows.push({ source_id: githubTrendingSource.id, url, raw_content, status: 'pending', metadata: { stars: stars ? parseInt(stars) : 0 } })
         }
-        console.log(`GitHub Trending: ${newRows.length} repos queued`)
+        console.log(`GitHub Trending: ${ghRepos.length} repos queued`)
       } else {
         console.error(`GitHub Trending fetch failed: ${ghRes.status}`)
       }
@@ -290,12 +297,12 @@ export default {
             'Accept': 'application/json',
           },
           body: JSON.stringify({
-            query: `{ posts(first: 30, order: VOTES) { edges { node { id name tagline votesCount url } } } }`,
+            query: `{ posts(first: 30, order: VOTES) { edges { node { id name tagline votesCount url createdAt } } } }`,
           }),
         })
         if (phRes.ok) {
           const phData = await phRes.json() as {
-            data?: { posts?: { edges?: { node: { id: string; name: string; tagline: string; votesCount: number; url: string } }[] } }
+            data?: { posts?: { edges?: { node: { id: string; name: string; tagline: string; votesCount: number; url: string; createdAt?: string } }[] } }
           }
           const edges = phData?.data?.posts?.edges ?? []
           const countBefore = newRows.length
@@ -306,6 +313,7 @@ export default {
               raw_content: `${node.name}: ${node.tagline} (△ ${node.votesCount} votes)`,
               status: 'pending',
               metadata: { votes: node.votesCount },
+              published_at: node.createdAt ?? null,
             })
           }
           console.log(`Product Hunt: ${newRows.length - countBefore} posts queued`)
@@ -358,13 +366,15 @@ export default {
         const idMatch      = entry.match(/<id>https?:\/\/arxiv\.org\/abs\/([\d.]+)/)
         const titleMatch   = entry.match(/<title>([\s\S]*?)<\/title>/)
         const summaryMatch = entry.match(/<summary>([\s\S]*?)<\/summary>/)
+        const publishedMatch = entry.match(/<published>([\s\S]*?)<\/published>/)
         if (!idMatch || !titleMatch) continue
         const arxivId = idMatch[1]
         const title   = titleMatch[1].trim().replace(/\s+/g, ' ')
         const summary = summaryMatch ? summaryMatch[1].trim().replace(/\s+/g, ' ') : ''
+        const published_at = publishedMatch ? publishedMatch[1].trim() : null
         const url = `https://arxiv.org/abs/${arxivId}`
         const raw_content = summary ? `${title}\n\n${summary}` : title
-        newRows.push({ source_id: src.id, url, raw_content, status: 'pending', metadata: { category } })
+        newRows.push({ source_id: src.id, url, raw_content, status: 'pending', metadata: { category }, published_at })
       }
       console.log(`arXiv ${category}: ${newRows.length - countBefore} papers queued`)
     }
@@ -381,7 +391,7 @@ export default {
         continue
       }
       const rdData = await rdRes.json() as {
-        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; subreddit: string } }[] }
+        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; subreddit: string; created_utc: number } }[] }
       }
       const posts = rdData?.data?.children ?? []
       const countBefore = newRows.length
@@ -396,6 +406,7 @@ export default {
           raw_content: `r/${post.subreddit}: ${post.title}`,
           status: 'pending',
           metadata: { score: post.score, num_comments: post.num_comments, subreddit: post.subreddit },
+          published_at: new Date(post.created_utc * 1000).toISOString(),
         })
       }
       console.log(`Reddit r/${subreddit}: ${newRows.length - countBefore} posts queued`)

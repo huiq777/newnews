@@ -18,7 +18,7 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env) {
     // Fetch up to 45 articles with no embedding yet
     const res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/daily_news?embedding=is.null&select=id,summary,article_content&limit=45`,
+      `${env.SUPABASE_URL}/rest/v1/daily_news?embedding=is.null&select=id,summary,article_content&order=created_at.desc,id.desc&limit=45`,
       { headers: SB(env) }
     )
     const articles: { id: string; summary: string; article_content: string | null }[] = await res.json()

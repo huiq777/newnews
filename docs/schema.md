@@ -1,13 +1,14 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-03-22 and is current. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-04-01. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
-The schema is organized into two layers:
+The schema is organized into three layers:
 
 - **Ingestion layer** (`sources`, `raw_ingestion`) — managed exclusively by Cloudflare Workers. Never written to by the frontend client.
 - **Product layer** (`daily_news`) — read by the frontend, written by Cloudflare Workers and Supabase Edge Functions via the service role.
+- **Cache layer** (`trend_briefs`) — written by the `generate-trend-brief` Edge Function; read directly by the frontend via anon key. TTL-based invalidation.
 
 All tables have Row Level Security enabled. Client access is granted only where explicitly needed.
 
@@ -23,6 +24,9 @@ The ingestion queue. Cloudflare Workers write raw article content here and track
 
 ### `daily_news`
 The clean, production-ready article store. Contains AI-generated bilingual summaries, pre-generated questions, scraped full article content, and Cohere vector embeddings. This is what the frontend reads and what the RAG chatbot searches. Linked back to `raw_ingestion` via `raw_ingestion_id` for audit traceability. The `engagement` JSONB column stores platform engagement data: `{likes, retweets}` for tweets (propagated from `raw_ingestion.metadata`), or `{hn_score, hn_comments}` for RSS articles enriched via the HN Algolia API.
+
+### `trend_briefs` *(planned — Trend Brief feature)*
+Cache table for cross-window trend synthesis. One row per `(anchor_date, step_days)` time window; covers ALL content categories in a single brief. The `generate-trend-brief` Edge Function writes here on successful completion; the frontend reads via anon key and renders the Trend Brief card only when the "All" tab is active. TTL is 6 hours — no automated invalidation beyond that; a Refresh button gives the user manual control. Feishu does NOT read from this table.
 
 ---
 
@@ -134,22 +138,54 @@ CREATE POLICY "public_read_daily_news"
 
 
 -- ============================================================
--- match_articles RPC (used by answer-question for RAG)
+-- match_articles RPC (used by answer-question for RAG AND generate-trend-brief for historical enrichment)
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION match_articles(
   query_embedding vector(1024),
   match_count     int DEFAULT 5
 )
-RETURNS TABLE (id UUID, title TEXT, summary TEXT, score FLOAT)
+RETURNS TABLE (id UUID, title TEXT, summary TEXT, published_at TIMESTAMPTZ, score FLOAT)
 LANGUAGE sql STABLE AS $$
-  SELECT id, title, summary,
+  SELECT id, title, summary, published_at,
          1 - (embedding <=> query_embedding) AS score
   FROM daily_news
   WHERE embedding IS NOT NULL
   ORDER BY embedding <=> query_embedding   -- raw <=> required for HNSW index
   LIMIT match_count;
 $$;
+
+-- NOTE: The RPC has no date filter — callers must filter post-query.
+-- generate-trend-brief uses this to find historical context: it excludes results
+-- whose published_at falls within the current window, then deduplicates across seeds.
+-- Similarity threshold (0.82) is also applied post-query in the Edge Function.
+
+
+-- ============================================================
+-- CACHE LAYER (planned — Trend Brief feature)
+-- ============================================================
+
+CREATE TABLE trend_briefs (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  anchor_date   date        NOT NULL,
+  step_days     integer     NOT NULL,
+  synthesis     text        NOT NULL,
+  sources_json  jsonb       NOT NULL,  -- [{id, title, published_at, is_historical, index}]
+  model         text        NOT NULL,
+  tokens_used   integer,               -- null on abort; set on successful completion
+  generated_at  timestamptz NOT NULL DEFAULT now(),
+  expires_at    timestamptz NOT NULL   -- generated_at + interval '6 hours'
+);
+
+CREATE INDEX ON trend_briefs (anchor_date, step_days, expires_at);
+
+-- Cache key: (anchor_date, step_days) WHERE expires_at > now()
+-- No category column — one brief covers all categories for a given window.
+-- RLS: anon key may read; only service role may insert/update.
+ALTER TABLE trend_briefs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "public_read_trend_briefs"
+    ON trend_briefs FOR SELECT
+    USING (true);
 ```
 
 ---

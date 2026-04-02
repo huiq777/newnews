@@ -1,4 +1,4 @@
-# Current State — 2026-03-22
+# Current State — 2026-04-01
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -6,7 +6,7 @@ This document is the single source of truth for where the project stands. Read t
 
 ## What Phase We Are In
 
-**Stages 2.5 (podcast ingestion) and 3 (UI redesign) are complete. Stage 4 (web deployment via Cloudflare Pages) is the active next step. Stage 2 source quality audit is still pending — run after 2026-03-25.**
+**Stages 2.5 (podcast ingestion) and 3 (UI redesign) are complete. Stage 4 (web deployment) and Stage 4.5 (Apify tweet ingestion) are in progress. Stage 5 (newnews web UI redesign + Trend Brief) is designed and ready for implementation. Stage 2 source quality audit is still pending — run once daily_news has 50+ articles.**
 
 All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix).
 
@@ -31,6 +31,8 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 |---|---|---|
 | `answer-question` | ✅ Deployed | RAG active — Cohere query embed → match_articles RPC → top 3 related → Groq SSE streaming |
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
+| `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required |
+| `generate-trend-brief` | ⏳ Planned | Cross-window trend synthesis; SSE streaming; `trend_briefs` cache; MiMo-V2-Flash |
 
 ### Supabase Tables & RPC
 
@@ -39,9 +41,10 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `sources` | ✅ Live | 12 rows (rss + wechat + github_feed + podcast); source_type + metadata JSONB columns active |
 | `raw_ingestion` | ✅ Live | State machine: pending → processing → done/error; metadata JSONB column active |
 | `daily_news` | ✅ Live | article_content, questions JSONB, title_en/zh, summary_en/zh, embedding, engagement JSONB all populated |
-| `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question |
+| `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question and generate-trend-brief |
 | `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
 | `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; NULL for RSS (HN source disabled); NULL for WeChat |
+| `trend_briefs` | ⏳ Planned | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
@@ -106,7 +109,7 @@ Per-source strategy:
 - `↻` pill when questions null; proportional scroll position on lang toggle
 - Empty states; HN engagement badge removed (HN source disabled)
 
-### Stage 4 — Web Deployment (Cloudflare Pages) ← NEXT
+### Stage 4 — Web Deployment (Cloudflare Pages) ← ACTIVE
 
 ```bash
 cd news-app
@@ -116,7 +119,21 @@ npx wrangler pages deploy dist --project-name news-app
 
 `EXPO_PUBLIC_*` vars are baked at build time — must be set in `.env.local` before building, or in Pages CI dashboard for GitHub integration.
 
-### Stage 5 — iOS via Expo EAS
+### Stage 4.5 — Apify Tweet Ingestion ← ACTIVE
+
+Edge Function `ingest-apify-tweets` implemented. Receives `RUN_SUCCEEDED` webhook from Apify, fetches dataset, batch-inserts to `raw_ingestion`. Downstream handled by existing `process-queue`.
+
+### Stage 5 — newnews Web UI Redesign + Trend Brief
+
+**Web UI redesign:** drum wheel date navigator, progressive disclosure, 3-category tabs. Spec: `AI-PM-skill.md` Web UI Design Direction.
+
+**Trend Brief feature:** cross-window trend synthesis card above article list (All tab only). Full spec: `docs/superpowers/specs/2026-04-01-trend-brief-design.md`. Requires:
+- `trend_briefs` DB migration
+- `generate-trend-brief` Edge Function (MiMo-V2-Flash, SSE streaming, two-pass clustering)
+- `embed-batch` recency sort fix (one-line change)
+- Trend Brief card in `App.tsx`
+
+### Stage 6 — iOS via Expo EAS
 
 Packaging step only — do last. Requires Apple Developer account ($99/yr).
 
@@ -148,6 +165,7 @@ WeChat scraping will always fail — RSS bridge content is the ceiling. Do not a
 - **sources columns:** `id, name, rss_url (UNIQUE), is_active, created_at, source_type, metadata JSONB`
 - **raw_ingestion columns:** `id, source_id, url (UNIQUE), raw_content, fetched_at, status, retry_count, last_error, processed_at, metadata JSONB`
 - **daily_news columns:** `id, source_id, raw_ingestion_id, url (UNIQUE), title, summary, title_en, summary_en, title_zh, summary_zh, article_content, questions JSONB, embedding vector(1024), engagement JSONB, created_at`
+- **trend_briefs columns (planned):** `id, anchor_date, step_days, synthesis, sources_json JSONB, model, tokens_used, generated_at, expires_at`
 
 ---
 

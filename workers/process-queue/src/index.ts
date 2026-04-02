@@ -63,10 +63,10 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env) {
     const res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?status=eq.pending&limit=5&select=id,source_id,url,raw_content,metadata`,
+      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?status=eq.pending&limit=5&select=id,source_id,url,raw_content,metadata,published_at`,
       { headers: SB(env) }
     )
-    const articles: { id: string; source_id: string; url: string; raw_content: string; metadata?: { likes?: number; retweets?: number } }[] = await res.json()
+    const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number } }[] = await res.json()
 
     if (articles.length === 0) {
       console.log('No pending articles.')
@@ -141,7 +141,7 @@ async function generateQuestions(
   }
 }
 
-async function fetchArticleContent(url: string): Promise<string> {
+async function fetchArticleContent(url: string): Promise<{ content: string; published_at: string | null }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 8000)
 
@@ -154,9 +154,10 @@ async function fetchArticleContent(url: string): Promise<string> {
       },
     })
     clearTimeout(timeout)
-    if (!res.ok) return ''
+    if (!res.ok) return { content: '', published_at: null }
 
     const texts: string[] = []
+    let htmlPublishedAt: string | null = null
     const STRIP = ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript']
     let rewriter = new HTMLRewriter()
     for (const sel of STRIP) {
@@ -164,6 +165,22 @@ async function fetchArticleContent(url: string): Promise<string> {
     }
     rewriter = rewriter.on('p, h1, h2, h3', {
       text(chunk) { if (chunk.text.trim()) texts.push(chunk.text.trim()) },
+    })
+    // Extract publish date from HTML meta tags
+    rewriter = rewriter.on('meta', {
+      element(el) {
+        const prop = el.getAttribute('property') || el.getAttribute('name') || ''
+        if (['article:published_time', 'publishdate', 'date', 'og:article:published_time'].includes(prop.toLowerCase())) {
+          const val = el.getAttribute('content')
+          if (val && !htmlPublishedAt) htmlPublishedAt = val
+        }
+      },
+    })
+    rewriter = rewriter.on('time[datetime]', {
+      element(el) {
+        const dt = el.getAttribute('datetime')
+        if (dt && !htmlPublishedAt) htmlPublishedAt = dt
+      },
     })
 
     // Must consume the output stream or HTMLRewriter never runs
@@ -173,12 +190,12 @@ async function fetchArticleContent(url: string): Promise<string> {
 
     // Paywall detection: fall back if content looks like a subscription wall
     const lede = result.slice(0, 300).toLowerCase()
-    if (lede.includes('subscribe') && lede.includes('sign in')) return ''
+    if (lede.includes('subscribe') && lede.includes('sign in')) return { content: '', published_at: htmlPublishedAt }
 
-    return result
+    return { content: result, published_at: htmlPublishedAt }
   } catch {
     clearTimeout(timeout)
-    return ''
+    return { content: '', published_at: null }
   }
 }
 
@@ -209,6 +226,7 @@ async function insertAndMarkDone(
   questions: { en: string[]; zh: string[] } | null,
   articleContent: string,
   engagement: Record<string, number> | null,
+  published_at: string | null,
   env: Env
 ) {
   await fetch(`${env.SUPABASE_URL}/rest/v1/daily_news`, {
@@ -227,6 +245,7 @@ async function insertAndMarkDone(
       questions,
       article_content: articleContent || null,
       engagement,
+      published_at,
     }),
   })
 
@@ -263,7 +282,7 @@ function parseSection(text: string, tag: string): string {
 }
 
 async function processArticle(
-  article: { id: string; source_id: string; url: string; raw_content: string; metadata?: { likes?: number; retweets?: number } },
+  article: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number } },
   env: Env
 ) {
   try {
@@ -281,19 +300,30 @@ async function processArticle(
 
     // Determine engagement: tweets carry likes/retweets from ingest-builders metadata;
     // RSS/other articles get HN score if the article was posted to Hacker News
-    const isTweet = article.url.includes('x.com') && article.url.includes('/status/')
+    const isTweet  = article.url.includes('x.com') && article.url.includes('/status/')
+    const isGitHub = article.url.startsWith('https://github.com/')
     let engagement: Record<string, number> | null = null
     if (isTweet && article.metadata) {
       engagement = { likes: article.metadata.likes ?? 0, retweets: article.metadata.retweets ?? 0 }
-    } else if (!isTweet) {
+    } else if (isGitHub && article.metadata?.stars != null) {
+      engagement = { stars: article.metadata.stars }
+    } else if (article.url.includes('reddit.com') && article.metadata?.score != null) {
+      engagement = { score: article.metadata.score, num_comments: article.metadata.num_comments ?? 0 }
+    } else if (!isTweet && !isGitHub) {
       // HN engagement disabled — HN source paused due to low content quality
       // engagement = await fetchHNEngagement(article.url)
     }
 
-    // Attempt full article fetch; fall back to RSS snippet if scraping fails or content is thin
-    const articleContent = await fetchArticleContent(article.url)
+    // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
+    // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary
+    const isArxiv = article.url.startsWith('https://arxiv.org/')
+    const fetched = isArxiv ? { content: '', published_at: null } : await fetchArticleContent(article.url)
+    const articleContent = fetched.content
     const contentForGroq = (articleContent.length > 500 ? articleContent : rawContent).substring(0, 24000)
-    console.log(`Content source: ${articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)`}`)
+    console.log(`Content source: ${isArxiv ? 'arxiv raw_content' : articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)`}`)
+
+    // Resolve published_at: prefer metadata (from ingestion), fall back to HTML meta tag
+    const published_at = article.published_at || fetched.published_at || null
 
     const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
 
@@ -351,7 +381,7 @@ async function processArticle(
 
     const questions = await generateQuestions(summary_en, summary_zh, env)
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, env)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, env)
     console.log(`OK: ${article.url}`)
 
   } catch (err: any) {

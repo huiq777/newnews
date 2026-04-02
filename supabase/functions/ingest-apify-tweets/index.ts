@@ -53,6 +53,7 @@ serve(async (req) => {
       url: item.url,
       raw_content: `@${item.author.userName}: ${item.text}`,
       metadata: { likes: item.likeCount ?? 0, retweets: item.retweetCount ?? 0 },
+      published_at: item.created_at ?? item.createdAt ?? null,
       status: 'pending',
     }))
 
