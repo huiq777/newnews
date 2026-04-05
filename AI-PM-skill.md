@@ -38,7 +38,7 @@ Sources (RSS + WeChat + Tweets + Podcasts + future: GitHub/PH/Nowcoder/Papers)
 
 **Success definition:** Build it *nicely* — quality and craft over scale or revenue
 
-**Stack:** Mostly free-tier (Groq → migrating to grok-4.1-thinking + MiMo-V2-Flash, Cohere, Supabase, Cloudflare Workers, Expo/React Native web)
+**Stack:** Mostly free-tier (Groq `llama-3.3-70b-versatile`, Cohere, Supabase, Cloudflare Workers, Expo/React Native web)
 
 ---
 
@@ -46,11 +46,11 @@ Sources (RSS + WeChat + Tweets + Podcasts + future: GitHub/PH/Nowcoder/Papers)
 
 Categories are defined by **content type, not platform**. A Nowcoder post and a Zhihu coding thread both belong in the same category regardless of origin. This drives both the feed UI (tab navigation) and source expansion decisions.
 
-| Category | Signal type | Current sources | Proposed additions |
-|---|---|---|---|
-| **Industry** | Editorial journalism, product commentary, professional takes | RSS (TechCrunch, Ars, The Verge), WeChat (5 sources), Podcasts, Builder Tweets (follow-builders + Apify 6) | Product Hunt (free GraphQL API, ~30 AI/tech launches/day, vote count as quality signal) |
-| **Technical Frontier** | Primary technical outputs — not journalism about them | — (none yet) | GitHub Trending (zero-cost Cheerio scrape), arXiv / Papers with Code (research papers) |
-| **Career / Dev Community** | What developers are discussing, experiencing, hiring | — (none yet) | Nowcoder hot-search API (undocumented, no auth, 20 trending items) — Chinese dev/job community |
+| Category | Signal type | Current sources |
+|---|---|---|
+| **Industry** | Editorial journalism, product commentary, professional takes | RSS (TechCrunch, Ars, The Verge), WeChat (Founder Park, GeekPark), Podcasts, Builder Tweets (follow-builders), Apify tweets (6 handles), Product Hunt |
+| **Technical Frontier** | Primary technical outputs — not journalism about them | GitHub Trending, arXiv (cs.AI + cs.LG) |
+| **Career / Dev Community** | What developers are discussing, experiencing, hiring | Nowcoder hot-search, Reddit (r/MachineLearning, r/cscareerquestions, r/layoffs) |
 
 **Key principle:** Categories are content-first, platform-agnostic. Product Hunt belongs in Industry (industry people talking about what's shipping — same signal as builder tweets). GitHub Trending belongs in Technical Frontier (primary technical output, not journalism about it).
 
@@ -59,19 +59,18 @@ Categories are defined by **content type, not platform**. A Nowcoder post and a 
 ## Sources
 
 ### Active
-- RSS: TechCrunch, Ars Technica, The Verge *(Hacker News disabled — low signal)*
-- WeChat (via RSS bridge): Founder Park, GeekPark, 财联社, 中国新闻社, 36氪
-- Builder tweets: 25 AI builders via follow-builders `feed-x.json` (GitHub, no X API cost)
-- AI podcasts: 5 shows (Latent Space, Training Data, No Priors, Unsupervised Learning, Data Driven NYC) via follow-builders `feed-podcasts.json` (YouTube transcripts, no API cost)
-- Apify-scraped tweets: 6 curated AI/tech figures (Chris Olah, Dario Amodei, Simon Willison, @xai, Paul Graham, Ethan Mollick) via Apify Twitter scraper (~$1.08/mo)
+- **RSS:** TechCrunch, Ars Technica, The Verge *(Hacker News disabled — captures comment threads, not articles)*
+- **WeChat** (via RSS bridge): Founder Park, GeekPark *(wechat2rss — content works)*; 财联社, 中国新闻社, 36氪 disabled *(wewe-rss — empty raw_content)*
+- **Builder tweets:** 25 AI builders via follow-builders `feed-x.json` (GitHub, no X API cost)
+- **Apify-scraped tweets:** 6 curated handles (ch402, DarioAmodei, simonw, xai, paulg, emollick) via Apify webhook (~$1.08/mo)
+- **AI podcasts:** 5 shows via follow-builders `feed-podcasts.json` (YouTube transcripts, no API cost)
+- **GitHub Trending:** HTML scrape of `github.com/trending`, zero auth, star count as engagement signal → Technical Frontier
+- **arXiv:** cs.AI + cs.LG top 10 per category via Atom API, no auth → Technical Frontier
+- **Product Hunt:** GraphQL API top 30 by votes, `PRODUCTHUNT_API_TOKEN` required → Industry
+- **Nowcoder:** public hot-search JSON API (`gw-c.nowcoder.com`), no auth → Career/Dev Community
+- **Reddit:** r/MachineLearning, r/cscareerquestions, r/layoffs via `.rss` feeds (JSON API blocked by Cloudflare IPs) → ⚠️ Needs SQL update + ingest-rss deploy
 
-### Proposed (not yet implemented)
-- **Product Hunt** — GraphQL API, free `PRODUCTHUNT_API_TOKEN`, top 30 posts by vote count → Industry category
-- **GitHub Trending** — Cheerio scrape of `github.com/trending`, zero auth, star count as engagement signal → Technical Frontier category
-- **arXiv / Papers with Code** — research paper feed → Technical Frontier category
-- **Nowcoder** — undocumented hot-search API (`gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc?size=20&_={timestamp}`), no auth → Career/Dev Community category
-
-**Source reference:** See `docs/design-inspiration-log.md` for detailed scraper analysis of GitHub Trending, Product Hunt, and Nowcoder (entry #2).
+**Source reference:** See `docs/design-inspiration-log.md` for scraper analysis of GitHub Trending, Product Hunt, and Nowcoder.
 
 ---
 
@@ -84,7 +83,7 @@ Categories are defined by **content type, not platform**. A Nowcoder post and a 
 
 ## Web UI Design Direction
 
-> Full analysis in `docs/design-inspiration-log.md`. Design is still in progress — decisions below are settled; visual details are being finalised.
+> Full analysis in `docs/design-inspiration-log.md`. Design is **implemented** — all components live in `news-app/components/`.
 
 ### App identity
 - **Name:** newnews
@@ -131,104 +130,98 @@ Fixed left sidebar `w-64` for temporal navigation and horizontal real estate on 
 - Both count and data queries apply the same date filter (pagination accuracy)
 - Page resets to 0 on any filter change
 
-### What does NOT change
-- ArticleCard component internals
-- Streaming RAG Q&A behaviour
-- Engagement badges (🔥 likes for tweets)
-- Refresh questions button
-- EN/中 language toggle with scroll-position preservation
-- All workers, Supabase functions, schema
+### Implemented components (`news-app/components/`)
+- `NavBar` — tab navigation (Latest · Technical · Community) + EN/中 toggle
+- `DrumWheelSidebar` — fixed left sidebar; Today / 3D / 7D / 30D buttons; spring-sliding indicators; `switchTo(days)` control for auto-fallback
+- `FilterTag` — active filter pill
+- `ArticleCard` — progressive disclosure; engagement badges (🔥 tweets, ★ GitHub); Markdown bullets; Q&A streaming
+- `TrendBriefCard` — synthesis card above feed; expand/collapse; SSE streaming; Refresh button; "All" tab only
 
 ---
 
-## Current State (as of 2026-04-01)
+## Current State (as of 2026-04-05)
 
 | Component | Status |
 |---|---|
-| RSS ingestion | ✅ Live |
-| Full article content scraping | ✅ Live (HTMLRewriter; 8s timeout; paywall fallback) |
-| LLM summarization + question generation | ✅ Live (bilingual EN+ZH; full content as input) |
-| Vector embeddings (Cohere) | ✅ Live (embed-batch; prefers article_content) |
+| RSS ingestion | ⚠️ Needs deploy — now routes `source_type IN (rss, wechat, reddit)` |
+| Full article scraping | ✅ Live (HTMLRewriter; 8s timeout; paywall fallback) |
+| LLM summarization + question generation | ⚠️ Needs deploy — **1 Groq call/article** (was 3); `parseJsonSection()` parser; max_tokens 2000 |
+| Vector embeddings (Cohere) | ✅ Live (embed-batch every 5 min; article_content preferred) |
 | Inline Q&A on article cards | ✅ Live |
 | RAG in `answer-question` | ✅ Live (match_articles RPC; top 3 related; Groq SSE streaming) |
-| `ingest-builders` worker | ✅ Live (daily 6am UTC; bio extraction via Groq; stores metadata={likes,retweets}) |
-| `send-feishu-digest` worker | ✅ Live (daily 17:00 UTC / 12pm EST; Chinese content; X - @handle - role format; all 3 ZH bullets; engagement badge) |
-| Engagement data pipeline | ✅ Live (`raw_ingestion.metadata` + `daily_news.engagement`; tweets: likes/retweets; RSS: HN score via Algolia API) |
-| Upgraded summary prompt | ✅ Live (2-3 sentences/bullet; specific metrics required; no vague generalizations) |
-| Engagement UI badges | ✅ Live (🔥 likes amber pill for tweets only; HN badge disabled) |
-| Feishu all 3 ZH bullets | ✅ Live (was showing 2 bullets) |
-| Podcast ingestion (feed-podcasts.json) | ✅ Live (ingest-builders; YouTube transcripts; `podcast` source_type; batch INSERT) |
-| Stage 3 UI redesign | ✅ Live (warm editorial; `MarkdownText`; answer Markdown; proportional scroll position) |
-| Web deployment | ❌ Dev only — Cloudflare Pages |
-| Apify tweet ingestion | ⏳ In progress — `ingest-apify-tweets` Edge Function implemented; webhook config pending |
-| Web UI redesign (newnews) | ⏳ Design settled — drum wheel + progressive disclosure + 3-category tabs; implementation pending |
-| Trend Brief | ⏳ Spec complete — `docs/superpowers/specs/2026-04-01-trend-brief-design.md`; implementation pending |
-| Model migration (grok-4.1 + MiMo) | ⏳ Plan written in `docs/model-strategy.md` — not implemented |
-| New source categories (PH, GitHub, Nowcoder, Papers) | ⏳ Proposed — not implemented |
-| iOS build (Expo EAS) | ❌ Phase 5 |
+| `ingest-builders` worker | ⚠️ Needs deploy — now fetches GH Trending + PH + Nowcoder + arXiv + Reddit; missing podcast no longer kills downstream |
+| `send-feishu-digest` worker | ✅ Live (daily 17:00 UTC / 12pm EST; Chinese; `X - @handle - role` format; all 3 ZH bullets) |
+| Engagement data pipeline | ✅ Live (tweets: likes/retweets; GitHub Trending: stars; Reddit: score + num_comments) |
+| Engagement UI badges | ✅ Live (🔥 tweets amber pill; ★ GitHub stars; HN disabled) |
+| Podcast ingestion | ✅ Live (ingest-builders; YouTube transcripts; `podcast` source_type) |
+| Web UI redesign (newnews) | ✅ Live — drum wheel sidebar, progressive disclosure, 3-category tabs, Today/3D/7D/30D; components in `news-app/components/` |
+| Today eager init + 3D auto-fallback | ✅ Live — no flash on load; auto-switches to 3D if Today returns 0 articles |
+| Trend Brief | ✅ Live — `generate-trend-brief` Edge Function + `TrendBriefCard`; two-pass clustering; historical enrichment; `trend_briefs` 6h TTL cache |
+| Apify tweet ingestion | ✅ Live — `ingest-apify-tweets` Edge Function; 6 handles; Apify webhook |
+| GitHub Trending ingestion | ✅ Live — added to ingest-builders; HTML scrape; stars engagement |
+| arXiv ingestion | ✅ Live — cs.AI + cs.LG top 10; Atom API; added to ingest-builders |
+| Product Hunt ingestion | ✅ Live — GraphQL top 30 by votes; `PRODUCTHUNT_API_TOKEN` required |
+| Nowcoder ingestion | ✅ Live — public hot-search API; no auth; added to ingest-builders |
+| Reddit ingestion | ⚠️ Needs SQL + deploy — sources need `.rss` URL update + ingest-rss needs deploy |
+| `published_at` pipeline | ✅ Live — all sources store `metadata.published_at`; HTML meta tag fallback |
+| Web deployment | 🔄 In progress — Cloudflare Pages |
+| Model migration (grok-4.1 + MiMo) | ⏳ Plan written — `docs/model-strategy.md`; not implemented |
+| iOS build (Expo EAS) | ❌ Phase 6 — do last |
 
 ---
 
 ## Prioritized Roadmap
 
-### ✅ Tier 1 — Foundation (complete)
+### ✅ Complete
 - ~~Full article scraping~~ — live
 - ~~Activate RAG~~ — live
+- ~~Deploy `ingest-builders` + `send-feishu-digest`~~ — live
+- ~~Podcast ingestion~~ — live
+- ~~UI polish + design pass~~ — warm editorial aesthetic live
+- ~~Apify tweet ingestion~~ — `ingest-apify-tweets` Edge Function live; 6 curated handles
+- ~~Web UI redesign~~ — drum wheel sidebar, progressive disclosure, 3-category tabs live in `news-app/components/`
+- ~~Trend Brief~~ — `generate-trend-brief` + `TrendBriefCard` + `trend_briefs` cache live
+- ~~Source expansion~~ — GitHub Trending, arXiv, Product Hunt, Nowcoder all live in ingest-builders
 
-### Tier 2 — Active Work
+### ⚠️ Immediate — Deploy Pending Workers
 
-**~~1. Deploy `ingest-builders` + `send-feishu-digest`~~** ✅ Complete
+Three workers have local changes not yet deployed:
 
-**2. Source Quality Audit** ⏳ Pending — DB wiped 2026-03-22; run after sufficient data (50+ articles)
-- SQL + judgment only; no code
+```bash
+cd workers/ingest-rss && npx wrangler deploy
+cd workers/process-queue && npx wrangler deploy
+cd workers/ingest-builders && npx wrangler deploy
+```
+
+Also update Reddit sources to RSS format (JSON API blocked from Cloudflare IPs):
+```sql
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/MachineLearning.rss', source_type = 'rss' WHERE name = 'Reddit r/MachineLearning';
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/cscareerquestions.rss', source_type = 'rss' WHERE name = 'Reddit r/cscareerquestions';
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/layoffs.rss', source_type = 'rss' WHERE name = 'Reddit r/layoffs';
+```
+
+Then reset 429-errored rows: `UPDATE raw_ingestion SET status='pending', retry_count=0 WHERE status='error' AND last_error LIKE 'Groq 429%';`
+
+### Active Work
+
+**1. Source Quality Audit** ⏳ Pending — run once `daily_news` has 50+ articles (3+ days of ingest after deploy)
+- SQL + judgment only; no code changes
 - Per-source: RSS → avg_scraped_chars + scrape_failures; WeChat → avg_summary_chars; Builders → skip
 
-**~~2.5. Podcast Ingestion~~** ✅ Complete
-
-**~~3. UI Polish + Design Pass~~** ✅ Complete (warm editorial)
-
-**4. Web Deployment via Cloudflare Pages**
+**2. Web Deployment via Cloudflare Pages** 🔄 In progress
 - `npx expo export --platform web` → `npx wrangler pages deploy dist --project-name news-app`
 - `EXPO_PUBLIC_*` vars baked at build time — set in `.env.local` or Pages CI dashboard
-- See `AI-SWE-skill.md` Stage 4 for full commands
+- See `AI-SWE-skill.md` for full commands
 
-**4.5. Apify Tweet Ingestion (6 curated handles)**
-- **Architecture:** Apify 6:30am UTC → `RUN_SUCCEEDED` webhook → Supabase Edge Function `ingest-apify-tweets` → `raw_ingestion` → existing `process-queue` unchanged
-- **Cost:** ~$1.08/mo (15 tweets × 6 handles × 30 days)
-- **No CF cron slot used:** Apify scheduler is external; Edge Function is webhook-triggered
-- See `AI-SWE-skill.md` Stage 4.5 for full technical spec
+### Future
 
-**5. Web UI Redesign — newnews**
-- Progressive disclosure: title-only collapsed → click to expand summary + questions
-- Left sidebar drum wheel date navigator (Today / 7D / 30D / 90D)
-- 3-category nav tabs: Latest · Technical · Community
-- Design system: Space Grotesk + Manrope + Inter, zinc neutral palette
-- File: `news-app/App.tsx` only
-- Full design spec: see Web UI Design Direction above + `docs/design-inspiration-log.md`
-
-**5.5. Trend Brief**
-- Cross-window synthesis card above article list, "All" tab only
-- Two-pass clustering (cosine > 0.82, proportional slot allocation) → 12 articles → MiMo-V2-Flash
-- Historical enrichment via existing `match_articles` RPC (pgvector)
-- TTL cache in `trend_briefs` table (6h); Refresh button for manual invalidation
-- AbortController + `req.signal` propagation for cancel-on-scroll
-- Full spec: `docs/superpowers/specs/2026-04-01-trend-brief-design.md`
-
-**6. Model Migration (grok-4.1-thinking + MiMo-V2-Flash)**
-- grok-4.1-thinking for quality tasks (article/tweet summaries, RAG Q&A)
-- MiMo-V2-Flash for mechanical tasks (question generation, bio extraction)
-- ~67% cheaper than Groq paid tier; removes TPD cap entirely
+**3. Model Migration (grok-4.1-thinking + MiMo-V2-Flash)**
+- grok-4.1-thinking for quality tasks (summaries, RAG Q&A); MiMo-V2-Flash for mechanical (questions, bio extraction)
+- ~67% cheaper; removes TPD cap entirely
 - Full plan: `docs/model-strategy.md`
-- New secrets: `XAI_API_KEY`, `MIMO_API_KEY`
 
-**7. Source Expansion (new categories)**
-- **Industry:** Add Product Hunt (free GraphQL API, `PRODUCTHUNT_API_TOKEN`)
-- **Technical Frontier:** Add GitHub Trending (Cheerio scrape) + arXiv/Papers with Code
-- **Career/Dev Community:** Add Nowcoder (undocumented hot-search API, no auth)
-- Each new source_type needs a category mapping in the frontend
-
-**8. iOS via Expo EAS**
-- Packaging step, not product work — do last
+**4. iOS via Expo EAS**
+- Packaging step only — do last
 - Requires Apple Developer account ($99/yr)
 
 ---

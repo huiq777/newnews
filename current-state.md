@@ -1,4 +1,4 @@
-# Current State — 2026-04-01
+# Current State — 2026-04-05
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -6,7 +6,7 @@ This document is the single source of truth for where the project stands. Read t
 
 ## What Phase We Are In
 
-**Stages 2.5 (podcast ingestion) and 3 (UI redesign) are complete. Stage 4 (web deployment) and Stage 4.5 (Apify tweet ingestion) are in progress. Stage 5 (newnews web UI redesign + Trend Brief) is designed and ready for implementation. Stage 2 source quality audit is still pending — run once daily_news has 50+ articles.**
+**Stages 2.5, 3, and Trend Brief (generate-trend-brief Edge Function) are complete. Stage 4 (web deployment) and Stage 4.5 (Apify tweet ingestion) are in progress. Stage 2 source quality audit is still pending — run once daily_news has 50+ articles.**
 
 All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix).
 
@@ -18,9 +18,9 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
-| `ingest-rss` | ✅ Deployed | Every 4 hours | RSS + Atom feeds; batch insert; ON CONFLICT DO NOTHING |
-| `process-queue` | ✅ Deployed | Every 15 min | Groq llama-3.3-70b-versatile; bilingual summarize + questions; full article scraping; engagement from raw_ingestion.metadata (tweets only; HN fetch disabled); subrequest count ~36/50 |
-| `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; subrequest count ~38/50 |
+| `ingest-rss` | ⚠️ Needs deploy | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
+| `process-queue` | ⚠️ Needs deploy | Every 15 min | **Now 1 Groq call per article** (summary + QUESTIONS_EN + QUESTIONS_ZH combined); ~67% fewer Groq tokens; max_tokens raised to 2000; `parseJsonSection` parser added |
+| `ingest-builders` | ⚠️ Needs deploy | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
 | `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; 🔥 likes badge for tweets only (HN badge disabled) |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
@@ -32,7 +32,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `answer-question` | ✅ Deployed | RAG active — Cohere query embed → match_articles RPC → top 3 related → Groq SSE streaming |
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
 | `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required |
-| `generate-trend-brief` | ⏳ Planned | Cross-window trend synthesis; SSE streaming; `trend_briefs` cache; MiMo-V2-Flash |
+| `generate-trend-brief` | ✅ Deployed | Cross-window trend synthesis (all categories); SSE streaming; `trend_briefs` 6h TTL cache; llama-3.3-70b-versatile; two-pass clustering; historical enrichment via match_articles RPC |
 
 ### Supabase Tables & RPC
 
@@ -44,7 +44,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question and generate-trend-brief |
 | `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
 | `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; NULL for RSS (HN source disabled); NULL for WeChat |
-| `trend_briefs` | ⏳ Planned | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL |
+| `trend_briefs` | ✅ Live | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL; index on (anchor_date, step_days, expires_at) |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
@@ -65,10 +65,36 @@ Working features:
 - Engagement badges: 🔥 N likes (amber pill) for tweets only; K-suffix formatting via `fmtNum()`
 - Upgraded summaries: 2-3 sentences per bullet; specific metrics required; no vague generalizations
 - Empty state message when no articles loaded
+- **`dateRange` now initializes eagerly to today** — no flash of all articles on first load
+- **Auto-fallback to 3D when Today returns 0 articles** — `DrumWheelSidebar` exposes `switchTo(days)` control; App calls it automatically
+- Title bracket-stripping rule added to both prompts — prevents `[Title]` formatting artifacts
 
 ---
 
 ## Active Next Steps
+
+### Deploy Pending Workers ← IMMEDIATE
+
+Three workers have local changes that need to be deployed:
+
+```bash
+cd workers/ingest-rss && npx wrangler deploy
+cd workers/process-queue && npx wrangler deploy
+cd workers/ingest-builders && npx wrangler deploy
+```
+
+Then reset 429-errored rows so they reprocess with the improved token budget:
+```sql
+UPDATE raw_ingestion SET status = 'pending', retry_count = 0
+WHERE status = 'error' AND last_error LIKE 'Groq 429%';
+```
+
+And update Reddit sources to use RSS (bypasses Cloudflare IP block on Reddit JSON API):
+```sql
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/MachineLearning.rss', source_type = 'rss' WHERE name = 'Reddit r/MachineLearning';
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/cscareerquestions.rss', source_type = 'rss' WHERE name = 'Reddit r/cscareerquestions';
+UPDATE sources SET rss_url = 'https://www.reddit.com/r/layoffs.rss', source_type = 'rss' WHERE name = 'Reddit r/layoffs';
+```
 
 ### Stage 2 — Source Quality Audit ⏳ Pending (run after 2026-03-25)
 
@@ -123,15 +149,11 @@ npx wrangler pages deploy dist --project-name news-app
 
 Edge Function `ingest-apify-tweets` implemented. Receives `RUN_SUCCEEDED` webhook from Apify, fetches dataset, batch-inserts to `raw_ingestion`. Downstream handled by existing `process-queue`.
 
-### Stage 5 — newnews Web UI Redesign + Trend Brief
+### Stage 5 — Trend Brief ✅ COMPLETE
 
-**Web UI redesign:** drum wheel date navigator, progressive disclosure, 3-category tabs. Spec: `AI-PM-skill.md` Web UI Design Direction.
+**Trend Brief feature is live.** `generate-trend-brief` Edge Function deployed; `trend_briefs` table live; `TrendBriefCard` in `App.tsx`; `embed-batch` already has recency sort.
 
-**Trend Brief feature:** cross-window trend synthesis card above article list (All tab only). Full spec: `docs/superpowers/specs/2026-04-01-trend-brief-design.md`. Requires:
-- `trend_briefs` DB migration
-- `generate-trend-brief` Edge Function (MiMo-V2-Flash, SSE streaming, two-pass clustering)
-- `embed-batch` recency sort fix (one-line change)
-- Trend Brief card in `App.tsx`
+**Note:** "Today" returns 204 (no articles) when zero articles have `created_at` in the UTC calendar day. This is correct — articles from the morning ET ingest land at Apr 1 UTC. Next UTC day's articles will populate Today correctly. Use 3D/7D to see the card in action.
 
 ### Stage 6 — iOS via Expo EAS
 
@@ -142,20 +164,29 @@ Packaging step only — do last. Requires Apple Developer account ($99/yr).
 ## Active RSS Sources
 
 ```
-TechCrunch:    https://techcrunch.com/feed/                                           (rss)
-The Verge:     https://www.theverge.com/rss/index.xml                                (rss)
-Ars Technica:  https://feeds.arstechnica.com/arstechnica/index                       (rss)
-Hacker News:   https://news.ycombinator.com/rss                                      (rss) ← DISABLED (is_active=false)
-Founder Park:  https://wechat2rss.xlab.app/feed/e95ec80...xml                        (wechat)
-GeekPark:      https://wechat2rss.xlab.app/feed/1a5aec9...xml                        (wechat)
-财联社:         https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
-中国新闻社:     https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
-36氪:          https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)
-follow-builders: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json (github_feed)
-follow-builders-podcasts: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json (podcast)
+TechCrunch:    https://techcrunch.com/feed/                                           (rss)      ✅ active
+The Verge:     https://www.theverge.com/rss/index.xml                                (rss)      ✅ active
+Ars Technica:  https://feeds.arstechnica.com/arstechnica/index                       (rss)      ✅ active
+Hacker News:   https://news.ycombinator.com/rss                                      (rss)      ❌ DISABLED (captures comment threads, not articles)
+Founder Park:  https://wechat2rss.xlab.app/feed/e95ec80...xml                        (wechat)   ✅ active — fetched by ingest-rss
+极客公园:       https://wechat2rss.xlab.app/feed/1a5aec9...xml                        (wechat)   ✅ active — fetched by ingest-rss
+财联社:         https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
+中国新闻社:     https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
+36氪:          https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
+Reddit r/MachineLearning: https://www.reddit.com/r/MachineLearning.rss               (rss)      ✅ active (switched from JSON API to RSS)
+Reddit r/cscareerquestions: https://www.reddit.com/r/cscareerquestions.rss           (rss)      ✅ active (switched from JSON API to RSS)
+Reddit r/layoffs: https://www.reddit.com/r/layoffs.rss                               (rss)      ✅ active (switched from JSON API to RSS)
+arXiv cs.AI:   https://export.arxiv.org/api/query?search_query=cat:cs.AI             (arxiv)    ✅ active — fetched by ingest-builders
+arXiv cs.LG:   https://export.arxiv.org/api/query?search_query=cat:cs.LG             (arxiv)    ✅ active — fetched by ingest-builders
+follow-builders: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json (github_feed) ✅ active
+follow-builders-podcasts: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json (podcast) ✅ active
+apify-tweets:  https://api.apify.com/v2/acts/...                                     (apify_tweet) ✅ active (webhook)
+GitHub Trending: https://github.com/trending                                          (github_trending) ✅ active
+Nowcoder Hot:  https://gw-c.nowcoder.com/api/sparta/hot-search/top-hot-pc            (nowcoder) ✅ active
+Product Hunt:  https://api.producthunt.com/v2/api/graphql                            (producthunt) ✅ active (requires PRODUCTHUNT_API_TOKEN)
 ```
 
-WeChat scraping will always fail — RSS bridge content is the ceiling. Do not attempt to fix this.
+WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content quality varies. wechat2rss bridges (Founder Park, 极客公园) have real content. wewe-rss bridges (财联社, 中国新闻社, 36氪) return empty raw_content — disabled. Do not attempt to fix wewe-rss — RSS bridge is the ceiling.
 
 ---
 
@@ -174,7 +205,7 @@ WeChat scraping will always fail — RSS bridge content is the ceiling. Do not a
 - **Groq model (summaries + questions + bio extraction):** `llama-3.3-70b-versatile` — 12K TPM free tier
 - **Groq model (answer streaming):** `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
 - **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG — asymmetry is load-bearing, do not change
-- **process-queue Groq calls per article:** 3 (summary + EN questions + ZH questions)
+- **process-queue Groq calls per article:** 1 (summary + QUESTIONS_EN + QUESTIONS_ZH combined in one call; `parseJsonSection` extracts the JSON arrays from the response)
 - **ingest-builders Groq calls per run:** 1 batch call for all bios; subrequest count ~38/50 (tweets + podcasts)
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — all 5 slots used; ingest-x deleted to make room

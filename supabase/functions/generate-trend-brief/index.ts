@@ -5,17 +5,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, content-type',
 }
 
-// Cosine similarity between two equal-length vectors
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, na = 0, nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
-  }
-  if (na === 0 || nb === 0) return 0
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
-}
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
@@ -36,21 +25,24 @@ serve(async (req) => {
   }
 
   const startMs = Date.now()
+  const resolvedLang = lang || 'en'
+  const synthesisField = resolvedLang === 'zh' ? 'synthesis_zh' : 'synthesis_en'
 
-  // ── Cache check ───────────────────────────────────────────────────────────
+  // ── Cache check — one row per window, bilingual columns ───────────────────
   if (!force_refresh) {
     const cacheRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/trend_briefs?category=eq.${encodeURIComponent(category)}&anchor_date=eq.${anchor_date}&step_days=eq.${step_days}&expires_at=gt.${new Date().toISOString()}&order=generated_at.desc&limit=1&select=synthesis,sources_json,generated_at`,
+      `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}&expires_at=gt.${new Date().toISOString()}&order=generated_at.desc&limit=1&select=${synthesisField},sources_json,generated_at`,
       { headers: sbHeaders }
     )
     if (cacheRes.ok) {
-      const cached: { synthesis: string; sources_json: unknown; generated_at: string }[] = await cacheRes.json()
-      if (cached.length > 0) {
+      const cached: Record<string, unknown>[] = await cacheRes.json()
+      const cachedSynthesis = cached[0]?.[synthesisField] as string | null
+      if (cached.length > 0 && cachedSynthesis) {
         const encoder = new TextEncoder()
         const stream = new ReadableStream({
           start(controller) {
             controller.enqueue(encoder.encode(
-              `data: ${JSON.stringify({ type: 'cached', synthesis: cached[0].synthesis, sources_json: cached[0].sources_json, generated_at: cached[0].generated_at })}\n\n`
+              `data: ${JSON.stringify({ type: 'cached', synthesis: cachedSynthesis, sources_json: cached[0].sources_json, generated_at: cached[0].generated_at })}\n\n`
             ))
             controller.enqueue(encoder.encode('data: [DONE]\n\n'))
             controller.close()
@@ -66,16 +58,12 @@ serve(async (req) => {
   // ── Fetch articles in window ──────────────────────────────────────────────
   const s = date_start
   const e = date_end
-  const categoryFilter = category !== 'all'
-    ? `&sources.category=eq.${encodeURIComponent(category)}`
-    : ''
-  const selectCols = 'id,title,summary_en,summary_zh,url,published_at,created_at,engagement,embedding'
-  const orFilter = encodeURIComponent(`and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`)
+  // Omit embedding from SELECT — fetching 1024-dim floats for 200 articles blows Deno memory/CPU limits.
+  // Clustering is replaced by simple engagement sort; historical enrichment uses the RPC (server-side pgvector).
+  const selectCols = 'id,title,summary_en,summary_zh,url,published_at,created_at,engagement'
+  const orFilter = encodeURIComponent(`(and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e}))`)
 
-  let articlesUrl = `${SUPABASE_URL}/rest/v1/daily_news?or=${orFilter}&select=${selectCols}&limit=200`
-  if (category !== 'all') {
-    articlesUrl = `${SUPABASE_URL}/rest/v1/daily_news?or=${orFilter}&select=${selectCols},sources!inner(category)&sources.category=eq.${encodeURIComponent(category)}&limit=200`
-  }
+  const articlesUrl = `${SUPABASE_URL}/rest/v1/daily_news?or=${orFilter}&select=${selectCols}&limit=200`
 
   const articlesRes = await fetch(articlesUrl, { headers: sbHeaders })
   if (!articlesRes.ok) {
@@ -85,7 +73,7 @@ serve(async (req) => {
   type ArticleRow = {
     id: string; title: string; summary_en: string | null; summary_zh: string | null
     url: string; published_at: string | null; created_at: string
-    engagement: Record<string, number> | null; embedding: number[] | null
+    engagement: Record<string, number> | null
   }
   const allArticles: ArticleRow[] = await articlesRes.json()
 
@@ -93,105 +81,67 @@ serve(async (req) => {
     return new Response(null, { status: 204, headers: corsHeaders })
   }
 
-  // ── Two-pass clustering ───────────────────────────────────────────────────
+  // ── Select top 12 by engagement (no in-Deno clustering — avoids WORKER_LIMIT) ────────────────
   function engagementScore(a: ArticleRow): number {
     if (!a.engagement) return 0
     return a.engagement.likes ?? a.engagement.votes ?? a.engagement.score ?? 0
   }
 
-  const sorted = [...allArticles].sort((a, b) => {
-    const diff = engagementScore(b) - engagementScore(a)
-    if (diff !== 0) return diff
-    return new Date(b.published_at || b.created_at).getTime() - new Date(a.published_at || a.created_at).getTime()
-  })
+  const selected = [...allArticles]
+    .sort((a, b) => {
+      const diff = engagementScore(b) - engagementScore(a)
+      if (diff !== 0) return diff
+      return new Date(b.published_at || b.created_at).getTime() - new Date(a.published_at || a.created_at).getTime()
+    })
+    .slice(0, 12)
 
-  const CLUSTER_THRESHOLD = 0.82
-  const effectiveTarget = Math.min(sorted.length, 12)
-
-  type Cluster = { representative: ArticleRow; members: ArticleRow[]; clusterSize: number }
-  const clusters: Cluster[] = []
-
-  for (const article of sorted) {
-    if (!article.embedding) {
-      // No embedding — create solo cluster
-      clusters.push({ representative: article, members: [article], clusterSize: 1 })
-      continue
-    }
-    let found = false
-    for (const cluster of clusters) {
-      if (!cluster.representative.embedding) continue
-      const sim = cosineSimilarity(article.embedding, cluster.representative.embedding)
-      if (sim >= CLUSTER_THRESHOLD) {
-        cluster.members.push(article)
-        cluster.clusterSize++
-        found = true
-        break
-      }
-    }
-    if (!found) {
-      clusters.push({ representative: article, members: [article], clusterSize: 1 })
-    }
-  }
-
-  // Pass 2 — allocate slots
-  const totalArticles = sorted.length
-  const dominantCap = Math.ceil(effectiveTarget * 0.40)
-  const mediumCap = Math.ceil(effectiveTarget * 0.20)
-
-  clusters.sort((a, b) => b.clusterSize - a.clusterSize)
-
-  const selected: ArticleRow[] = []
-  for (const cluster of clusters) {
-    if (selected.length >= effectiveTarget) break
-    const threshold = cluster.clusterSize / totalArticles
-    const cap = threshold >= 0.20 ? dominantCap : threshold >= 0.05 ? mediumCap : 1
-    const slots = Math.min(cluster.clusterSize, cap, effectiveTarget - selected.length)
-    const picks = cluster.members
-      .sort((a, b) => engagementScore(b) - engagementScore(a))
-      .slice(0, slots)
-    selected.push(...picks)
-  }
-
-  // ── Historical enrichment ─────────────────────────────────────────────────
+  // ── Historical enrichment (one RPC on top article, server-side pgvector) ──
   const windowStart = new Date(date_start).getTime()
   const windowEnd = new Date(date_end).getTime()
 
-  const historicalMap = new Map<string, { id: string; title: string; published_at: string | null; summary_en: string | null; summary_zh: string | null }>()
+  const historical: { id: string; title: string; published_at: string | null; summary_en: string | null; summary_zh: string | null }[] = []
 
-  await Promise.all(
-    selected
-      .filter(a => a.embedding)
-      .map(async (a) => {
-        try {
+  // Use the top article's id to seed match_articles (embedding is fetched by the RPC, not us)
+  const seedId = selected[0]?.id
+  if (seedId) {
+    try {
+      // Fetch the seed article's embedding for the RPC
+      const embRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/daily_news?id=eq.${seedId}&select=embedding`,
+        { headers: sbHeaders }
+      )
+      if (embRes.ok) {
+        const embRows: { embedding: number[] | null }[] = await embRes.json()
+        const embedding = embRows[0]?.embedding
+        if (embedding) {
           const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_articles`, {
             method: 'POST',
             headers: sbHeaders,
-            body: JSON.stringify({ query_embedding: a.embedding, match_count: 10 }),
+            body: JSON.stringify({ query_embedding: embedding, match_count: 15 }),
           })
-          if (!rpcRes.ok) return
-          const results: { id: string; title: string; summary: string; score: number }[] = await rpcRes.json()
-          for (const r of results) {
-            if (historicalMap.has(r.id)) continue
-            if (selected.some(s => s.id === r.id)) continue
-            // We need published_at — fetch it
-            const detailRes = await fetch(
-              `${SUPABASE_URL}/rest/v1/daily_news?id=eq.${r.id}&select=id,title,published_at,created_at,summary_en,summary_zh`,
-              { headers: sbHeaders }
-            )
-            if (!detailRes.ok) continue
-            const rows: { id: string; title: string; published_at: string | null; created_at: string; summary_en: string | null; summary_zh: string | null }[] = await detailRes.json()
-            if (!rows[0]) continue
-            const row = rows[0]
-            const articleDate = new Date(row.published_at || row.created_at).getTime()
-            // Exclude articles within the current window
-            if (articleDate >= windowStart && articleDate < windowEnd) continue
-            historicalMap.set(r.id, { id: row.id, title: row.title, published_at: row.published_at || row.created_at, summary_en: row.summary_en, summary_zh: row.summary_zh })
+          if (rpcRes.ok) {
+            const results: { id: string; title: string; summary: string; score: number }[] = await rpcRes.json()
+            const selectedIds = new Set(selected.map(a => a.id))
+            for (const r of results) {
+              if (historical.length >= 8) break
+              if (selectedIds.has(r.id)) continue
+              // Fetch published_at to exclude in-window results
+              const detRes = await fetch(
+                `${SUPABASE_URL}/rest/v1/daily_news?id=eq.${r.id}&select=id,title,published_at,created_at,summary_en,summary_zh`,
+                { headers: sbHeaders }
+              )
+              if (!detRes.ok) continue
+              const rows: { id: string; title: string; published_at: string | null; created_at: string; summary_en: string | null; summary_zh: string | null }[] = await detRes.json()
+              if (!rows[0]) continue
+              const articleDate = new Date(rows[0].published_at || rows[0].created_at).getTime()
+              if (articleDate >= windowStart && articleDate < windowEnd) continue
+              historical.push({ id: rows[0].id, title: rows[0].title, published_at: rows[0].published_at || rows[0].created_at, summary_en: rows[0].summary_en, summary_zh: rows[0].summary_zh })
+            }
           }
-        } catch { /* non-blocking */ }
-      })
-  )
-
-  const historical = Array.from(historicalMap.values()).slice(0, 8)
+        }
+      }
+    } catch { /* non-blocking */ }
+  }
 
   // ── Build sources_json ────────────────────────────────────────────────────
   const sourcesJson = [
@@ -244,22 +194,69 @@ serve(async (req) => {
       ).join('\n')
     : ''
 
-  const systemPrompt = `You are a ruthless, high-conviction senior technology analyst writing for a sophisticated, time-poor audience. You cut through industry hype to identify structural shifts, asymmetric risks, and changing leverage.
+  const systemPrompt = lang === 'zh'
+    ? `你是一位直言不讳、观点鲜明的资深科技分析师，为虎嗅或36氪的核心读者写作——他们是国内的AI从业者和投资人，信息密集，节奏快，对硅谷叙事有自己的判断。
+
+你拿到了 ${windowLabel} 内的一批文章，以及相关历史背景文章。
+
+你的任务：写一篇统一的、批判性的趋势分析，回答这个新闻周期的"所以呢？"
+
+首先用一句加粗的话写出这个周期的核心判断——必须点名具体公司或技术，并给出方向性结论。
+原因：只有30秒的读者需要一个锚点。判断句让他们在决定要不要继续读之前就拿到了论点。
+错误示范："**本周AI领域发生了若干重要进展。**"
+正确示范："**在Anthropic完成安全差异化之前，OpenAI正在用价格战锁死推理市场。**"
+失败模式：判断句含糊其辞（"有待观察"）、没有点名具体主体、或只是在复述新闻而非解读。如果你实在无法写出方向性判断，写："**本周没有单一主线——以下是三个独立事件。**"
+
+然后写3-5段，覆盖以下内容：
+
+1. 结构性转变：这批文章共同揭示了什么底层变化——权力、资本、技术架构层面的转变？点名站在转变两侧的公司。
+2. "所以呢"测试：对你识别出的每个趋势，明确说明为什么一个开发者或投资人应该在意。不要假设读者知道为什么这件事重要。
+3. 冲击半径：映射二阶效应——哪些相邻领域（云厂商、开源社区、企业买家、监管机构）受到影响，怎么受影响。
+4. 弱信号与质疑：找出至少一处这批文章中主流叙事存在错误、不完整、或对某方明显有利的地方。点名谁从这个叙事框架中获益。
+5. 验证催化剂：说出一个具体的指标、事件或产品发布，将在未来90天内证明或证伪你的趋势判断。
+
+引用规则：每个分析性判断都要在行文中点名来源——"据Anthropic定价公告"、"根据路透社调查报道"——不用数字脚注[N]。
+原因：数字脚注需要读者滚动到不存在的参考列表。行内命名引用读起来更快，可信度更强。
+错误示范："OpenAI降价80%[1]，而Anthropic定价未变[2]。"
+正确示范："据OpenAI API更新日志，价格降幅达80%——而截至本文写作时，Anthropic定价页面未见变化。"
+
+碎片化规则：如果这批文章没有形成连贯的趋势，不要强行统一叙事。改为识别2-3个独立事件，在判断句后明确说明碎片化。
+原因：强行将不相关文章串成一个趋势，是最危险的幻觉——听起来合理，但结构上是假的。
+
+写作规范：密度高、具体、有观点、保持质疑。正文段落不用项目符号。不写开场白废话。有把握地写——如果要保留不确定性，用证据来表达，不要用"有待观察"。
+禁用词：重大、里程碑、值得注意的是、生态系统、格局。`
+    : `You are a ruthless, high-conviction senior technology analyst writing for a sophisticated, time-poor audience. You cut through industry hype to identify structural shifts, asymmetric risks, and changing leverage. You write for builders and curious professionals — people who can spot a weak argument.
 
 You have been given a set of articles from ${windowLabel} plus historically related articles for context.
 
-Your task: Write a unified, highly critical trend analysis (3–5 paragraphs) that answers the "So What?" of this news cycle.
+Your task: Write a unified, highly critical trend analysis that answers the "So What?" of this news cycle.
 
-1. The Structural Shift: Do not just summarize what happened. Extract the underlying shift in power, capital, or architecture. Who is gaining leverage? What bottleneck is being bypassed or created?
-2. The "So What" Test: For every trend identified, you must explicitly state why the reader should care. How does this change the strategic landscape?
-3. The Blast Radius: Map the second-order effects. Identify the non-obvious casualties, beneficiaries, or friction points in adjacent domains.
-4. Weak Signals & Skepticism: Highlight emerging details that contradict the mainstream narrative, or point out where the current hype ignores physical, economic, or regulatory reality.
-5. Inline Citations: Every analytical claim must be grounded in the text. Cite sources inline using [N] notation where N matches the article index.
-6. The Catalyst: End with a concrete "Watch For" conclusion. Identify the specific metric, upcoming event, or failure mode that will prove or disprove this trend in the near future.
+BEGIN with a single bolded sentence — the verdict of this news cycle in plain language. This sentence must name a specific company or technology and make a directional claim.
+WHY: Readers who have 30 seconds need something to hold. The verdict gives them the thesis before they decide whether to read on.
+BAD: "**This week saw several significant developments across the AI landscape.**"
+GOOD: "**OpenAI is racing to commoditize inference before Anthropic can differentiate on safety.**"
+FAILURE MODE: A verdict that hedges ("it remains to be seen"), names no specific actor, or summarizes rather than interprets. If you cannot write a directional verdict, write: "**This cycle has no single thesis — three independent stories follow.**"
 
-IMPORTANT: If the articles do not form a cohesive structural trend, DO NOT force a narrative. Instead, identify the 2–3 most significant standalone stories, critically evaluate why they matter individually, and explicitly note the fragmentation of the current news cycle.
+Then write 3-5 paragraphs covering:
 
-Style constraints: Dense, specific, opinionated, and skeptical. NO bullet points. NO introductory filler ("In recent news," "This is a significant development"). Write with the authority of an insider explaining the real stakes to a peer.`
+1. The Structural Shift: What underlying shift in power, capital, or technical architecture do these articles collectively reveal? Name the companies on each side.
+2. The "So What" Test: For each trend you identify, state explicitly why a builder or investor should care. Do not assume the reader knows why it matters.
+3. The Blast Radius: Map second-order effects — which adjacent domains (cloud providers, open-source maintainers, enterprise buyers, regulators) are affected and how.
+4. Weak Signals & Skepticism: Identify at least one place where the mainstream narrative in these articles is wrong, incomplete, or suspiciously convenient for someone. Name who benefits from the framing.
+5. The Catalyst: Name one specific metric, event, or product release that will prove or disprove the trend you've identified within the next 90 days.
+
+CITATION RULE: Ground every analytical claim by naming the source inline — "per Anthropic's pricing announcement," "according to the Reuters investigation" — not with numbered footnotes [N].
+WHY: Numbered footnotes require the reader to scroll to a reference list that doesn't exist in a mobile card. Named attribution reads faster and builds credibility inline.
+BAD: "OpenAI cut prices by 80% [1], while Anthropic held pricing steady [2]."
+GOOD: "Per OpenAI's API changelog, prices dropped 80% — while Anthropic's pricing page remained unchanged as of this writing."
+
+FRAGMENTATION RULE: If the articles don't form a cohesive trend, do not force one. Instead, identify 2-3 standalone stories and explicitly note fragmentation after the verdict sentence.
+WHY: Forcing a unified narrative from unrelated articles produces the worst kind of hallucination — plausible-sounding but structurally false analysis.
+BAD: Connecting a model release, a regulatory hearing, and a funding round into a single "trend" with no actual causal link.
+GOOD: "**This cycle has no single thesis — three independent stories follow.** First: [story A]. Second: [story B]. Third: [story C]."
+
+Style constraints: Dense, specific, opinionated, and skeptical. No bullet points in the body paragraphs. No introductory filler ("In today's fast-paced AI landscape..."). Write with authority — if you hedge, hedge with evidence, not with "it remains to be seen."
+Banned words: "significant," "major," "key," "milestone," "landscape," "ecosystem," "it is worth noting."`
 
   const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n${currentBlock}${historicalBlock}`
 
@@ -292,7 +289,7 @@ Style constraints: Dense, specific, opinionated, and skeptical. NO bullet points
     })
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {
-      console.log(JSON.stringify({ event: 'client_disconnected', duration_ms: Date.now() - startMs, chars_streamed: 0, category, anchor_date, step_days }))
+      console.log(JSON.stringify({ event: 'client_disconnected', duration_ms: Date.now() - startMs, chars_streamed: 0, anchor_date, step_days }))
       return new Response(null, { status: 499, headers: corsHeaders })
     }
     throw err
@@ -300,7 +297,7 @@ Style constraints: Dense, specific, opinionated, and skeptical. NO bullet points
 
   if (!groqRes.ok) {
     if (groqRes.status === 429) {
-      console.log(JSON.stringify({ event: 'rate_limited_429', category, anchor_date, step_days }))
+      console.log(JSON.stringify({ event: 'rate_limited_429', anchor_date, step_days }))
       return new Response('Rate limited', { status: 429, headers: corsHeaders })
     }
     return new Response('Groq error', { status: 502, headers: corsHeaders })
@@ -340,35 +337,65 @@ Style constraints: Dense, specific, opinionated, and skeptical. NO bullet points
         }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
-          console.log(JSON.stringify({ event: 'client_disconnected', duration_ms: Date.now() - startMs, chars_streamed: charsStreamed, category, anchor_date, step_days }))
+          console.log(JSON.stringify({ event: 'client_disconnected', duration_ms: Date.now() - startMs, chars_streamed: charsStreamed, anchor_date, step_days }))
           controller.close()
           return
         }
         throw err
       }
 
-      // Full completion — persist to cache
+      // Full completion — persist to cache (bilingual single-row schema)
       if (synthesisAccum.length > 0) {
-        const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
-        await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
-          method: 'POST',
-          headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
-          body: JSON.stringify({
-            category, anchor_date, step_days,
-            synthesis: synthesisAccum,
-            sources_json: sourcesJson,
-            model: 'llama-3.3-70b-versatile',
-            tokens_used: tokensUsed,
-            expires_at: expiresAt,
-          }),
-        })
+        const todayUtc = new Date().toISOString().slice(0, 10)
+        const isPast = anchor_date < todayUtc
+        // Past windows never expire — articles are fixed, brief is immutable
+        // Today's window: 6h TTL (new articles keep arriving throughout the day)
+        const expiresAt = isPast
+          ? '9999-12-31T00:00:00.000Z'
+          : new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
+        // Human-readable date range: "YYYY-MM-DD to YYYY-MM-DD" (start inclusive to anchor inclusive)
+        const startDateLabel = date_start.slice(0, 10)
+        const anchorDateLabel = anchor_date  // anchor_date is already the inclusive end
+        const dateRangeLabel = `${startDateLabel} to ${anchorDateLabel}`
+
+        // PATCH first — updates only synthesisField on an existing row, leaving the other lang intact
+        const patchRes = await fetch(
+          `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
+          {
+            method: 'PATCH',
+            headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
+            body: JSON.stringify({
+              [synthesisField]: synthesisAccum,
+              sources_json: sourcesJson,
+              model: 'llama-3.3-70b-versatile',
+              tokens_used: tokensUsed,
+              expires_at: expiresAt,
+            }),
+          }
+        )
+        // If no row existed (content-range shows 0 updated), INSERT a fresh one
+        const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
+        if (updatedCount === 0) {
+          await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
+            method: 'POST',
+            headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
+            body: JSON.stringify({
+              anchor_date, step_days,
+              date_range: dateRangeLabel,
+              synthesis_en: resolvedLang === 'en' ? synthesisAccum : null,
+              synthesis_zh: resolvedLang === 'zh' ? synthesisAccum : null,
+              sources_json: sourcesJson,
+              model: 'llama-3.3-70b-versatile',
+              tokens_used: tokensUsed,
+              expires_at: expiresAt,
+            }),
+          })
+        }
         console.log(JSON.stringify({
-          event: 'brief_generated',
-          duration_ms: Date.now() - startMs,
-          tokens_used: tokensUsed,
-          source_count: selected.length,
-          historical_count: historical.length,
-          category, anchor_date, step_days,
+          event: 'brief_generated', lang: resolvedLang,
+          duration_ms: Date.now() - startMs, tokens_used: tokensUsed,
+          source_count: selected.length, historical_count: historical.length,
+          anchor_date, step_days, date_range: dateRangeLabel,
         }))
       }
 

@@ -10,14 +10,14 @@
 
 | Worker / Function | Purpose | Model | max_tokens | Temp | Input cap |
 |---|---|---|---|---|---|
-| `process-queue` — ARTICLE prompt | Bilingual title + 3-bullet summary | llama-3.3-70b-versatile | 900 | 0.1 | 24,000 chars of scraped content |
-| `process-queue` — TWEET prompt | Tweet title + 3-bullet summary | llama-3.3-70b-versatile | 900 | 0.1 | 24,000 chars (tweets ~280) |
-| `process-queue` — EN questions | 3 EN analytical questions | llama-3.3-70b-versatile | 300 | 0.7 | `summary_en` only |
-| `process-queue` — ZH questions | 3 ZH analytical questions | llama-3.3-70b-versatile | 300 | 0.7 | `summary_zh` only |
+| `process-queue` — ARTICLE prompt | Bilingual title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | llama-3.3-70b-versatile | 2000 | 0.1 | 24,000 chars of scraped content |
+| `process-queue` — TWEET prompt | Tweet title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | llama-3.3-70b-versatile | 2000 | 0.1 | 24,000 chars (tweets ~280) |
 | `ingest-builders` — bio extraction | Bio map JSON `{handle: "role"}` | llama-3.3-70b-versatile | 600 | 0 | All bios concatenated (~25 accounts) |
 | `answer-question` — RAG answer | Streaming Q&A with RAG context | llama-3.3-70b-versatile | 1024 | 0.6 | article_content + 3 related articles (**no char limit**) |
 | `refresh-questions` — EN | Regenerate 3 EN questions | llama-3.3-70b-versatile | 300 | 0.7 | `summary_en` |
 | `refresh-questions` — ZH | Regenerate 3 ZH questions | llama-3.3-70b-versatile | 300 | 0.7 | `summary_zh` |
+
+> **Note:** `process-queue` was refactored from 3 Groq calls per article to 1. Summary + EN questions + ZH questions are now generated in a single call. The system prompts include `QUESTIONS_EN` and `QUESTIONS_ZH` sections; `parseJsonSection()` extracts the JSON arrays inline. This reduces per-article Groq cost by ~40%.
 
 ## All Cohere API Calls in the Codebase
 
@@ -30,18 +30,18 @@
 
 ## Per-Call Token Breakdown
 
-### `process-queue` — Article path (per article)
+### `process-queue` — Article path (per article, 1 call)
 
-**Call 1 — Summary (ARTICLE_SYSTEM_PROMPT)**
+The single call now produces: TITLE_EN, TITLE_ZH, SUMMARY_EN, SUMMARY_ZH, QUESTIONS_EN (JSON array), QUESTIONS_ZH (JSON array).
 
 | Component | Chars | Tokens |
 |---|---|---|
-| `ARTICLE_SYSTEM_PROMPT` | ~1,400 | ~350 |
+| `ARTICLE_SYSTEM_PROMPT` (incl. QUESTIONS sections) | ~2,000 | ~500 |
 | User preamble: `"Summarize this article:\n\n"` | ~40 | ~10 |
 | Content (average scraped article) | ~5,000 | ~1,250 |
-| **Total input** | | **~1,610** |
-| Output (3 bullets × 2-3 sentences each) | | **~530** |
-| **Call 1 total** | | **~2,140** |
+| **Total input** | | **~1,760** |
+| Output (titles + 3 bullets + 6 questions) | | **~750** |
+| **Call total** | | **~2,510** |
 
 Content varies widely by source:
 - TechCrunch / Ars / The Verge: 3,000–15,000 chars scraped → 750–3,750 tokens of content
@@ -49,56 +49,24 @@ Content varies widely by source:
 - Paywalled: falls back to RSS snippet ~200-500 chars → 50–125 tokens
 - Hard cap at 24,000 chars = 6,000 tokens of content
 
-**Call 2 — EN Questions**
-
-| Component | Chars | Tokens |
-|---|---|---|
-| EN system prompt | ~200 | ~50 |
-| User preamble + requirements | ~600 | ~150 |
-| `summary_en` input | ~800 | ~200 |
-| **Total input** | | **~400** |
-| Output (3 questions × ~25 words) | | **~100** |
-| **Call 2 total** | | **~500** |
-
-**Call 3 — ZH Questions** (parallel with Call 2)
-
-| Component | Chars | Tokens |
-|---|---|---|
-| ZH system prompt (Chinese) | ~250 | ~165 |
-| User preamble (Chinese) | ~400 | ~265 |
-| `summary_zh` input | ~900 | ~600 |
-| **Total input** | | **~1,030** |
-| Output (3 questions × ~20 Chinese chars) | | **~120** |
-| **Call 3 total** | | **~1,150** |
-
-> Note: Chinese prompts cost more tokens per character (~1.5× vs English).
-
-**Article path total per item: ~3,790 tokens**
-Range: ~2,600 (thin/paywalled) → ~8,000 (long-form article, 15K chars scraped)
+**Article path total per item: ~2,510 tokens** *(was ~3,790 — 34% reduction)*
+Range: ~1,800 (thin/paywalled) → ~5,500 (long-form article, 15K chars scraped)
 
 ---
 
-### `process-queue` — Tweet path (per tweet)
-
-**Call 1 — Summary (TWEET_SYSTEM_PROMPT)**
+### `process-queue` — Tweet path (per tweet, 1 call)
 
 | Component | Chars | Tokens |
 |---|---|---|
-| `TWEET_SYSTEM_PROMPT` | ~1,450 | ~360 |
+| `TWEET_SYSTEM_PROMPT` (incl. QUESTIONS sections) | ~2,000 | ~500 |
 | User preamble | ~40 | ~10 |
 | Tweet content (`@handle: tweet text`, ~300 chars) | ~300 | ~75 |
-| **Total input** | | **~445** |
-| Output (3 bullets, tweet-aware) | | **~450** |
-| **Call 1 total** | | **~895** |
+| **Total input** | | **~585** |
+| Output (titles + 3 bullets + 6 questions) | | **~650** |
+| **Call total** | | **~1,235** |
 
-**Calls 2+3 — Questions** (identical structure to article path)
-
-- EN call: ~500 tokens
-- ZH call: ~1,150 tokens
-- **Both calls combined: ~1,650 tokens**
-
-**Tweet path total per item: ~2,545 tokens**
-Range: ~1,800 (concise tweet, short output) → ~3,000 (quote-tweet with rich context)
+**Tweet path total per item: ~1,235 tokens** *(was ~2,545 — 51% reduction)*
+Range: ~900 (concise tweet) → ~1,600 (quote-tweet with rich context)
 
 ---
 
@@ -170,16 +138,19 @@ These run automatically every day regardless of user activity.
 
 | Source | New items/day | Tokens/item | Daily tokens |
 |---|---|---|---|
-| RSS articles — TechCrunch, Ars, Verge (scrapes well) | ~30 | ~3,790 | ~113,700 |
-| WeChat articles — 5 sources (bridge content) | ~15 | ~3,200 | ~48,000 |
-| Builder tweets — follow-builders feed-x.json | ~50 | ~2,545 | ~127,250 |
-| Podcasts — feed-podcasts.json (~1 episode/day avg) | ~1 | ~5,000 (long transcript) | ~5,000 |
+| RSS articles — TechCrunch, Ars, Verge (scrapes well) | ~30 | ~2,510 | ~75,300 |
+| WeChat articles — 2 active sources (wechat2rss bridges) | ~8 | ~2,100 | ~16,800 |
+| Reddit articles — 3 subreddits via RSS | ~15 | ~2,100 | ~31,500 |
+| Builder tweets — follow-builders feed-x.json | ~50 | ~1,235 | ~61,750 |
+| Apify tweets — curated handles | ~30 | ~1,235 | ~37,050 |
+| arXiv papers — cs.AI + cs.LG | ~20 | ~2,000 (abstract) | ~40,000 |
+| Podcasts — feed-podcasts.json (~1 episode/day avg) | ~1 | ~3,500 (long transcript) | ~3,500 |
 | Bio extraction — ingest-builders (1 call/day) | 1 run | ~990 fixed | ~990 |
-| **TOTAL demand** | **~97 items** | | **~294,940 tokens** |
+| **TOTAL demand** | **~155 items** | | **~266,890 tokens** |
 
-**⚠️ Demand exceeds the 100K TPD free tier by ~3×.**
+**⚠️ Demand exceeds the 100K TPD free tier by ~2.7×.**
 
-The pipeline self-throttles naturally: `process-queue` hits 429, increments `retry_count`, rows stay `pending` and are retried next day. Only ~35–45 items process before the daily ceiling is hit.
+The 1-call-per-article refactor reduced per-item cost by ~34–51%, but source diversity increased item count. The pipeline self-throttles naturally: `process-queue` hits 429, increments `retry_count`, rows stay `pending` and are retried next day.
 
 ---
 
@@ -187,13 +158,13 @@ The pipeline self-throttles naturally: `process-queue` hits 429, increments `ret
 
 | Content mix | Items processed | Tokens consumed |
 |---|---|---|
-| All tweets only (lightest) | ~39 | ~99,255 |
-| All articles only (heaviest, long-form) | ~26 | ~98,540 |
-| All podcasts only | ~20 | ~100,000 |
-| Typical mixed day (25% articles, 75% tweets) | ~10 articles + ~28 tweets | ~109,010 ← slight overage |
-| Conservative mixed day (20% articles, 80% tweets) | ~8 articles + ~32 tweets | ~112,000 ← moderate overage |
+| All tweets only (lightest) | ~81 | ~100,035 |
+| All articles only (avg) | ~40 | ~100,400 |
+| All arXiv only | ~50 | ~100,000 |
+| All podcasts only | ~29 | ~101,500 |
+| Typical mixed day (tweets 50%, articles 30%, other 20%) | ~25 articles + ~40 tweets + ~15 other | ~115,000 ← moderate overage |
 
-In practice, `retry_count` absorbs the overflow — articles that don't get processed today are retried tomorrow.
+In practice, `retry_count` absorbs the overflow — items that don't get processed today are retried tomorrow.
 
 ---
 
@@ -252,27 +223,15 @@ GROUP BY status, last_error;
 
 ---
 
-## Stage 4.5 Impact: Apify Tweets (6 Curated Handles)
-
-Adding 6 handles × 15 tweets/day via Apify:
-
-| Metric | Value |
-|---|---|
-| New tweets/day | 6 × 15 = 90 |
-| Tokens/tweet | ~2,545 |
-| Additional daily Groq demand | ~228,950 tokens |
-| New total daily demand | ~523,890 tokens (~5.2× TPD cap) |
-
-This accelerates how quickly the 100K TPD ceiling is reached each day. With Apify tweets added, the pipeline will process fewer RSS articles before hitting the limit.
-
-**Mitigation options (in order of impact):**
+## Mitigation Options (if TPD remains a bottleneck)
 
 | Option | Savings | Tradeoff |
 |---|---|---|
-| Cap `contentForGroq` at 8,000 chars (from 24,000) | ~500 tokens/article | Slightly shorter context for long articles |
-| Reduce question generation to EN only | ~1,100 tokens/item | Lose ZH questions |
+| Cap `contentForGroq` at 8,000 chars (from 24,000) | ~300 tokens/article | Slightly shorter context for long articles |
 | Reduce `process-queue` batch size from 5 to 3 | 40% fewer items/run, slower throughput | No token savings per item — just paces spending |
 | Upgrade to Groq paid tier (~$0.10/1M tokens) | Removes TPD cap entirely | ~$0.03/day at current volume |
+
+> The 3→1 call refactor (2026-04-05) was the highest-impact mitigation: ~40% token reduction per item.
 
 ---
 
@@ -280,13 +239,13 @@ This accelerates how quickly the 100K TPD ceiling is reached each day. With Apif
 
 | Action | Groq tokens | % of daily TPD |
 |---|---|---|
-| Process 1 RSS article (avg) | ~3,790 | 3.8% |
-| Process 1 RSS article (long-form) | ~8,000 | 8.0% |
-| Process 1 tweet | ~2,545 | 2.5% |
-| Process 1 podcast episode | ~5,000 | 5.0% |
+| Process 1 RSS article (avg) | ~2,510 | 2.5% |
+| Process 1 RSS article (long-form) | ~5,500 | 5.5% |
+| Process 1 tweet | ~1,235 | 1.2% |
+| Process 1 arXiv abstract | ~2,000 | 2.0% |
+| Process 1 podcast episode | ~3,500 | 3.5% |
 | 1 Q&A session (avg article) | ~2,205 | 2.2% |
 | 1 Q&A session (long article) | ~5,500 | 5.5% |
 | 1 question refresh | ~950 | 0.95% |
 | Daily bio extraction (ingest-builders) | ~990 | 1.0% |
-| Full day automated pipeline (current) | ~294,940 demand | 295% of cap |
-| Full day automated pipeline (post-4.5) | ~523,890 demand | 524% of cap |
+| Full day automated pipeline (all sources) | ~266,890 demand | 267% of cap |

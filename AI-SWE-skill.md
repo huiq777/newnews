@@ -34,37 +34,39 @@ When operating as AI SWE on this project:
 
 ---
 
-## Current Implementation State (as of 2026-03-30)
+## Current Implementation State (as of 2026-04-05)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| RSS ingestion | ✅ Live | Every 4h (`0 */4 * * *`); active sources only |
+| RSS ingestion | ⚠️ Needs deploy | Every 4h; now fetches `source_type IN (rss, wechat, reddit)` — WeChat and Reddit routed through ingest-rss |
 | Full article scraping | ✅ Live | HTMLRewriter in process-queue; 8s timeout; paywall fallback |
-| LLM summarization | ✅ Live | Groq llama-3.3-70b-versatile; bilingual EN+ZH; 2-3 sentences/bullet; specific metrics required |
-| Question generation | ✅ Live | 3 EN + 3 ZH per article; all-or-nothing; `↻` pill to regenerate |
+| LLM summarization | ⚠️ Needs deploy | **1 Groq call per article** — summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection()` parser |
+| Question generation | ⚠️ Needs deploy | Embedded in the single summary call; `parseJsonSection()` extracts JSON arrays; `generateQuestions()` function removed |
 | Cohere embeddings | ✅ Live | embed-batch; 2000-char input; article_content preferred |
 | RAG Q&A | ✅ Live | match_articles RPC; top 3 related; Groq streaming SSE |
 | article_content column | ✅ Live | daily_news.article_content TEXT; NULL for WeChat (bridge handles) |
 | match_articles RPC | ✅ Live | pgvector cosine similarity; HNSW index active |
-| `ingest-builders` worker | ✅ Live | Daily 6am UTC; fetches feed-x.json (tweets) + feed-podcasts.json (episodes); GROQ_API_KEY required |
+| `ingest-builders` worker | ⚠️ Needs deploy | Daily 6am UTC; fetches feed-x.json + feed-podcasts.json + GH Trending + PH + Nowcoder + arXiv + Reddit; **missing podcast source no longer kills downstream sources** (early return → else block) |
 | `send-feishu-digest` worker | ✅ Live | Daily 12pm EST (17:00 UTC); Chinese (summary_zh + title_zh); `X - @handle - role` format; all 3 ZH bullets |
 | AI bio extraction | ✅ Live | Batch Groq call in ingest-builders; verbatim role extraction; cached in sources.metadata |
 | `sources.metadata` JSONB | ✅ Live | Stores `bio_map: {handle: "role"}` — shared by Feishu + App.tsx |
 | `ingest-x` worker | ❌ Deleted | Removed to free Cloudflare cron slot (5-trigger free tier limit hit) |
 | Hacker News source | ❌ Disabled | `is_active=false`; content was comment threads not articles; HN Algolia engagement fetch commented out in process-queue |
 | Engagement data pipeline | ✅ Live | `raw_ingestion.metadata JSONB` + `daily_news.engagement JSONB`; tweets: `{likes, retweets}`; GitHub Trending: `{stars}`; Reddit: `{score, num_comments}` — all propagated via process-queue URL-based detection |
-| Engagement UI badges | ⚠️ Partial | App.tsx: 🔥 fire SVG + N likes for tweets; ★ FA star + N stars for GitHub Trending; HN disabled. **Bug: badges render as blank** — `WebHTML` uses `dangerouslySetInnerHTML` which react-native-web does not reliably pass through (see Gotcha 15) |
+| Engagement UI badges | ✅ Live | App.tsx: 🔥 fire SVG + N likes for tweets (amber pill); ★ FA star + N stars for GitHub Trending; HN disabled. `WebHTML` now uses `useRef` + `useEffect` → `node.innerHTML = html` (see Gotcha 15 fix) |
 | Podcast ingestion | ✅ Live | `ingest-builders` fetches `feed-podcasts.json`; schema: `{podcasts:[{name,title,url,transcript}]}`; batch INSERT; `podcast` source_type |
 | Stage 3 UI redesign | ✅ Live | Warm editorial aesthetic; `MarkdownText` component (bullets + bold); answer Markdown; empty states; `scrollToOffset` lang toggle |
-| Drum-wheel UI integration | 🔄 In Progress | App.tsx: fixed nav (newnews logo + category tabs + EN/中 toggle) + drum-wheel date sidebar + card redesign (Space Grotesk source, Manrope title) + infinite scroll (10/page) + date-filtered Supabase query. UI additions this session: TF buttons Today/3D/7D/30D (replaced 90D) with spring-sliding active indicator; lang toggle spring-sliding indicator; category tab ghost-text width fix (bold doesn't shift layout); nav bottom-alignment (flex-end + paddingBottom); lang toggle fade-out on narrow viewport (< 700px). **Two unresolved bugs: (1) drum-wheel scrollbar gray lines — CSS class rule overridden by react-native-web inline styles (see Gotcha 16); (2) fire SVG + FA star icons blank — dangerouslySetInnerHTML unreliable (see Gotcha 15)** |
-| Web deployment | 🔄 In Progress | Cloudflare Pages; blocked on drum-wheel UI integration (Stage 4.1) |
+| Drum-wheel UI integration | ✅ Live | NavBar + DrumWheelSidebar + FilterTag + ArticleCard + TrendBriefCard in `news-app/components/`; TF buttons Today/3D/7D/30D; spring-sliding indicators; infinite scroll (10/page); both scrollbar and icon bugs resolved (see Gotchas 15, 16) |
+| Today eager init + 3D auto-fallback | ✅ Live | `dateRange` initializes to today on mount (no flash of all articles); auto-switches to 3D if Today returns 0 results; `DrumWheelSidebar` exposes `switchTo(days)` control |
+| Trend Brief | ✅ Live | `generate-trend-brief` Edge Function + `TrendBriefCard` component + `trend_briefs` 6h TTL cache; two-pass clustering; historical enrichment via match_articles; llama-3.3-70b-versatile; SSE streaming; "Today" shows 204 when no UTC-day articles yet (correct behavior) |
+| Web deployment | 🔄 In Progress | Cloudflare Pages; no longer blocked on UI |
 | Apify tweet ingestion | ✅ Live | `supabase/functions/ingest-apify-tweets`; Apify webhook (RUN_SUCCEEDED); validates APIFY_WEBHOOK_SECRET; fetches dataset; batch-inserts into raw_ingestion; 6 handles: ch402, DarioAmodei, simonw, xai, paulg, emollick |
 | Tweet-specific Groq prompt | ✅ Live | `process-queue` branches on `isTweet` (x.com/status URL); `TWEET_SYSTEM_PROMPT` constant at module top; title: `@handle said X` / `@original said X, retweeted by @handle`; same 3-bullet body |
 | GitHub Trending ingestion | ✅ Live | Added to ingest-builders; HTML scrape of `github.com/trending?spoken_language_code=`; regex parse per `<article`; no auth |
 | Product Hunt ingestion | ✅ Live | Added to ingest-builders; GraphQL API top 30 by VOTES; `PRODUCTHUNT_API_TOKEN` wrangler secret required |
 | Nowcoder ingestion | ✅ Live | Added to ingest-builders; public JSON API `gw-c.nowcoder.com`; type 74 → feed detail, type 0 → discuss; no auth |
 | arXiv ingestion | ✅ Live | Added to ingest-builders; cs.AI + cs.LG; top 10 per category; Atom API; no auth |
-| Reddit ingestion | ✅ Live | Added to ingest-builders; r/MachineLearning, r/cscareerquestions, r/layoffs; public JSON API; no auth |
+| Reddit ingestion | ⚠️ Needs SQL + deploy | Sources now use `.rss` URLs and `source_type='rss'` → routed through ingest-rss (JSON API blocked from Cloudflare IPs) |
 | `published_at` pipeline | ✅ Live | All sources store `metadata.published_at` at ingestion; process-queue propagates to `daily_news.published_at`; HTML meta tag fallback for sources without API dates (Nowcoder, etc.) |
 | iOS build | ❌ Not started | Expo EAS is Stage 5 |
 
@@ -75,7 +77,8 @@ When operating as AI SWE on this project:
 ```
 Daily @ 7am UTC
 ingest-rss Worker
-  → fetch all RSS feeds in parallel (Promise.all)
+  → SELECT sources WHERE source_type IN ('rss', 'wechat', 'reddit') AND is_active=true
+  → fetch all feeds in parallel (Promise.all) — includes WeChat RSS bridges + Reddit .rss feeds
   → extract <link> + <description>/<content:encoded>/<summary> + <pubDate>/<published>/<dc:date> from each item
   → INSERT INTO raw_ingestion (status='pending', metadata={published_at}) ON CONFLICT url DO NOTHING
 
@@ -93,18 +96,19 @@ process-queue Worker
          - reddit.com URL → read article.metadata → {score, num_comments}
          - other URLs → engagement = null (HN Algolia disabled; HN source is inactive)
       3. Resolve published_at: metadata.published_at (ingestion) → HTML meta tag (fallback) → null
-      4. POST to Groq → bilingual title + 3-bullet summary (2-3 sentences/bullet; specific metrics required)
-      5. POST to Groq ×2 parallel → 3 EN + 3 ZH questions
-      6. INSERT INTO daily_news (article_content, summaries, questions, engagement, published_at)
+      4. POST to Groq (1 call) → bilingual title + 3-bullet summary + QUESTIONS_EN JSON + QUESTIONS_ZH JSON
+         parseSection() extracts text fields; parseJsonSection() extracts question arrays
+      5. INSERT INTO daily_news (article_content, summaries, questions, engagement, published_at)
       7. PATCH daily_news.article_content for existing URLs (duplicate URL = silent no-op on INSERT)
       8. PATCH raw_ingestion status='done'
   → error: increment retry_count; status='error' after 3 failures (no backoff)
-  (subrequest count: ~36/50 — HN fetch removed)
+  (subrequest count: ~26/50 — 1 Groq call instead of 3; HN fetch removed)
 
 Daily @ 6am UTC
 ingest-builders Worker (requires GROQ_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-  → GET sources WHERE source_type IN (github_feed, podcast) AND is_active=true (1 subrequest)
-      split into: builderSource (github_feed) + podcastSource (podcast)
+  → GET sources WHERE source_type IN (github_feed, podcast, github_trending, producthunt, nowcoder, arxiv, reddit) AND is_active=true
+      split into: builderSource + podcastSource + githubTrendingSource + arxivSources[] + redditSources[] + etc.
+  → if (!podcastSource): log and SKIP podcasts block, continue to remaining sources (no longer a hard return)
   ── Builder tweets ──
   → fetch feed-x.json from GitHub (public, no auth)
   → extractAccounts(rawData) → [{handle, bio, tweets:[]}]  (reads data.x array)
@@ -139,13 +143,11 @@ ingest-builders Worker (requires GROQ_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_RO
   → Atom XML; regex-extract <entry> blocks → id, title, summary, <published> tag
   → url = https://arxiv.org/abs/{id}; raw_content = "{title}\n\n{abstract}"; metadata = { category, published_at }
   ── Reddit ──
-  → loop over all reddit sources (r/MachineLearning, r/cscareerquestions, r/layoffs)
-  → GET reddit.com/r/{subreddit}/hot.json?limit=25 with User-Agent: NewsProject/1.0
-  → parse data.children[*].data; link posts → post.url; self-posts → https://reddit.com{permalink}
-  → raw_content = "r/{subreddit}: {title}"; metadata = { score, num_comments, subreddit, published_at: new Date(created_utc * 1000).toISOString() }
+  → Reddit sources now have source_type='rss' and .rss URLs → handled by ingest-rss, NOT ingest-builders
+  → ingest-builders Reddit code still exists but no reddit-type sources match (no-op)
   ── Combined batch INSERT ──
-  → all 5 sources in one POST to raw_ingestion (ON CONFLICT DO NOTHING)
-  (subrequest count: ~57/50 — GitHub API calls push over free tier limit; may need paid plan or remove GitHub API date fetch)
+  → all non-tweet/podcast sources in one POST to raw_ingestion (ON CONFLICT DO NOTHING)
+  (subrequest count: ~19/50 ✅ SAFE)
 
 Every 5 min
 embed-batch Worker
@@ -210,7 +212,7 @@ answer-question
 | Product Hunt (producthunt) | ❌ Not attempted | `name: tagline (△ N votes)` | process-queue scrapes producthunt.com post; raw_content is solid fallback |
 | Nowcoder (nowcoder) | ❌ Not attempted | title text only | process-queue scrapes full discussion page |
 | arXiv (arxiv) | ✅ process-queue scrapes abstract page | `{title}\n\n{abstract}` (~300–500 words) | High-quality academic abstracts; process-queue scrapes arxiv.org/abs/{id} for full abstract HTML |
-| Reddit (reddit) | ✅ link posts scrape external URL; self-posts use title | `r/{subreddit}: {title}` | Link posts (`is_self=false`): process-queue scrapes the external article; self-posts: raw_content is the ceiling |
+| Reddit (now source_type='rss') | ✅ link posts scrape external URL; self-posts use title | RSS feed item description | Switched from JSON API (blocked by Cloudflare IPs) to `.rss` feeds via ingest-rss; link posts: process-queue scrapes the external article; self-posts: raw_content is ceiling |
 
 WeChat scraping will always fail. RSS bridge content after `stripHtml()` is the ceiling. Do not attempt to fix this — it is by design.
 
@@ -222,8 +224,10 @@ WeChat scraping will always fail. RSS bridge content after `stripHtml()` is the 
 |-------|-------|--------|
 | TPM (tokens per minute) | 12,000 | Hit during parallel processing; retry after 1 min |
 | TPD (tokens per day) | **100,000** | Hit when batch-reprocessing all articles; stops the pipeline |
-| Tokens per article | ~1500–2500 | 1 summary call + 2 question calls |
-| Max articles/day | ~40–65 | At 1500-2500 tokens per article |
+| Tokens per article (RSS/WeChat/arXiv) | ~2,510 | 1 combined call (summary + questions) |
+| Tokens per tweet | ~1,235 | 1 combined call |
+| Max articles/day (articles only) | ~40 | At ~2,510 tokens per article |
+| Max tweets/day | ~81 | At ~1,235 tokens per tweet |
 
 **When you hit 429 TPD:** Stop processing immediately. Retrying burns retry_count. The limit resets at midnight UTC. Failed articles will be automatically retried next day via the 15-min scheduler.
 
@@ -281,9 +285,11 @@ WHERE status = 'processing' AND processed_at IS NULL;
 - Do not remove until a reasoning model replaces it
 
 ### 9. `questions` is all-or-nothing
-- `generateQuestions()` returns null if either EN or ZH call fails
+- Questions are now parsed inline from the single summary Groq response via `parseJsonSection()`
+- If `QUESTIONS_EN` or `QUESTIONS_ZH` sections are missing/malformed, `questions = null`
 - Article inserts with `questions: null` — no pill shown in UI
-- Use the ↻ refresh button to regenerate after TPD resets
+- Use the ↻ refresh button (calls `refresh-questions` Edge Function) to regenerate after TPD resets
+- `generateQuestions()` function was removed from process-queue (2026-04-05)
 
 ### 10. Supabase timestamps are always UTC
 - `TIMESTAMPTZ` stored in UTC internally
@@ -302,10 +308,10 @@ WHERE status IN ('done', 'error');
 ### 13. Cloudflare Workers subrequest limit: 50 per invocation
 - Free tier hard cap: **50 subrequests** per Worker invocation (scheduled or fetch trigger)
 - Count every outbound `fetch()`: DB reads, DB writes, Groq, Cohere, GitHub, HN Algolia, etc.
-- **ingest-builders** current count: 1 (sources GET) + 1 (feed-x.json) + 1 (Groq bio) + 1 (PATCH sources.metadata) + 32 (tweet INSERTs) + 1 (feed-podcasts.json) + 1 (podcast batch INSERT) + 1 (GitHub Trending HTML) + ~10 (GitHub API per repo for pushed_at) + 1 (Product Hunt GraphQL) + 1 (Nowcoder API) + 1 (arXiv cs.AI) + 1 (arXiv cs.LG) + 1 (Reddit r/MachineLearning) + 1 (Reddit r/cscareerquestions) + 1 (Reddit r/layoffs) + 1 (combined batch INSERT) = **~57/50 ⚠️ OVER LIMIT** — GitHub API date fetches push over free tier; will fail if >50 subrequests hit. Fix: move GitHub date extraction to process-queue (HTML fallback already handles this via `<time datetime>` on GitHub pages), or upgrade to Cloudflare Workers Paid ($5/mo, 1000 limit)
+- **ingest-builders** current count: 1 (sources GET) + 1 (feed-x.json) + 1 (Groq bio) + 1 (PATCH sources.metadata) + **1 (tweet batch INSERT — all tweets in one POST)** + 1 (feed-podcasts.json) + 1 (podcast batch INSERT) + 1 (GitHub Trending HTML) + 1 (Product Hunt GraphQL) + 1 (Nowcoder API) + 1 (arXiv cs.AI) + 1 (arXiv cs.LG) + 1 (Reddit r/MachineLearning) + 1 (Reddit r/cscareerquestions) + 1 (Reddit r/layoffs) + 1 (combined batch INSERT) = **~19/50 ✅ SAFE** — tweet per-item loop was replaced with a single batch POST (same pattern as podcasts); GitHub API date fetches were never in the actual code
 - **process-queue** current count: 1 (SELECT) + 5 (PATCH processing) + 5×(1 scrape + 1 Groq summary + 2 Groq questions + 1 INSERT + 1 PATCH content + 1 PATCH done) = **~36/50** (HN fetch removed)
 - When limit is hit: Worker throws immediately — no partial completion, no error row written
-- Do NOT add per-item batch loops (e.g., 32 PATCH calls) — they blow the limit instantly
+- Do NOT add per-item INSERT loops — use a single batch POST with a JSON array body (`Prefer: resolution=ignore-duplicates`)
 - Upgrade path: Cloudflare Workers Paid ($5/mo) raises limit to 1,000 subrequests
 
 ### 14. Apify webhook payload structure
@@ -383,6 +389,18 @@ This bypasses react-native-web's prop system entirely and writes to the DOM dire
 
 ---
 
+### 18. Reddit JSON API is blocked from Cloudflare Worker IPs
+
+Reddit's `reddit.com/r/{sub}/hot.json` returns 403/429 from Cloudflare datacenter egress IPs. The `ingest-builders` code silently `continue`s on failure — no rows reach `raw_ingestion`. Reddit RSS feeds (`reddit.com/r/{sub}.rss`) work without auth and return `<item>` Atom entries readable by the existing `parseRSS()` parser. **Fix applied 2026-04-05:** Reddit source rows updated to `source_type='rss'` with `.rss` URLs; routed through `ingest-rss`.
+
+---
+
+### 19. `dateRange` must be initialized eagerly to prevent initial article flash
+
+If `dateRange` starts as `null`, the feed `useEffect` runs immediately on mount with no filter → returns ALL articles. `DrumWheelSidebar` fires `onFilterChange` a frame later to set today's range → second fetch. User sees old articles flash then disappear. **Fix applied 2026-04-05:** `dateRange` lazy-initializes to today's midnight-to-midnight range via `useState(() => { ... })`. Auto-fallback: if Today returns 0 articles, calls `wheelControlsRef.current.switchTo(3)` which fires `onFilterChange(3D)` → useEffect re-runs with 3D range.
+
+---
+
 ### 12. Groq format inconsistency in structured output
 - Groq may return JSONL (newline-delimited objects `{"handle": "karpathy", "role": "Director"}`) instead of a flat JSON object `{"karpathy": "Director"}` even when the system prompt explicitly specifies flat JSON
 - Always implement both parsers: try `JSON.parse(content)` first, then split on newlines and parse each line as fallback
@@ -391,7 +409,38 @@ This bypasses react-native-web's prop system entirely and writes to the DOM dire
 
 ---
 
+### 17. PostgREST raw `or=` URL filter requires outer parentheses
+
+**Problem:** When building a raw PostgREST REST URL with an `or=` filter (i.e., in a Cloudflare Worker or Edge Function — NOT using supabase-js), the entire filter expression must be wrapped in outer parentheses.
+
+**Wrong (causes `PGRST100` parse error — 502):**
+```
+?or=and(published_at.gte.2026-04-02,published_at.lt.2026-04-03),and(published_at.is.null,...)
+```
+
+**Correct:**
+```
+?or=(and(published_at.gte.2026-04-02,published_at.lt.2026-04-03),and(published_at.is.null,...))
+```
+
+```typescript
+// In Edge Function or Worker — must add outer ( )
+const orFilter = encodeURIComponent(
+  `(and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e}))`
+)
+const url = `${SUPABASE_URL}/rest/v1/daily_news?or=${orFilter}&select=...`
+```
+
+**Why supabase-js doesn't have this bug:** `.or('cond1,cond2')` in supabase-js wraps the value in `()` automatically before URL-encoding. Raw fetch calls must do this manually.
+
+**Symptom:** `{ "code": "PGRST100", "message": "failed to parse logic tree" }` with HTTP 400. The Edge Function catches `.ok === false` and returns 502 to the frontend.
+
+**Affected:** `supabase/functions/generate-trend-brief/index.ts` — caused the initial 502 on first deploy. Fixed 2026-04-02.
+
+---
+
 ## Database Schema Quick Reference
+
 
 ```sql
 -- raw_ingestion: ingestion queue (service role only; no client RLS)
@@ -434,12 +483,17 @@ RETURNS TABLE (id uuid, title text, summary text, score float)
 | `workers/ingest-x/src/index.ts` | **Deleted** — freed cron slot; was disabled anyway ($100/mo X API) | — |
 | `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (episodes) + GitHub Trending (HTML) + Product Hunt (GraphQL) + Nowcoder (JSON API) + arXiv (Atom API) + Reddit (JSON API) → raw_ingestion | `extractAccounts()`, `extractBioMap()`, `extractAuthor()`, `extractPodcasts()` |
 | `workers/send-feishu-digest/src/index.ts` | daily_news → Feishu webhook card | Daily 12pm EST (17:00 UTC); all 3 ZH bullets; 🔥 likes badge for tweets only (GitHub star badge not added to Feishu) |
-| `workers/process-queue/src/index.ts` | Scrape + summarize + questions + engagement + published_at → daily_news | `fetchArticleContent()` (returns {content, published_at}), `processArticle()`, `generateQuestions()`, `insertAndMarkDone()`, `stripHtml()` — `fetchHNEngagement()` disabled |
+| `workers/process-queue/src/index.ts` | Scrape + summarize + questions + engagement + published_at → daily_news | `fetchArticleContent()` (returns {content, published_at}), `processArticle()`, `parseSection()`, `parseJsonSection()` (questions extraction), `insertAndMarkDone()`, `stripHtml()` — `generateQuestions()` removed; `fetchHNEngagement()` disabled |
 | `workers/embed-batch/src/index.ts` | Cohere batch embed → daily_news.embedding | Scheduled handler |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG Q&A | RAG + Groq SSE |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question regeneration | No RAG dependency |
 | `supabase/functions/ingest-apify-tweets/index.ts` | ✅ Live — Stage 4.5 | Apify webhook receiver; validates `APIFY_WEBHOOK_SECRET`; reads `resource.defaultDatasetId`; batch-inserts into `raw_ingestion`; deploy with `--no-verify-jwt` |
-| `news-app/App.tsx` | Full Expo frontend — drum-wheel UI; date-filtered infinite scroll feed; spring-sliding TF + lang indicators; GitHub star badge; two open bugs (fire SVG + scrollbar gray lines) | `NavBar()` (langAnim, langVisAnim, onNavLayout), `DrumWheelSidebar()` (DOM bridge; RAF scroll; spring animate; tfAnim), `WebHTML()` (dangerouslySetInnerHTML — UNRELIABLE, see Gotcha 15), `FIRE_SVG` (full SVG constant), `FilterTag()`, `ArticleCard()`, `MarkdownText()`, `handleAsk()`, `handleRefresh()`, `scrollToOffset` lang toggle, `loadMoreArticles()` |
+| `news-app/App.tsx` | Main Expo entry — feed orchestration; dateRange eager init (today); auto-fallback to 3D when Today empty | `wheelControlsRef` (`resetToToday` + `switchTo`), `handleAsk()`, `handleRefresh()`, `loadMoreArticles()` |
+| `news-app/components/NavBar.tsx` | Top nav bar — category pills + EN/中 toggle | `NavBar()` (langAnim, langVisAnim) |
+| `news-app/components/DrumWheelSidebar.tsx` | Drum-wheel date picker + TF buttons | `DrumWheelSidebar()` — exposes `{ resetToToday, switchTo(days) }` via `onMountedControls`; DOM bridge; RAF scroll; spring animate |
+| `news-app/components/ArticleCard.tsx` | Article card — source label, summary, questions, answer streaming | `ArticleCard()`, `MarkdownText()`, `WebHTML()` (useRef+innerHTML, see Gotcha 15), `FIRE_SVG`, `fmtNum()` |
+| `news-app/components/FilterTag.tsx` | Active date range label pill | `FilterTag()` |
+| `news-app/components/TrendBriefCard.tsx` | Trend Brief card — SSE streaming synthesis | `TrendBriefCard()` |
 | `docs/architecture.md` | Design decisions + rationale | Read before changing patterns |
 | `docs/schema.md` | DB schema (partially outdated — verify against deployed) | Reference for migrations |
 | `current-state.md` | Live deployment status | Update after every deploy |
@@ -892,104 +946,22 @@ INSERT INTO sources (name, rss_url, source_type, is_active) VALUES
 
 ---
 
-### Stage 4.1 — Drum-Wheel UI Integration 🔄 IN PROGRESS
+### Stage 4.1 — Drum-Wheel UI Integration ✅ COMPLETE
 
-**Goal:** Replace the "Daily Feed" shell in `news-app/App.tsx` with the finalized `drum-wheel-v2.html` prototype design.
+**All components shipped and both open bugs resolved.**
 
-**File:** `news-app/App.tsx` only.
+**Components** (in `news-app/components/`):
+- `NavBar` — fixed top bar, category tabs, EN/中 spring-sliding toggle, fade-out on narrow viewport
+- `DrumWheelSidebar` — Today/3D/7D/30D TF buttons + drum wheel DOM bridge; `wrapDom.style.overflow='hidden'` fixes scrollbar (Gotcha 16 Option C)
+- `FilterTag` — active date pill with ✕ reset
+- `ArticleCard` — engagement badges, Q&A streaming, MarkdownText
+- `WebHTML` — now uses `useRef` + `useEffect` → `node.innerHTML = html` (Gotcha 15 fix; not `dangerouslySetInnerHTML`)
+- `TrendBriefCard` — Trend Brief synthesis; SSE streaming; collapse/expand; source list
+- `MarkdownText` — bullet + bold inline rendering
 
-**Design tokens applied:**
-- Page bg: `#f9f9f7` | Sidebar bg: `#fafafa` | Card bg: `#ffffff` | Card border: `#f4f4f5` (zinc-100)
-- Hover bg: `rgba(228,228,231,0.5)` (zinc-200/50 — matches step-size box gray)
-- Source label: Space Grotesk 10px bold uppercase tracking-widest zinc-400 (`#a1a1aa`)
-- Title: Manrope 16px semibold zinc-900 (`#18181b`), letterSpacing -0.2
-- Nav logo: Manrope 20px bold tracking -0.5
-- Fonts injected via Google Fonts CDN in `useEffect` (web-only guard: `typeof document !== 'undefined'`)
+**Date filtering:** `or()` query on (`published_at` in range) OR (`published_at IS NULL` AND `created_at` in range). Uses local-time midnight as day boundary — "Today" maps to current calendar day in browser's timezone.
 
-**New components:**
-- `NavBar` — fixed top bar (h:64, position:'fixed'), 3-col: logo (w:256) / category tabs (flex:1) / EN·中 toggle pill
-- `DrumWheelSidebar` — fixed left sidebar (w:256, top:64, bottom:0); tf-buttons (Today/3D/7D/30D) + wheel DOM; emits `onFilterChange(start, end, label)`
-- `FilterTag` — dark pill above feed showing active date context; ✕ calls `wheelControls.resetToToday()`
-
-**DOM bridge pattern for wheel (web-only):**
-- `DrumWheelSidebar` renders `<View ref={wrapRef} style={styles.wheelContainer} />`
-- `useEffect` guards on `typeof document === 'undefined'`, injects `<style>` tag (scroll-snap, perspective, fade gradients, transitions), gets DOM node via `wrapRef.current as unknown as HTMLElement`
-- Full wheel JS from `drum-wheel-v2.html` ported verbatim into the effect closure: `buildAnchors`, `renderWheel`, `updateContinuous` (RAF), `onWheelScroll` (80ms debounce), `snapToIdx`, `scrollToAnimated` (native `behavior:'smooth'`)
-- Wheel calls `onFilterChangeRef.current(start, end, label)` instead of updating a DOM span
-- Gradient colors use `#fafafa` (sidebar bg) — not `#f9f9f7` (page bg)
-- TF buttons (React Native `TouchableOpacity`) call `handleTfRef.current(days)` into DOM scope
-- `onMountedControls({ resetToToday })` exposes imperative reset to parent
-
-**Date filtering:**
-- `dateRange: { start, end }` state in App; populated by wheel's `onFilterChange`
-- Supabase query adds `.gte('created_at', start.toISOString()).lt('created_at', end.toISOString())`
-- `stepDays=1` Today → single-day range; `stepDays=7/30/90` → N-day range ending at selected date
-
-**Infinite scroll (replaces pagination):**
-- `FEED_PAGE_SIZE = 10` (matches drum-wheel-v2.html `FEED_PAGE = 10`)
-- `feedOffset`, `hasMore`, `loadingMore` state; `feedOffsetRef` for stale-closure safety
-- `FlatList.onEndReached={loadMoreArticles}` with `onEndReachedThreshold={0.2}`
-- Sentinel: `──────── scroll down to load more ────────` / `loading ···` / `──────── all caught up ────────` (Space Grotesk 10px)
-- Re-fetch from offset 0 when `dateRange` changes
-
-**Preserved unchanged:** All ArticleCard logic — 🔥 engagement badge, expand/collapse, summary bullets, "Read more →", "? Questions" Q&A streaming, "Thought process ▼" thinking block, `handleAsk()`, `handleRefresh()`, `MarkdownText`, `scrollToOffset` lang toggle.
-
----
-
-**Session 2026-03-29 UI additions (all in `news-app/App.tsx`):**
-
-**TF button changes:**
-- Replaced `90D` with `3D`; new order: `[1, 3, 7, 30]` (Today, 3D, 7D, 30D)
-- Sliding spring indicator: `tfAnim = useRef(new Animated.Value(0))`; `toValue = idx * 53` (button width 49px + gap 4px); `Animated.spring(tension:300, friction:30)`
-- Active pill rendered as `Animated.View` with `position:'absolute'` inside `tfRow`
-
-**Category tab width fix:**
-- Activation was changing tab width because `fontWeight:'bold'` on active text is wider than normal
-- Fix: invisible bold ghost text (`opacity:0`) reserves bold width; visible text is `position:'absolute'` overlay
-- Both texts render but only the overlay is visible — layout uses ghost's bold dimensions at all times
-
-**Lang toggle:**
-- Spring-sliding indicator: `langAnim = useRef(new Animated.Value(0))`; slides from `translateX:0` (EN) to `translateX:40` (中); `Animated.spring(tension:300, friction:30)`
-- Fade-out on narrow viewport: `langVisAnim`, `langVisible` ref, `onNavLayout` callback; threshold 700px; `Animated.timing(duration:180)` to opacity 0/1; `pointerEvents` toggled to prevent ghost tap targets
-
-**Nav bottom-alignment:**
-- `nav` style: `alignItems:'flex-end'` + `paddingBottom:14`
-- `navTabsCol` style: `alignItems:'flex-end'`
-- Result: newnews logo baseline, category underline, and lang pill bottom all on the same horizontal line
-
-**GitHub star badge (process-queue):**
-- `workers/process-queue/src/index.ts` updated: `isGitHub = url.startsWith('https://github.com/')`
-- `engagement = { stars: article.metadata.stars }` when `isGitHub && metadata.stars != null`
-- Frontend: `item.engagement?.stars` renders Font Awesome star badge `<i class="fa-solid fa-star">` via `WebHTML`
-- Font Awesome 6.5.0 CDN injected in font `useEffect` via `document.createElement('link')`
-
----
-
-**Two unresolved bugs (open as of 2026-03-29):**
-
-**Bug 1 — Fire SVG icon blank**
-- Intent: replace 🔥 emoji with `docs/icon/fire.svg` full paths; show complete red flame
-- `FIRE_SVG` constant contains all 7+ path elements from the source file (correct)
-- Root cause: `WebHTML` component uses `dangerouslySetInnerHTML` prop passthrough on a React Native `View` — react-native-web does not reliably pass this prop through to the DOM (see Gotcha 15)
-- What was tried: both 3-path partial and full 7-path SVG via `WebHTML` — both render blank
-- Fix: replace `WebHTML` with a ref-based component that sets `innerHTML` in `useEffect` (see Gotcha 15 fix)
-
-**Bug 2 — Wheel scrollbar gray lines visible**
-- Symptom: two horizontal gray hairlines at top and bottom of drum-wheel scroll area (native browser scrollbar thumb boundary)
-- Three layers of fix were applied — all failed:
-  1. `.wheel-track::-webkit-scrollbar { display:none; width:0; height:0 }` CSS class
-  2. `.wheel-track { scrollbar-width:none; -ms-overflow-style:none }` CSS class
-  3. `track.style.cssText += 'scrollbar-width:none;-ms-overflow-style:none;'` inline on track element
-  4. `.wheel-wrap { overflow:hidden }` CSS class
-- Root cause: CSS class rules cannot override react-native-web's inline styles; `::-webkit-scrollbar` pseudo-element cannot be targeted inline (see Gotcha 16)
-- Fix: either (A) `wrapDom.style.overflow = 'hidden'` after mount (inline wins), or (B) dynamic `<style>` with element ID + `!important` for `::-webkit-scrollbar`
-
-**Verify:**
-```bash
-cd news-app && npx expo start --web
-# Check: fixed nav, drum wheel sidebar, article cards, infinite scroll, date filter, Q&A still works
-# Pending: fire SVG renders, gray lines gone
-```
+**Known behavior:** "Today" returns empty when no articles have been ingested for the current UTC calendar day yet. Normal — pipelines run every 4h. Use 3D/7D to always see content.
 
 ---
 
@@ -1058,6 +1030,7 @@ eas build --platform ios --profile production
 
 | Item | Trigger |
 |------|---------|
+| Stage 4 — Web deployment (Cloudflare Pages) | Active next — `npx expo export --platform web && npx wrangler pages deploy dist --project-name news-app` |
 | Retry backoff in process-queue | Error rate > 10% |
 | Fix questions all-or-nothing (return partial EN/ZH) | questions null rate > 20% |
 | Return `article_content` from `match_articles` for richer RAG context | After Stage 2 UI done |
@@ -1065,7 +1038,6 @@ eas build --platform ios --profile production
 | Add more CN sources (少数派, 虎嗅, 晚点LatePost) | After source audit |
 | Fix HN scraping to follow linked URL (not HN page) | If HN re-enabled after structural fix |
 | Engagement sorting/filtering in App.tsx | After enough engagement data accumulates (1+ week) |
-| Cloudflare Workers Paid ($5/mo) | When subrequest count approaches 45/50 or new workers needed |
 | Push notifications (daily digest) | Phase 4 |
 | Remove `reasoning_content` dead code in answer-question | When reasoning model added |
 

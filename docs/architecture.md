@@ -56,7 +56,7 @@ The model produces 1024-dimensional embeddings, which directly defines the `vect
 ### Groq `llama-3.3-70b-versatile` for all LLM tasks
 All LLM work uses a single model on Groq's free API tier: bilingual summarization, question generation, bio extraction, and streaming Q&A answers (`answer-question` Edge Function).
 
-- **Summarization + questions:** `process-queue` makes 3 Groq calls per article (summary + EN questions + ZH questions). Free tier: 12K TPM, 100K TPD.
+- **Summarization + questions:** `process-queue` makes **1 Groq call per article** — the system prompt includes `QUESTIONS_EN` and `QUESTIONS_ZH` sections that the model populates alongside the summary. The single response is parsed by `parseSection` (text) and `parseJsonSection` (JSON arrays). Free tier: 12K TPM, 100K TPD.
 - **Q&A (answer-question):** Streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
 - **Upgrade path for reasoning:** DeepSeek API directly (`deepseek-reasoner`) or any model that emits `reasoning_content`. Same API format — one model name change in `answer-question`.
 

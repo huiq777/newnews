@@ -178,36 +178,37 @@ export default {
         const validTweets = tweets.filter(t => t.id && t.text && t.url)
         console.log(`Inserting ${validTweets.length} valid tweets`)
 
-        // 5. Insert into raw_ingestion — duplicates silently skipped via ON CONFLICT (url)
-        await Promise.all(
-          validTweets.map(tweet => {
-            const author = extractAuthor(tweet.url)
-            const rawContent = author ? `@${author}: ${tweet.text}` : tweet.text
-
-            return fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion`, {
-              method: 'POST',
-              headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
-              body: JSON.stringify({
-                source_id: builderSource.id,
-                url: tweet.url,
-                raw_content: rawContent,
-                status: 'pending',
-                metadata: { likes: tweet.likes ?? 0, retweets: tweet.retweets ?? 0 },
-                published_at: tweet.createdAt ?? null,
-              }),
-            })
-          })
-        )
-        console.log(`Attempted ${validTweets.length} tweet inserts (duplicates silently skipped)`)
+        // 5. Batch insert all tweets in ONE subrequest — duplicates silently skipped via ON CONFLICT (url)
+        const tweetRows = validTweets.map(tweet => {
+          const author = extractAuthor(tweet.url)
+          return {
+            source_id: builderSource.id,
+            url: tweet.url,
+            raw_content: author ? `@${author}: ${tweet.text}` : tweet.text,
+            status: 'pending',
+            metadata: { likes: tweet.likes ?? 0, retweets: tweet.retweets ?? 0 },
+            published_at: tweet.createdAt ?? null,
+          }
+        })
+        const tweetInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
+          method: 'POST',
+          headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
+          body: JSON.stringify(tweetRows),
+        })
+        if (!tweetInsertRes.ok) {
+          const err = await tweetInsertRes.text()
+          console.error(`Tweet batch insert failed: ${tweetInsertRes.status} — ${err.substring(0, 300)}`)
+        } else {
+          console.log(`Attempted ${validTweets.length} tweet inserts in 1 batch (duplicates silently skipped)`)
+        }
       }
     }
 
     // ── Podcasts ─────────────────────────────────────────────────────────────
 
     if (!podcastSource) {
-      console.log('No podcast source configured. Run the INSERT SQL first.')
-      return
-    }
+      console.log('No podcast source configured — skipping podcasts.')
+    } else {
 
     console.log(`Podcast source: ${podcastSource.name} (${podcastSource.id})`)
 
@@ -249,6 +250,7 @@ export default {
     }
     } // end if (episodes.length > 0)
     } // end if (podcastFeedRes.ok)
+    } // end if (podcastSource)
 
     // ── GitHub Trending + Product Hunt + Nowcoder + arXiv + Reddit ───────────
     const newRows: object[] = []

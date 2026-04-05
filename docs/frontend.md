@@ -27,11 +27,15 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
 
 ## Architecture
 
-Single-file app (`App.tsx`) with no navigation library. The main structure:
+Multi-file app with components split into `news-app/components/`. The main structure:
 
 ```
-App
+App (App.tsx)
+├── NavBar
+├── DrumWheelSidebar (date picker wheel + TODAY/3D/7D/30D toggle)
+├── FilterTag (active date range label)
 └── FlatList (paginated feed)
+    ├── TrendBriefCard (top of feed, All tab only)
     └── ArticleCard (one per article)
         ├── Header (source label + engagement badge + ? Questions pill)
         ├── Title (title_en or title_zh based on lang)
@@ -41,6 +45,11 @@ App
             ├── Question rows (Q1, Q2, Q3)
             └── Answer block (streaming via answer-question SSE)
 ```
+
+**Date filtering behavior:**
+- `dateRange` initialized eagerly to today on mount — no flash of all articles
+- If Today returns 0 articles, auto-fallback to 3D via `wheelControlsRef.current.switchTo(3)`
+- `DrumWheelSidebar` exposes `{ resetToToday, switchTo }` via `onMountedControls`
 
 ---
 
@@ -73,8 +82,13 @@ fmtNum(900)   // → "900"
 - Open answers reset on toggle (stale answers from other language discarded)
 
 ### Pagination
-- 20 articles per page; page number nav buttons
-- Fetches from Supabase REST API with `limit=20&offset=page*20`
+- `FEED_PAGE_SIZE` articles per page (defined in `lib/config.ts`); infinite scroll via `loadMore`
+- Fetches from Supabase REST API with `range(offset, offset + FEED_PAGE_SIZE - 1)`
+
+### Date Filtering
+- `dateRange` state initializes eagerly to today's midnight range on mount (no initial flash of all articles)
+- If Today returns 0 articles, automatically calls `wheelControlsRef.current.switchTo(3)` → 3D range
+- `DrumWheelSidebar` exposes `{ resetToToday, switchTo(days: 1|3|7|30) }` via `onMountedControls` prop
 
 ---
 

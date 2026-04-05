@@ -94,11 +94,13 @@ Non-streaming JSON response. Fast enough that streaming isn't needed.
 
 ```
 1. Fetch article's summary_en and summary_zh from daily_news
-2. Groq llama-3.3-70b-versatile → 3 EN questions (same prompt as process-queue)
-3. Groq llama-3.3-70b-versatile → 3 ZH questions (same prompt)
+2. Groq llama-3.3-70b-versatile → 3 EN questions (2 parallel Groq calls: EN + ZH)
+3. Groq llama-3.3-70b-versatile → 3 ZH questions (parallel with step 2)
 4. PATCH daily_news SET questions = {en: [...], zh: [...]} WHERE id = article_id
 5. Return the new questions as JSON
 ```
+
+Note: `refresh-questions` still uses 2 separate Groq calls (EN + ZH parallel). Only `process-queue` was consolidated to 1 call. This is intentional — refresh-questions operates on existing summaries and the 2-call approach keeps question quality high for on-demand regeneration.
 
 ### Required Secrets
 - `GROQ_API_KEY`
@@ -216,7 +218,7 @@ supabase functions logs generate-trend-brief --tail
 
 ---
 
-## `generate-trend-brief` — Cross-Window Trend Synthesis *(planned)*
+## `generate-trend-brief` — Cross-Window Trend Synthesis ✅ Live
 
 ### Purpose
 Fetches all articles in a selected time window (ALL categories), clusters them by semantic similarity, selects up to 12 representative articles, enriches with historically related articles via pgvector, and streams a synthesis prose analysis via MiMo-V2-Flash. Result cached in `trend_briefs` for 6 hours. Only called on cache miss — cache hit renders immediately from the DB.
@@ -293,14 +295,15 @@ Frontend AbortController fires on window change — `req.signal` is propagated t
 ```
 
 ### Required Secrets
-- `MIMO_API_KEY` (or `GROQ_API_KEY` with MiMo model endpoint)
+- `GROQ_API_KEY` — uses `llama-3.3-70b-versatile`
+- `COHERE_API_KEY` — for historical enrichment embedding
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
-### Deploy *(when implemented)*
+### Deploy
 ```bash
 supabase functions deploy generate-trend-brief
-supabase secrets set MIMO_API_KEY=... --project-ref <ref>
+supabase secrets set GROQ_API_KEY=... --project-ref <ref>
 ```
 
 ### Token Budget
