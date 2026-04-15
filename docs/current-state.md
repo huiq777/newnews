@@ -1,4 +1,4 @@
-# Current State — 2026-04-05
+# Current State — 2026-04-15
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -18,9 +18,9 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
-| `ingest-rss` | ⚠️ Needs deploy | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
-| `process-queue` | ⚠️ Needs deploy | Every 15 min | **Now 1 Groq call per article** (summary + QUESTIONS_EN + QUESTIONS_ZH combined); ~67% fewer Groq tokens; max_tokens raised to 2000; `parseJsonSection` parser added |
-| `ingest-builders` | ⚠️ Needs deploy | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
+| `ingest-rss` | ✅ Deployed | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
+| `process-queue` | ✅ Deployed | Every 15 min | **Now 1 Groq call per article** (summary + QUESTIONS_EN + QUESTIONS_ZH combined); ~67% fewer Groq tokens; max_tokens raised to 2000; `parseJsonSection` parser added |
+| `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
 | `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; 🔥 likes badge for tweets only (HN badge disabled) |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
@@ -73,23 +73,17 @@ Working features:
 
 ## Active Next Steps
 
-### Deploy Pending Workers ← IMMEDIATE
+### Deploy Pending Workers ✅ COMPLETE (2026-04-15)
 
-Three workers have local changes that need to be deployed:
+All three workers deployed: `ingest-rss`, `process-queue`, `ingest-builders`. Groq consolidation savings (34% per article, 51% per tweet) are now live in production.
 
-```bash
-cd workers/ingest-rss && npx wrangler deploy
-cd workers/process-queue && npx wrangler deploy
-cd workers/ingest-builders && npx wrangler deploy
-```
-
-Then reset 429-errored rows so they reprocess with the improved token budget:
+Remaining follow-up if not yet done:
+- Reset 429-errored rows so they reprocess with the improved token budget:
 ```sql
 UPDATE raw_ingestion SET status = 'pending', retry_count = 0
 WHERE status = 'error' AND last_error LIKE 'Groq 429%';
 ```
-
-And update Reddit sources to use RSS (bypasses Cloudflare IP block on Reddit JSON API):
+- Update Reddit sources to use RSS (bypasses Cloudflare IP block on Reddit JSON API):
 ```sql
 UPDATE sources SET rss_url = 'https://www.reddit.com/r/MachineLearning.rss', source_type = 'rss' WHERE name = 'Reddit r/MachineLearning';
 UPDATE sources SET rss_url = 'https://www.reddit.com/r/cscareerquestions.rss', source_type = 'rss' WHERE name = 'Reddit r/cscareerquestions';
