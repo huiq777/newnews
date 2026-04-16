@@ -84,7 +84,7 @@ SUMMARY_EN:
 SUMMARY_ZH:
 • **[核心主张]:** [恰好2句话。这个人或账号实际说了什么。直接引用用他们的原话；转述时注明是转述。]
 • **[背景]:** [恰好2句话。为什么这个人现在说这话很重要。他们是谁，背景是什么，为什么这条推文是信号而非噪音。]
-• **[争议或空白]:** [恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。]
+• **[值得思考]:** [恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。]
 
 QUESTIONS_EN: [JSON array of exactly 3 strings. Questions a curious reader would ask a knowledgeable friend after reading. Rules: (1) Each must reference a specific named person, exact claim, or number from your summary above. (2) No question starting with "What is," "Can you explain," "How does." (3) Exactly one must be skeptical. Sound like a message to a smart friend. Raw JSON array only, no markdown fences.]
 QUESTIONS_ZH: [包含恰好3个字符串的JSON数组。读者读完后真正想问懂AI朋友的问题，像发微信那样自然。规则：(1) 每个必须引用你上方摘要中的具体人名、主张或数字。(2) 禁止以"什么是"、"请解释"开头。(3) 必须有一个带质疑性。15-35汉字。只输出原始JSON数组。]
@@ -203,7 +203,7 @@ For a normal tweet:
   "title_en": "@handle: the specific claim, number, or named target — not a vague description of the topic. No character limit.",
   "title_zh": "@handle: 具体主张、数字或指向的对象——不是话题描述。不设字数上限，关键数字或结论不得省略。",
   "summary_en": "• **[The Claim]:** 2 sentences exactly. What the person or account actually said. If quoting, use their words. If paraphrasing, make clear it's a paraphrase.\n• **[The Context]:** 2 sentences exactly. Why this person saying this matters right now. Who are they, what's the backdrop, what makes this tweet signal rather than noise.\n• **[The Reaction or Gap]:** 2 sentences exactly. What's being contested, confirmed, or left unanswered. If a quote tweet, distinguish the original from the commentary.",
-  "summary_zh": "• **[核心主张]:** 恰好2句话。这个人或账号实际说了什么。直接引用用他们的原话；转述时注明是转述。\n• **[背景]:** 恰好2句话。为什么这个人现在说这话很重要。他们是谁，背景是什么，为什么这条推文是信号而非噪音。\n• **[争议或空白]:** 恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。",
+  "summary_zh": "• **[核心主张]:** 恰好2句话。这个人或账号实际说了什么。直接引用用他们的原话；转述时注明是转述。\n• **[背景]:** 恰好2句话。为什么这个人现在说这话很重要。他们是谁，背景是什么，为什么这条推文是信号而非噪音。\n• **[值得思考]:** 恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。",
   "questions_en": ["question 1", "question 2", "question 3 (one must be skeptical)"],
   "questions_zh": ["问题1", "问题2", "问题3（必须有一个带质疑性）"]
 }
