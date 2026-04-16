@@ -2,6 +2,7 @@ export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   GROQ_API_KEY: string
+  GOOGLE_AI_STUDIO_API_KEY: string
   PRODUCTHUNT_API_TOKEN?: string   // optional — skip PH if not set
 }
 
@@ -69,24 +70,111 @@ function extractAccounts(data: unknown): BuilderAccount[] {
   return []
 }
 
-// One batch Groq call → {handle: "current position"} for all accounts with bios
-async function extractBioMap(accounts: BuilderAccount[], groqApiKey: string): Promise<Record<string, string>> {
+const AI_STUDIO_BIO_MODEL = 'gemma-3-12b-it'
+const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+const BIO_SYSTEM_PROMPT = 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.'
+
+// One batch LLM call → {handle: "current position"} for all accounts with bios
+// Primary: Google AI Studio Gemma 3 12B (JSON-constrained)
+// Fallback: Groq llama-3.3-70b (fast failures only — 429 or connection error)
+async function extractBioMap(accounts: BuilderAccount[], env: Env): Promise<Record<string, string>> {
   const withBio = accounts.filter(a => a.handle && a.bio)
   if (withBio.length === 0) return {}
 
-  const prompt = withBio.map(a => `@${a.handle}: ${a.bio}`).join('\n')
+  const userPrompt = withBio.map(a => `@${a.handle}: ${a.bio}`).join('\n')
 
+  // --- AI Studio primary ---
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 8000)
+  let useGroqFallback = false
+
+  try {
+    const url = `${AI_STUDIO_BASE}/${AI_STUDIO_BIO_MODEL}:generateContent?key=${env.GOOGLE_AI_STUDIO_API_KEY}`
+    const body = {
+      systemInstruction: {
+        parts: [{
+          text: 'Respond with valid JSON only. No reasoning. No verification. No self-correction.\nOutput the JSON object once, directly. Do not narrate your process.\n\n' + BIO_SYSTEM_PROMPT,
+        }],
+      },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object',
+          properties: { bios: { type: 'object' } },
+        },
+        temperature: 0,
+      },
+    }
+
+    let aiRes: Response
+    try {
+      aiRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+    } catch (fetchErr: unknown) {
+      clearTimeout(timeoutId)
+      if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
+        console.error('AI Studio bio extraction timeout — failing bio step')
+        return {}
+      }
+      console.log('AI Studio bio unreachable, falling back to Groq:', (fetchErr as Error).message)
+      useGroqFallback = true
+      aiRes = undefined as unknown as Response
+    }
+
+    clearTimeout(timeoutId)
+
+    if (!useGroqFallback) {
+      if (aiRes!.status === 429) {
+        console.log('AI Studio bio 429, falling back to Groq')
+        useGroqFallback = true
+      } else if (!aiRes!.ok) {
+        console.error(`AI Studio bio ${aiRes!.status} — failing bio step`)
+        return {}
+      } else {
+        const rawJson = await aiRes!.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
+        const text = rawJson?.candidates?.[0]?.content?.parts?.[0]?.text
+        if (!text) {
+          console.error('AI Studio bio: missing response text — failing bio step')
+          return {}
+        }
+        try {
+          const parsed = JSON.parse(text) as { bios?: Record<string, string> }
+          // Normalize: strip @ prefix from keys if present, lowercase
+          const bios = parsed.bios ?? {}
+          const result: Record<string, string> = {}
+          for (const [k, v] of Object.entries(bios)) {
+            const handle = k.startsWith('@') ? k.slice(1).toLowerCase() : k.toLowerCase()
+            result[handle] = v
+          }
+          if (Object.keys(result).length > 0) return result
+        } catch {
+          console.error('AI Studio bio: JSON parse failure — failing bio step')
+          return {}
+        }
+      }
+    }
+  } catch (err) {
+    clearTimeout(timeoutId)
+    console.error('AI Studio bio extraction error:', (err as Error).message)
+    return {}
+  }
+
+  if (!useGroqFallback) return {}
+
+  // --- Groq fallback (fast failures only) ---
   const res = await fetch(GROQ_API, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${groqApiKey}`, 'Content-Type': 'application/json' },
+    headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'llama-3.3-70b-versatile',
       messages: [
-        {
-          role: 'system',
-          content: 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.',
-        },
-        { role: 'user', content: prompt },
+        { role: 'system', content: BIO_SYSTEM_PROMPT },
+        { role: 'user', content: userPrompt },
       ],
       max_tokens: 600,
       temperature: 0,
@@ -94,7 +182,7 @@ async function extractBioMap(accounts: BuilderAccount[], groqApiKey: string): Pr
   })
 
   if (!res.ok) {
-    console.error(`Groq bio extraction failed: ${res.status}`)
+    console.error(`Groq bio extraction fallback failed: ${res.status}`)
     return {}
   }
 
@@ -106,7 +194,7 @@ async function extractBioMap(accounts: BuilderAccount[], groqApiKey: string): Pr
     return JSON.parse(content) as Record<string, string>
   } catch { /* fall through */ }
 
-  // Fallback: Groq returned JSONL — one {"handle": x, "role": y} per line
+  // Groq sometimes returns JSONL — one {"handle": x, "role": y} per line
   try {
     const result: Record<string, string> = {}
     content.split('\n').forEach(line => {
@@ -164,7 +252,7 @@ export default {
         console.log(`Fetched ${tweets.length} builder tweets from feed-x.json`)
 
         // 3. Extract AI-interpreted positions from bios → cache in sources.metadata
-        const bioMap = await extractBioMap(accounts, env.GROQ_API_KEY)
+        const bioMap = await extractBioMap(accounts, env)
         if (Object.keys(bioMap).length > 0) {
           await fetch(`${env.SUPABASE_URL}/rest/v1/sources?id=eq.${builderSource.id}`, {
             method: 'PATCH',

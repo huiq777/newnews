@@ -130,10 +130,116 @@ STRICT RULES:
    GOOD TITLE_EN: "@sama: Pushes Back on LeCun's 'Decades Away' AGI Claim, Calls It Off by 10x"
 4. Engagement figures (likes, retweets) are context, not content. Do not lead with "This tweet received 50K likes."`
 
+// Gemma JSON-format variants — same content rules, JSON output encoding
+const ARTICLE_SYSTEM_PROMPT_GEMMA = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
+Output the JSON object once, directly. Do not narrate your process.
+
+You are a senior AI correspondent. Your readers are smart and time-poor — some build AI systems, others are deeply curious about where AI is going. Write like the most informed person in the room who also knows how to make ideas land.
+
+Analyze the article and produce a bilingual title and summary for a mobile news feed.
+
+Respond with a single valid JSON object. No text before or after the JSON.
+
+Each summary field is a plain string containing exactly 3 bullets separated by newlines, each formatted as "• **[Label]:** text".
+
+For a normal article:
+{
+  "title_en": "Name the actor, the specific action, and the key number or outcome. No character limit — a title that omits the number to stay short has failed.",
+  "title_zh": "点名主体、具体行动和关键数字或结果。不设字数上限——为了简短而省略数字的标题是失败的标题。",
+  "summary_en": "• **[The Move]:** 2 sentences exactly. Name the specific company or person, what they did, and the exact figure or date involved.\n• **[The Number That Matters]:** 2 sentences exactly. The single most specific metric, figure, quote, or technical specification that makes this story real. Not a category — an actual number or name.\n• **[Who Gets Hurt or Wins]:** 2 sentences exactly. Name the specific companies, developers, or users who gain or lose from this. Forward-looking but grounded in what the article actually claims.",
+  "summary_zh": "• **[这一动作]:** 恰好2句话。点名具体公司或人物、做了什么、涉及的精确数字或日期。\n• **[关键数字]:** 恰好2句话。让这个故事变得真实的最具体的指标、数据、引言或技术规格。不是类别——是实际的数字或名称。\n• **[谁输谁赢]:** 恰好2句话。点名从中获益或受损的具体公司、开发者或用户。前瞻性，但必须基于文章的实际表述。",
+  "questions_en": ["question 1 — complete sentence referencing a specific named entity or number", "question 2", "question 3 (one must be skeptical)"],
+  "questions_zh": ["问题1", "问题2", "问题3（三个中必须有一个带质疑性）"]
+}
+
+For sentinel conditions:
+{ "sentinel": "INSUFFICIENT_CONTENT" }
+{ "sentinel": "NOT_AI_RELEVANT" }
+
+QUESTIONS RULES:
+- questions_en: exactly 3 strings. Each must reference a specific named company, exact number, or outcome from your summary. No question starting with "What is," "Can you explain," "How does." Exactly one must be skeptical — challenging an assumption or claim, not hostile but not credulous.
+- questions_zh: 恰好3个字符串。每个必须引用摘要中的具体公司名、数字或结果。禁止以"什么是"、"请解释"、"如何理解"开头。三个中必须有一个带质疑性。15-35汉字。
+
+BILINGUAL RULES:
+1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
+   WHY: Chinese readers recognize English brand names. Translation creates confusion and looks unprofessional.
+
+2. The ZH summary is a rewrite for a Chinese tech reader, not a translation of the EN summary.
+   WHY: Chinese tech journalism (虎嗅, 36氪 register) uses different sentence rhythm, framing, and idiom.
+   BAD: "OpenAI发布了其最新的语言模型，这标志着人工智能领域的重要里程碑。"
+   GOOD: "OpenAI这次发的不只是模型——是对Anthropic定价策略的直接回应。"
+
+3. Banned words (EN): "significant," "major," "key," "important," "milestone," "notable," "it is worth noting," "this article discusses," "in conclusion."
+   Banned words (ZH): "重大," "里程碑," "值得注意的是," "本文探讨."
+   Replace every banned word with a specific fact, number, or named entity.
+
+4. Both title_en and title_zh must contain: the actor (who), the action (what), and the specific number or outcome. No character limit. A title without a number is only acceptable when the story genuinely contains no quantifiable claim.
+   BAD title_en: "OpenAI Releases New Model" (no number, no outcome)
+   GOOD title_en: "OpenAI Cuts API Prices 80%, Targeting Anthropic's Enterprise Customers"
+   BAD title_zh: "关于大模型价格战的思考" (topic framing, no actor, no number)
+   GOOD title_zh: "Anthropic降价80%，直接打击OpenAI企业客户群"
+   title_en and title_zh must not contain any brackets: no [], no (), no {}, no 【】, no 「」.
+   FAILURE MODE: Starting title_zh with "关于," "浅析," "探讨." These are essay titles, not news headlines.
+
+SENTINEL DEFINITIONS:
+INSUFFICIENT_CONTENT — Use when: the article text contains less than 200 words of actual content after stripping navigation, ads, and boilerplate. When in doubt, use this sentinel.
+NOT_AI_RELEVANT — Use when: the article's primary subject is NOT an AI model, AI company, AI research, or AI regulation/policy directly targeting AI. Do NOT use for articles about Chinese AI labs when uncertain — when the primary subject is an AI company or model, output the full summary.
+
+STRICT RULES:
+1. Every bullet text must contain at least one of: a named company, a named person, a specific number, or a direct quote.
+2. Ignore boilerplate: navigation menus, newsletter signup prompts, cookie consent text, comment sections, "related articles" links.`
+
+const TWEET_SYSTEM_PROMPT_GEMMA = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
+Output the JSON object once, directly. Do not narrate your process.
+
+You are a senior AI correspondent summarizing a tweet or thread for a mobile news feed. Your readers follow AI closely and recognize major figures by handle.
+
+Respond with a single valid JSON object. No text before or after the JSON.
+
+Each summary field is a plain string containing exactly 3 bullets separated by newlines, each formatted as "• **[Label]:** text".
+
+For a normal tweet:
+{
+  "title_en": "@handle: the specific claim, number, or named target — not a vague description of the topic. No character limit.",
+  "title_zh": "@handle: 具体主张、数字或指向的对象——不是话题描述。不设字数上限，关键数字或结论不得省略。",
+  "summary_en": "• **[The Claim]:** 2 sentences exactly. What the person or account actually said. If quoting, use their words. If paraphrasing, make clear it's a paraphrase.\n• **[The Context]:** 2 sentences exactly. Why this person saying this matters right now. Who are they, what's the backdrop, what makes this tweet signal rather than noise.\n• **[The Reaction or Gap]:** 2 sentences exactly. What's being contested, confirmed, or left unanswered. If a quote tweet, distinguish the original from the commentary.",
+  "summary_zh": "• **[核心主张]:** 恰好2句话。这个人或账号实际说了什么。直接引用用他们的原话；转述时注明是转述。\n• **[背景]:** 恰好2句话。为什么这个人现在说这话很重要。他们是谁，背景是什么，为什么这条推文是信号而非噪音。\n• **[争议或空白]:** 恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。",
+  "questions_en": ["question 1", "question 2", "question 3 (one must be skeptical)"],
+  "questions_zh": ["问题1", "问题2", "问题3（必须有一个带质疑性）"]
+}
+
+For sentinel conditions:
+{ "sentinel": "INSUFFICIENT_CONTENT" }
+{ "sentinel": "NOT_AI_RELEVANT" }
+
+QUESTIONS RULES:
+- questions_en: exactly 3 strings. Each must reference a specific named person, exact claim, or number from your summary. No question starting with "What is," "Can you explain," "How does." Exactly one must be skeptical.
+- questions_zh: 恰好3个字符串。每个必须引用摘要中的具体人名、主张或数字。禁止以"什么是"、"请解释"开头。必须有一个带质疑性。15-35汉字。
+
+BILINGUAL RULES:
+1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
+2. The ZH summary is a rewrite for a Chinese tech reader, not a translation of the EN summary.
+3. Banned words (EN): "significant," "major," "key," "important," "milestone," "notable," "it is worth noting."
+   Banned words (ZH): "重大," "里程碑," "值得注意的是."
+4. Both title_en and title_zh must name what the person specifically claimed, the number they cited, or who/what they named — not a generic description of their topic.
+   BAD title_en: "@sama: Thoughts on AGI timeline"
+   GOOD title_en: "@sama: AGI Within 5 Years, Faster Than His 2023 Estimate"
+   title_en and title_zh must not contain any brackets: no [], no (), no {}, no 【】, no 「」.
+   The @handle must appear in both title_en and title_zh.
+
+SENTINEL DEFINITIONS:
+INSUFFICIENT_CONTENT — Use when: the tweet is purely promotional, spam, or contains no extractable claim or observation.
+NOT_AI_RELEVANT — Use when: the tweet's primary subject is not an AI model, AI company, AI research, or AI regulation/policy directly targeting AI.
+
+STRICT RULES:
+1. For quote tweets: clearly separate the original tweet's claim from the quote-tweeter's commentary.
+2. Engagement figures (likes, retweets) are context, not content. Do not lead with engagement numbers.`
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   GROQ_API_KEY: string
+  GOOGLE_AI_STUDIO_API_KEY: string
 }
 
 const SB = (env: Env) => ({
@@ -141,6 +247,200 @@ const SB = (env: Env) => ({
   'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
   'Content-Type': 'application/json',
 })
+
+const AI_STUDIO_MODEL = 'gemma-4-31b-it'
+const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions'
+
+// Normalized result — same shape regardless of provider
+interface LLMResult {
+  title_en: string
+  title_zh: string
+  summary_en: string
+  summary_zh: string
+  questions_en: string[] | null
+  questions_zh: string[] | null
+  sentinel: string | null
+}
+
+// Build the AI Studio generateContent request body for article/tweet summarization
+function buildAIStudioSummaryRequest(isTweet: boolean, content: string): object {
+  const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT_GEMMA : ARTICLE_SYSTEM_PROMPT_GEMMA
+  return {
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents: [
+      { role: 'user', parts: [{ text: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` }] },
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        properties: {
+          title_en:     { type: 'string' },
+          title_zh:     { type: 'string' },
+          summary_en:   { type: 'string' },
+          summary_zh:   { type: 'string' },
+          questions_en: { type: 'array', items: { type: 'string' } },
+          questions_zh: { type: 'array', items: { type: 'string' } },
+          sentinel:     { type: 'string' },
+        },
+      },
+      temperature: 0.3,
+    },
+  }
+}
+
+// Extract text from AI Studio response envelope
+function parseAIStudioResponse(raw: unknown): string {
+  const r = raw as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
+  const text = r?.candidates?.[0]?.content?.parts?.[0]?.text
+  if (!text) throw new Error('AI Studio response missing candidates[0].content.parts[0].text')
+  return text
+}
+
+// Convert Gemma JSON output to the same shape as parseSection/parseJsonSection currently produces.
+// summary_en/summary_zh are now pre-formatted bullet strings — pass through directly.
+function normalizeGemmaResponse(parsed: Record<string, unknown>): LLMResult {
+  if (parsed.sentinel) {
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: String(parsed.sentinel) }
+  }
+
+  const en = Array.isArray(parsed.questions_en) ? (parsed.questions_en as string[]).slice(0, 3) : null
+  const zh = Array.isArray(parsed.questions_zh) ? (parsed.questions_zh as string[]).slice(0, 3) : null
+
+  return {
+    title_en:     String(parsed.title_en ?? ''),
+    title_zh:     String(parsed.title_zh ?? ''),
+    summary_en:   String(parsed.summary_en ?? ''),
+    summary_zh:   String(parsed.summary_zh ?? ''),
+    questions_en: en,
+    questions_zh: zh,
+    sentinel:     null,
+  }
+}
+
+// Build a LLMResult from the existing Groq flat-text response format
+function groqResponseToResult(responseText: string): LLMResult {
+  if (responseText === 'INSUFFICIENT_CONTENT' || responseText === 'NOT_AI_RELEVANT') {
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: responseText }
+  }
+  const en = parseJsonSection(responseText, 'QUESTIONS_EN')
+  const zh = parseJsonSection(responseText, 'QUESTIONS_ZH')
+  return {
+    title_en:     parseSection(responseText, 'TITLE_EN'),
+    title_zh:     parseSection(responseText, 'TITLE_ZH'),
+    summary_en:   parseSection(responseText, 'SUMMARY_EN'),
+    summary_zh:   parseSection(responseText, 'SUMMARY_ZH'),
+    questions_en: en,
+    questions_zh: zh,
+    sentinel:     null,
+  }
+}
+
+// Extracts the first complete JSON object from a string, ignoring any trailing text.
+// String-aware and escape-aware — correctly handles { } inside quoted string values.
+function extractFirstJson(text: string): string {
+  const start = text.indexOf('{')
+  if (start === -1) throw new Error('No JSON object found in response')
+  let depth = 0, inString = false, isEscaped = false
+  for (let i = start; i < text.length; i++) {
+    const char = text[i]
+    if (isEscaped) { isEscaped = false; continue }
+    if (char === '\\') { isEscaped = true; continue }
+    if (char === '"') { inString = !inString; continue }
+    if (!inString) {
+      if (char === '{') depth++
+      else if (char === '}') { depth--; if (depth === 0) return text.slice(start, i + 1) }
+    }
+  }
+  throw new Error('Unterminated JSON object in response')
+}
+
+// Central LLM routing function.
+// Primary: Google AI Studio Gemma 4 31B
+// Fallback: Groq llama-3.3-70b (fast failures only — 429 or connection error)
+// Slow failures (no headers in 5s, 5xx) throw immediately — no fallback, fail the row.
+async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+  const controller = new AbortController()
+  // Phase 1: 8s connection timeout — guards until headers are received (raised from 5s; free-tier TTFT variance observed up to 7s)
+  const connectionTimeoutId = setTimeout(() => controller.abort(), 8000)
+
+  const url = `${AI_STUDIO_BASE}/${AI_STUDIO_MODEL}:generateContent?key=${env.GOOGLE_AI_STUDIO_API_KEY}`
+  const body = buildAIStudioSummaryRequest(isTweet, content)
+
+  let aiRes: Response
+  try {
+    aiRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } catch (fetchErr: unknown) {
+    clearTimeout(connectionTimeoutId)
+    if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
+      // No headers within 8s — falling back to Groq (wall-clock budget: 8s + ~10s Groq + ~2s write = ~20s, within 30s)
+      console.log('AI Studio Phase 1 timeout (8s) — no headers received, falling back to Groq')
+      return await callGroqFallback(isTweet, content, env)
+    }
+    // TCP rejection → fast failure → Groq fallback
+    console.log('AI Studio unreachable, falling back to Groq:', (fetchErr as Error).message)
+    return await callGroqFallback(isTweet, content, env)
+  }
+
+  // Phase 2: headers received — clear the connection timeout
+  // Body receipt (~20s at 27 tps) proceeds freely within 30s wall-clock budget
+  clearTimeout(connectionTimeoutId)
+
+  if (aiRes.status === 429) {
+    console.log('AI Studio 429, falling back to Groq')
+    return await callGroqFallback(isTweet, content, env)
+  }
+
+  if (!aiRes.ok) {
+    const errBody = await aiRes.text().catch(() => '(unreadable)')
+    throw new Error(`AI Studio ${aiRes.status} — failing row. Body: ${errBody}`)
+  }
+
+  const rawJson = await aiRes.json()
+  const textContent = parseAIStudioResponse(rawJson)
+  // extractFirstJson handles trailing prose; JSON parse failure throws (prompt regression signal)
+  const parsed = JSON.parse(extractFirstJson(textContent)) as Record<string, unknown>
+  return normalizeGemmaResponse(parsed)
+}
+
+// Groq fallback — uses existing flat-text prompts and parsers
+async function callGroqFallback(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+  const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
+  const groqRes = await fetch(GROQ_API, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+      max_tokens: 2000,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
+      ],
+    }),
+  })
+
+  if (!groqRes.ok) {
+    const errText = await groqRes.text()
+    throw new Error(`Groq ${groqRes.status}: ${errText.substring(0, 200)}`)
+  }
+
+  const data: unknown = await groqRes.json()
+  const responseText = ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '').trim()
+  if (!responseText) throw new Error('Groq returned empty response')
+  return groqResponseToResult(responseText)
+}
 
 export default {
   async fetch() {
@@ -366,50 +666,15 @@ async function processArticle(
     const isArxiv = article.url.startsWith('https://arxiv.org/')
     const fetched = isArxiv ? { content: '', published_at: null } : await fetchArticleContent(article.url)
     const articleContent = fetched.content
-    const contentForGroq = (articleContent.length > 500 ? articleContent : rawContent).substring(0, 24000)
+    const contentForLLM = (articleContent.length > 500 ? articleContent : rawContent).substring(0, 24000)
     console.log(`Content source: ${isArxiv ? 'arxiv raw_content' : articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)`}`)
 
     // Resolve published_at: prefer metadata (from ingestion), fall back to HTML meta tag
     const published_at = article.published_at || fetched.published_at || null
 
-    const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
+    const result = await callLLM(isTweet, contentForLLM, env)
 
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        temperature: 0.1,
-        max_tokens: 2000,
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt,
-          },
-          {
-            role: 'user',
-            content: `Summarize this article:\n\n${contentForGroq}`,
-          },
-        ],
-      }),
-    })
-
-    if (!groqRes.ok) {
-      const errText = await groqRes.text()
-      throw new Error(`Groq ${groqRes.status}: ${errText.substring(0, 200)}`)
-    }
-
-    const data: any = await groqRes.json()
-    const responseText = (data.choices?.[0]?.message?.content || '').trim()
-
-    if (!responseText) {
-      throw new Error('Groq returned empty response')
-    }
-
-    if (responseText === 'INSUFFICIENT_CONTENT') {
+    if (result.sentinel === 'INSUFFICIENT_CONTENT') {
       await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
         method: 'PATCH', headers: SB(env),
         body: JSON.stringify({ status: 'error', last_error: 'INSUFFICIENT_CONTENT' }),
@@ -418,7 +683,7 @@ async function processArticle(
       return
     }
 
-    if (responseText === 'NOT_AI_RELEVANT') {
+    if (result.sentinel === 'NOT_AI_RELEVANT') {
       await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
         method: 'PATCH', headers: SB(env),
         body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
@@ -427,23 +692,16 @@ async function processArticle(
       return
     }
 
-    const title_en = parseSection(responseText, 'TITLE_EN')
-    const title_zh = parseSection(responseText, 'TITLE_ZH')
-    const summary_en = parseSection(responseText, 'SUMMARY_EN')
-    const summary_zh = parseSection(responseText, 'SUMMARY_ZH')
-
+    const { title_en, title_zh, summary_en, summary_zh, questions_en, questions_zh } = result
     const title = title_en || title_zh || 'Untitled'
     const summary = summary_en || summary_zh || ''
-
-    const en = parseJsonSection(responseText, 'QUESTIONS_EN')
-    const zh = parseJsonSection(responseText, 'QUESTIONS_ZH')
-    const questions = (en && zh) ? { en, zh } : null
+    const questions = (questions_en && questions_zh) ? { en: questions_en, zh: questions_zh } : null
 
     await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, env)
     console.log(`OK: ${article.url}`)
 
-  } catch (err: any) {
-    console.error(`FAIL: ${article.url}`, err.message)
+  } catch (err: unknown) {
+    console.error(`FAIL: ${article.url}`, (err as Error).message)
 
     const countRes = await fetch(
       `${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}&select=retry_count`,
@@ -457,7 +715,7 @@ async function processArticle(
       headers: SB(env),
       body: JSON.stringify({
         retry_count: newCount,
-        last_error: err.message || String(err),
+        last_error: (err as Error).message || String(err),
         status: newCount >= 3 ? 'error' : 'pending',
       }),
     })
