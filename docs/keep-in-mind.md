@@ -218,3 +218,18 @@ By default, Supabase validates the `Authorization` header as a Supabase JWT. Ext
 4. Watch the first terminal for `console.log` output
 5. Check Supabase Table Editor to confirm rows were written
 6. Run the curl a second time — row count must NOT increase (idempotency check)
+
+---
+
+## The Live AI Model Is Not in Git History
+
+`OPENROUTER_MODEL` and `OPENROUTER_BIO_MODEL` are Cloudflare Worker secrets. The active model in production is invisible to `git log`. Before debugging a summarization quality regression, always check the active model: run `wrangler secret list --name process-queue` (confirms the secret exists but not its value — check the OpenRouter dashboard request logs for the actual model string).
+
+If temporarily adding `console.log('Model:', env.OPENROUTER_MODEL)` to debug, remove it before committing.
+
+To swap models without redeployment:
+```bash
+wrangler secret put OPENROUTER_MODEL --name process-queue
+# paste new model ID (e.g. qwen/qwen3-235b-a22b:free)
+# Takes effect on next cron cycle automatically
+```

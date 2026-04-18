@@ -48,18 +48,28 @@ BILINGUAL RULES:
 
 SENTINEL VALUES (output these exact strings, nothing else, when conditions are met):
 
+CRITICAL: SUMMARY_EN and SUMMARY_ZH must be non-empty strings. If the article has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty SUMMARY_EN or SUMMARY_ZH. An empty summary field is never a valid response.
+
 INSUFFICIENT_CONTENT
 — Use when: the article text contains less than 200 words of actual content after stripping navigation, ads, and boilerplate.
 — WHY: Short-form content (press release excerpts, paywalled stubs) cannot be meaningfully summarized. Attempting it produces hallucinated detail.
 — FAILURE MODE: Summarizing a 50-word paywall stub as if it were a full article. When in doubt, output INSUFFICIENT_CONTENT.
 
 NOT_AI_RELEVANT
-— Use when: the article's primary subject is NOT an AI model, AI company, AI research, or AI regulation/policy directly targeting AI.
-— AI-relevant means: the central subject is an AI system (GPT-4o, Claude, Gemini, Llama, Stable Diffusion, etc.), an AI company (OpenAI, Anthropic, Google DeepMind, Meta AI, Mistral, xAI, Cohere, etc.), AI research (papers, benchmarks, evals), or legislation/policy whose primary scope is AI.
-— NOT AI-relevant: general tech news that mentions AI tangentially, cryptocurrency, general finance, consumer electronics without AI focus, lifestyle content.
-— WHY: Non-AI articles consume pipeline budget (Groq tokens, embedding, storage) without serving the product's purpose.
-— FAILURE MODE: Summarizing a general semiconductor earnings report because it mentions "AI chips." The article must be primarily about AI, not incidentally.
-— FAILURE MODE: Outputting NOT_AI_RELEVANT for an article about a Chinese AI lab because you're uncertain. When the primary subject is an AI company or model, output the summary.
+— Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT.
+— AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents.
+— NOT AI-relevant examples:
+  • "Trump posts AI-generated image on Truth Social" → NOT_AI_RELEVANT (Trump's social media behavior; AI is an adjective on the image, not the subject)
+  • "Gemini adds NEET exam question bank for Indian students" → NOT_AI_RELEVANT (product feature for education use case; substitute "Google Search" and the story is identical)
+  • "Apple includes AI writing tools in iOS 19" → NOT_AI_RELEVANT (iOS release; the AI feature is incidental to the hardware/OS story)
+  • General earnings reports that mention AI revenue as one line item → NOT_AI_RELEVANT
+— AI-relevant examples (DO NOT filter these):
+  • "Anthropic拒绝8000亿美元估值融资，维持独立掌控权" → RELEVANT (AI company strategy and power dynamics)
+  • "Accel筹集50亿美元资金，重点布局后期AI软件与机器人领域" → RELEVANT (VC thesis on AI ecosystem)
+  • "Peter Thiel投资的Objection推出AI新闻审判工具" → RELEVANT (AI product launch where AI capability is the product)
+  • "Google 推出Gemini 4.0" → RELEVANT (AI model release)
+— WHY: Non-AI articles waste pipeline budget (tokens, embedding, storage) and degrade RAG retrieval by injecting noise embeddings.
+— FAILURE MODE: Outputting NOT_AI_RELEVANT for Chinese AI lab articles when uncertain. When the primary subject is an AI company or model, output the summary.
 
 STRICT RULES:
 1. Start immediately with "TITLE_EN:". No preamble, no "Here is the summary:", no introductory sentence.
@@ -110,14 +120,24 @@ BILINGUAL RULES:
 
 SENTINEL VALUES (output these exact strings, nothing else, when conditions are met):
 
+CRITICAL: SUMMARY_EN and SUMMARY_ZH must be non-empty strings. If the tweet has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty SUMMARY_EN or SUMMARY_ZH. An empty summary field is never a valid response.
+
 INSUFFICIENT_CONTENT
 — Use when: the tweet is purely promotional, spam, or contains no extractable claim or observation.
 — WHY: Marketing tweets add no analytical value. A tweet that says "Excited to announce X — link in bio" contains no signal.
 — FAILURE MODE: Summarizing a promotional tweet as if it were an editorial observation. Output INSUFFICIENT_CONTENT instead.
 
 NOT_AI_RELEVANT
-— Use when: the tweet's primary subject is not an AI model, AI company, AI research, or AI regulation/policy directly targeting AI.
-— Same definition as article prompt: central subject must be AI, not tangentially mentioning AI.
+— Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT.
+— AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents.
+— NOT AI-relevant examples:
+  • "@joshwoodward: Gemini adds NEET exam questions" → NOT_AI_RELEVANT (product feature tweet for education market; Gemini here is a delivery vehicle, not the subject)
+  • "@realDonaldTrump: posts AI-generated Jesus image" → NOT_AI_RELEVANT (political figure's social media content)
+  • "@tim_cook: Apple includes AI writing tools in iOS 19" → NOT_AI_RELEVANT (iOS release; AI feature is incidental)
+— AI-relevant examples (DO NOT filter these):
+  • Tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety → RELEVANT
+— WHY: Non-AI tweets waste pipeline budget and degrade RAG retrieval by injecting noise embeddings.
+— FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets about Chinese AI labs when uncertain. When the primary subject is an AI company or model, output the summary.
 
 STRICT RULES:
 1. Start immediately with "TITLE_EN:". No preamble, no introductory sentence.
@@ -130,8 +150,8 @@ STRICT RULES:
    GOOD TITLE_EN: "@sama: Pushes Back on LeCun's 'Decades Away' AGI Claim, Calls It Off by 10x"
 4. Engagement figures (likes, retweets) are context, not content. Do not lead with "This tweet received 50K likes."`
 
-// Gemma JSON-format variants — same content rules, JSON output encoding
-const ARTICLE_SYSTEM_PROMPT_GEMMA = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
+// JSON-format variants — same content rules, JSON output encoding
+const ARTICLE_SYSTEM_PROMPT_JSON = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
 Output the JSON object once, directly. Do not narrate your process.
 
 You are a senior AI correspondent. Your readers are smart and time-poor — some build AI systems, others are deeply curious about where AI is going. Write like the most informed person in the room who also knows how to make ideas land.
@@ -182,14 +202,15 @@ BILINGUAL RULES:
    FAILURE MODE: Starting title_zh with "关于," "浅析," "探讨." These are essay titles, not news headlines.
 
 SENTINEL DEFINITIONS:
+CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the article has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the article text contains less than 200 words of actual content after stripping navigation, ads, and boilerplate. When in doubt, use this sentinel.
-NOT_AI_RELEVANT — Use when: the article's primary subject is NOT an AI model, AI company, AI research, or AI regulation/policy directly targeting AI. Do NOT use for articles about Chinese AI labs when uncertain — when the primary subject is an AI company or model, output the full summary.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents. NOT AI-relevant: "Trump posts AI-generated image" (AI is an adjective, not the subject), "Gemini adds NEET exam questions" (education product feature; substitute any search tool and the story is identical), earnings reports where AI is one line item. DO NOT filter: Anthropic funding rounds, Gemini model releases, AI safety incidents, Chinese AI lab strategy. FAILURE MODE: Outputting NOT_AI_RELEVANT for Chinese AI lab articles when uncertain — when the primary subject is an AI company or model, output the full summary.
 
 STRICT RULES:
 1. Every bullet text must contain at least one of: a named company, a named person, a specific number, or a direct quote.
 2. Ignore boilerplate: navigation menus, newsletter signup prompts, cookie consent text, comment sections, "related articles" links.`
 
-const TWEET_SYSTEM_PROMPT_GEMMA = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
+const TWEET_SYSTEM_PROMPT_JSON = `Respond with valid JSON only. No reasoning. No verification. No self-correction.
 Output the JSON object once, directly. Do not narrate your process.
 
 You are a senior AI correspondent summarizing a tweet or thread for a mobile news feed. Your readers follow AI closely and recognize major figures by handle.
@@ -228,8 +249,9 @@ BILINGUAL RULES:
    The @handle must appear in both title_en and title_zh.
 
 SENTINEL DEFINITIONS:
+CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the tweet has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the tweet is purely promotional, spam, or contains no extractable claim or observation.
-NOT_AI_RELEVANT — Use when: the tweet's primary subject is not an AI model, AI company, AI research, or AI regulation/policy directly targeting AI.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. NOT AI-relevant: "@joshwoodward: Gemini adds NEET exam questions" (education product feature; Gemini is a delivery vehicle), "@realDonaldTrump: posts AI-generated Jesus image" (political figure's social media content). AI-relevant: tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety. FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets about Chinese AI labs when uncertain — when the primary subject is an AI company or model, output the summary.
 
 STRICT RULES:
 1. For quote tweets: clearly separate the original tweet's claim from the quote-tweeter's commentary.
@@ -239,7 +261,8 @@ export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   GROQ_API_KEY: string
-  GOOGLE_AI_STUDIO_API_KEY: string
+  OPENROUTER_API_KEY: string
+  OPENROUTER_MODEL: string   // e.g. "google/gemma-2-9b-it:free" — runtime secret, no redeploy needed
 }
 
 const SB = (env: Env) => ({
@@ -248,8 +271,7 @@ const SB = (env: Env) => ({
   'Content-Type': 'application/json',
 })
 
-const AI_STUDIO_MODEL = 'gemma-4-31b-it'
-const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions'
 
 // Normalized result — same shape regardless of provider
@@ -261,50 +283,31 @@ interface LLMResult {
   questions_en: string[] | null
   questions_zh: string[] | null
   sentinel: string | null
+  llm_model: string
 }
 
-// Build the AI Studio generateContent request body for article/tweet summarization
-function buildAIStudioSummaryRequest(isTweet: boolean, content: string): object {
-  const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT_GEMMA : ARTICLE_SYSTEM_PROMPT_GEMMA
+// Build OpenRouter (OpenAI-compatible) request body for article/tweet summarization.
+// Uses response_format: json_object (best-effort — not constrained decoding).
+// extractFirstJson() in callLLM() handles markdown-wrapped responses.
+function buildOpenRouterRequest(isTweet: boolean, content: string, model: string): object {
+  const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT_JSON : ARTICLE_SYSTEM_PROMPT_JSON
   return {
-    systemInstruction: {
-      parts: [{ text: systemPrompt }],
-    },
-    contents: [
-      { role: 'user', parts: [{ text: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` }] },
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
     ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: 'object',
-        properties: {
-          title_en:     { type: 'string' },
-          title_zh:     { type: 'string' },
-          summary_en:   { type: 'string' },
-          summary_zh:   { type: 'string' },
-          questions_en: { type: 'array', items: { type: 'string' } },
-          questions_zh: { type: 'array', items: { type: 'string' } },
-          sentinel:     { type: 'string' },
-        },
-      },
-      temperature: 0.3,
-    },
+    response_format: { type: 'json_object' },
+    temperature: 0.3,
+    max_tokens: 2000,
   }
 }
 
-// Extract text from AI Studio response envelope
-function parseAIStudioResponse(raw: unknown): string {
-  const r = raw as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
-  const text = r?.candidates?.[0]?.content?.parts?.[0]?.text
-  if (!text) throw new Error('AI Studio response missing candidates[0].content.parts[0].text')
-  return text
-}
-
-// Convert Gemma JSON output to the same shape as parseSection/parseJsonSection currently produces.
-// summary_en/summary_zh are now pre-formatted bullet strings — pass through directly.
-function normalizeGemmaResponse(parsed: Record<string, unknown>): LLMResult {
+// Convert OpenRouter JSON output to normalized LLMResult.
+// summary_en/summary_zh are pre-formatted bullet strings — pass through directly.
+function normalizeGemmaResponse(parsed: Record<string, unknown>, model: string): LLMResult {
   if (parsed.sentinel) {
-    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: String(parsed.sentinel) }
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: String(parsed.sentinel), llm_model: model }
   }
 
   const en = Array.isArray(parsed.questions_en) ? (parsed.questions_en as string[]).slice(0, 3) : null
@@ -318,13 +321,14 @@ function normalizeGemmaResponse(parsed: Record<string, unknown>): LLMResult {
     questions_en: en,
     questions_zh: zh,
     sentinel:     null,
+    llm_model:    model,
   }
 }
 
 // Build a LLMResult from the existing Groq flat-text response format
 function groqResponseToResult(responseText: string): LLMResult {
   if (responseText === 'INSUFFICIENT_CONTENT' || responseText === 'NOT_AI_RELEVANT') {
-    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: responseText }
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: responseText, llm_model: 'llama-3.3-70b-versatile' }
   }
   const en = parseJsonSection(responseText, 'QUESTIONS_EN')
   const zh = parseJsonSection(responseText, 'QUESTIONS_ZH')
@@ -336,6 +340,7 @@ function groqResponseToResult(responseText: string): LLMResult {
     questions_en: en,
     questions_zh: zh,
     sentinel:     null,
+    llm_model:    'llama-3.3-70b-versatile',
   }
 }
 
@@ -359,56 +364,68 @@ function extractFirstJson(text: string): string {
 }
 
 // Central LLM routing function.
-// Primary: Google AI Studio Gemma 4 31B
-// Fallback: Groq llama-3.3-70b (fast failures only — 429 or connection error)
-// Slow failures (no headers in 5s, 5xx) throw immediately — no fallback, fail the row.
+// Primary: OpenRouter (model from env.OPENROUTER_MODEL — swap without redeployment)
+// Fallback: Groq llama-3.3-70b (fast failures only — AbortError, TCP rejection, 429)
+// Non-429 non-2xx throws immediately — no fallback, fail the row.
 async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
   const controller = new AbortController()
-  // Phase 1: 8s connection timeout — guards until headers are received (raised from 5s; free-tier TTFT variance observed up to 7s)
+  // Phase 1: 8s connection timeout — guards until headers are received
+  // If >5% of invocations hit this, bump to 10s (10s + ~10s Groq + ~2s DB = 22s, within 30s)
   const connectionTimeoutId = setTimeout(() => controller.abort(), 8000)
 
-  const url = `${AI_STUDIO_BASE}/${AI_STUDIO_MODEL}:generateContent?key=${env.GOOGLE_AI_STUDIO_API_KEY}`
-  const body = buildAIStudioSummaryRequest(isTweet, content)
+  const body = buildOpenRouterRequest(isTweet, content, env.OPENROUTER_MODEL)
 
-  let aiRes: Response
+  let orRes: Response
   try {
-    aiRes = await fetch(url, {
+    orRes = await fetch(OPENROUTER_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://news-app.internal',
+        'X-Title': 'NewsApp',
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     })
   } catch (fetchErr: unknown) {
     clearTimeout(connectionTimeoutId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-      // No headers within 8s — falling back to Groq (wall-clock budget: 8s + ~10s Groq + ~2s write = ~20s, within 30s)
-      console.log('AI Studio Phase 1 timeout (8s) — no headers received, falling back to Groq')
+      // No headers within 8s — falling back to Groq (8s + ~10s Groq + ~2s write = ~20s, within 30s)
+      console.log('OpenRouter Phase 1 timeout (8s) — no headers received, falling back to Groq')
       return await callGroqFallback(isTweet, content, env)
     }
     // TCP rejection → fast failure → Groq fallback
-    console.log('AI Studio unreachable, falling back to Groq:', (fetchErr as Error).message)
+    console.log('OpenRouter unreachable, falling back to Groq:', (fetchErr as Error).message)
     return await callGroqFallback(isTweet, content, env)
   }
 
   // Phase 2: headers received — clear the connection timeout
-  // Body receipt (~20s at 27 tps) proceeds freely within 30s wall-clock budget
   clearTimeout(connectionTimeoutId)
 
-  if (aiRes.status === 429) {
-    console.log('AI Studio 429, falling back to Groq')
+  if (orRes.status === 429) {
+    const body429 = await orRes.text().catch(() => '')
+    const reason = body429.toLowerCase().includes('daily') || body429.toLowerCase().includes('limit')
+      ? `DAILY CAP HIT — wait until midnight UTC reset. Body: ${body429.substring(0, 200)}`
+      : `MODEL OVERLOADED — switch OPENROUTER_MODEL to a less-contested model. Body: ${body429.substring(0, 200)}`
+    console.log(`OpenRouter 429 (${reason}), falling back to Groq`)
     return await callGroqFallback(isTweet, content, env)
   }
 
-  if (!aiRes.ok) {
-    const errBody = await aiRes.text().catch(() => '(unreadable)')
-    throw new Error(`AI Studio ${aiRes.status} — failing row. Body: ${errBody}`)
+  if (!orRes.ok) {
+    const errBody = await orRes.text().catch(() => '(unreadable)')
+    throw new Error(`OpenRouter ${orRes.status} — failing row. Body: ${errBody}`)
   }
 
-  const rawJson = await aiRes.json()
-  const textContent = parseAIStudioResponse(rawJson)
-  // extractFirstJson handles trailing prose; JSON parse failure throws (prompt regression signal)
+  // OpenAI envelope: choices[0].message.content
+  const data = await orRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const textContent = data?.choices?.[0]?.message?.content
+  if (!textContent) throw new Error('OpenRouter: empty choices[0].message.content')
+
+  // extractFirstJson handles markdown-wrapped JSON and trailing prose
+  // JSON.parse failure throws → caught by processArticle catch → retry
   const parsed = JSON.parse(extractFirstJson(textContent)) as Record<string, unknown>
-  return normalizeGemmaResponse(parsed)
+  return normalizeGemmaResponse(parsed, env.OPENROUTER_MODEL)
 }
 
 // Groq fallback — uses existing flat-text prompts and parsers
@@ -563,6 +580,7 @@ async function insertAndMarkDone(
   articleContent: string,
   engagement: Record<string, number> | null,
   published_at: string | null,
+  llm_model: string,
   env: Env
 ) {
   await fetch(`${env.SUPABASE_URL}/rest/v1/daily_news`, {
@@ -582,6 +600,7 @@ async function insertAndMarkDone(
       article_content: articleContent || null,
       engagement,
       published_at,
+      llm_model,
     }),
   })
 
@@ -692,12 +711,16 @@ async function processArticle(
       return
     }
 
+    if (!result.summary_en || !result.summary_zh) {
+      throw new Error(`Validation Error: Empty summary field — summary_en="${result.summary_en}" summary_zh="${result.summary_zh}"`)
+    }
+
     const { title_en, title_zh, summary_en, summary_zh, questions_en, questions_zh } = result
     const title = title_en || title_zh || 'Untitled'
     const summary = summary_en || summary_zh || ''
     const questions = (questions_en && questions_zh) ? { en: questions_en, zh: questions_zh } : null
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, env)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, env)
     console.log(`OK: ${article.url}`)
 
   } catch (err: unknown) {

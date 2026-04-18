@@ -2,7 +2,8 @@ export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
   GROQ_API_KEY: string
-  GOOGLE_AI_STUDIO_API_KEY: string
+  OPENROUTER_API_KEY: string
+  OPENROUTER_BIO_MODEL: string   // separate from OPENROUTER_MODEL — bio is a cheaper task
   PRODUCTHUNT_API_TOKEN?: string   // optional — skip PH if not set
 }
 
@@ -70,12 +71,30 @@ function extractAccounts(data: unknown): BuilderAccount[] {
   return []
 }
 
-const AI_STUDIO_BIO_MODEL = 'gemma-3-12b-it'
-const AI_STUDIO_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
 const BIO_SYSTEM_PROMPT = 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.'
 
+// Extracts the first complete JSON object from a string, ignoring surrounding prose/markdown.
+// Required because response_format: json_object is best-effort — models wrap in ```json fences.
+function extractFirstJson(text: string): string {
+  const start = text.indexOf('{')
+  if (start === -1) throw new Error('No JSON object found in response')
+  let depth = 0, inString = false, isEscaped = false
+  for (let i = start; i < text.length; i++) {
+    const char = text[i]
+    if (isEscaped) { isEscaped = false; continue }
+    if (char === '\\') { isEscaped = true; continue }
+    if (char === '"') { inString = !inString; continue }
+    if (!inString) {
+      if (char === '{') depth++
+      else if (char === '}') { depth--; if (depth === 0) return text.slice(start, i + 1) }
+    }
+  }
+  throw new Error('Unterminated JSON object in response')
+}
+
 // One batch LLM call → {handle: "current position"} for all accounts with bios
-// Primary: Google AI Studio Gemma 3 12B (JSON-constrained)
+// Primary: OpenRouter (model from env.OPENROUTER_BIO_MODEL — swap without redeployment)
 // Fallback: Groq llama-3.3-70b (fast failures only — 429 or connection error)
 async function extractBioMap(accounts: BuilderAccount[], env: Env): Promise<Record<string, string>> {
   const withBio = accounts.filter(a => a.handle && a.bio)
@@ -83,84 +102,85 @@ async function extractBioMap(accounts: BuilderAccount[], env: Env): Promise<Reco
 
   const userPrompt = withBio.map(a => `@${a.handle}: ${a.bio}`).join('\n')
 
-  // --- AI Studio primary ---
+  // --- OpenRouter primary ---
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 8000)
   let useGroqFallback = false
 
   try {
-    const url = `${AI_STUDIO_BASE}/${AI_STUDIO_BIO_MODEL}:generateContent?key=${env.GOOGLE_AI_STUDIO_API_KEY}`
-    const body = {
-      systemInstruction: {
-        parts: [{
-          text: 'Respond with valid JSON only. No reasoning. No verification. No self-correction.\nOutput the JSON object once, directly. Do not narrate your process.\n\n' + BIO_SYSTEM_PROMPT,
-        }],
-      },
-      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: 'object',
-          properties: { bios: { type: 'object' } },
-        },
-        temperature: 0,
-      },
-    }
-
-    let aiRes: Response
+    let orRes: Response
     try {
-      aiRes = await fetch(url, {
+      orRes = await fetch(OPENROUTER_API, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        headers: {
+          'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://news-app.internal',
+          'X-Title': 'NewsApp',
+        },
+        body: JSON.stringify({
+          model: env.OPENROUTER_BIO_MODEL,
+          messages: [
+            { role: 'system', content: 'Respond with valid JSON only. No reasoning. No self-correction.\n\n' + BIO_SYSTEM_PROMPT },
+            { role: 'user', content: userPrompt },
+          ],
+          response_format: { type: 'json_object' },
+          max_tokens: 600,
+          temperature: 0,
+        }),
         signal: controller.signal,
       })
     } catch (fetchErr: unknown) {
       clearTimeout(timeoutId)
       if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-        console.error('AI Studio bio extraction timeout — failing bio step')
+        // Bio is non-critical — timeout fails gracefully, no Groq fallback
+        console.error('OpenRouter bio extraction timeout — failing bio step')
         return {}
       }
-      console.log('AI Studio bio unreachable, falling back to Groq:', (fetchErr as Error).message)
+      // TCP rejection → Groq fallback
+      console.log('OpenRouter bio unreachable, falling back to Groq:', (fetchErr as Error).message)
       useGroqFallback = true
-      aiRes = undefined as unknown as Response
+      orRes = undefined as unknown as Response
     }
 
     clearTimeout(timeoutId)
 
     if (!useGroqFallback) {
-      if (aiRes!.status === 429) {
-        console.log('AI Studio bio 429, falling back to Groq')
+      if (orRes!.status === 429) {
+        console.log('OpenRouter bio 429, falling back to Groq')
         useGroqFallback = true
-      } else if (!aiRes!.ok) {
-        console.error(`AI Studio bio ${aiRes!.status} — failing bio step`)
+      } else if (!orRes!.ok) {
+        console.error(`OpenRouter bio ${orRes!.status} — failing bio step`)
         return {}
       } else {
-        const rawJson = await aiRes!.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }
-        const text = rawJson?.candidates?.[0]?.content?.parts?.[0]?.text
+        const data = await orRes!.json() as { choices?: Array<{ message?: { content?: string } }> }
+        const text = data?.choices?.[0]?.message?.content
         if (!text) {
-          console.error('AI Studio bio: missing response text — failing bio step')
+          console.error('OpenRouter bio: empty choices[0].message.content — failing bio step')
           return {}
         }
         try {
-          const parsed = JSON.parse(text) as { bios?: Record<string, string> }
-          // Normalize: strip @ prefix from keys if present, lowercase
-          const bios = parsed.bios ?? {}
+          // extractFirstJson: handles markdown-wrapped JSON (```json fences)
+          // bios wrapper: defensive fallback for models that emit { bios: {...} } despite flat-object prompt
+          const rawParsed = JSON.parse(extractFirstJson(text)) as Record<string, unknown>
+          const flat = (rawParsed.bios && typeof rawParsed.bios === 'object')
+            ? rawParsed.bios as Record<string, string>
+            : rawParsed as Record<string, string>
           const result: Record<string, string> = {}
-          for (const [k, v] of Object.entries(bios)) {
+          for (const [k, v] of Object.entries(flat)) {
             const handle = k.startsWith('@') ? k.slice(1).toLowerCase() : k.toLowerCase()
-            result[handle] = v
+            result[handle] = String(v)
           }
           if (Object.keys(result).length > 0) return result
         } catch {
-          console.error('AI Studio bio: JSON parse failure — failing bio step')
+          console.error('OpenRouter bio: JSON parse failure — failing bio step')
           return {}
         }
       }
     }
   } catch (err) {
     clearTimeout(timeoutId)
-    console.error('AI Studio bio extraction error:', (err as Error).message)
+    console.error('OpenRouter bio extraction error:', (err as Error).message)
     return {}
   }
 

@@ -24,7 +24,8 @@ These are not negotiable unless the user explicitly decides to pay:
 |---|---|---|
 | Database + Auth + RLS | Supabase (PostgreSQL + pgvector) | pgvector native; single system for relational + vector + auth |
 | Scheduled workers | Cloudflare Workers | Free cron scheduling, TypeScript native, secrets isolated from client |
-| LLM inference | Groq `llama-3.3-70b-versatile` | Speed + free tier; all LLM tasks use one model |
+| LLM inference (primary) | OpenRouter, model via `OPENROUTER_MODEL` secret | OpenAI-compatible; model flexibility without redeployment; free-tier models only |
+| LLM inference (fallback) | Groq `llama-3.3-70b-versatile` | Speed + free tier; fallback for OpenRouter AbortError/TCP/429 |
 | Embeddings | Cohere `embed-english-v3.0` (1024-dim) | Asymmetric `input_type` support; free tier not a bottleneck |
 | Frontend | Expo (React Native) | Web + iOS from one codebase |
 | Streaming | Native `fetch` + `ReadableStream` | `supabase.functions.invoke()` buffers — do not use for SSE |
@@ -222,6 +223,7 @@ These are known issues. Do not fix them as a side effect of other work — fix t
 | Risk | Severity | Status | Reference |
 |---|---|---|---|
 | TPD demand 2.7× over free cap | Critical | Mitigated by retry_count absorption; further reduction under consideration | `docs/token.md` |
+| OpenRouter free-tier fallback spillover to Groq | High | Monitor for first 48h; fallback >10% → switch model via `wrangler secret put OPENROUTER_MODEL` | `keep-in-mind.md` |
 | `processing` rows orphaned on Worker timeout | High | Manual SQL recovery documented; no automated reaper | `keep-in-mind.md` |
 | All 5 cron slots used | High | Hard ceiling; no new scheduled workers possible | `current-state.md` |
 | `ingest-builders` at 38/50 subrequests | Medium | 12 subrequests headroom; new sources need explicit count audit | `keep-in-mind.md` |

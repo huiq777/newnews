@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
   ActivityIndicator, FlatList, SafeAreaView, StyleSheet, Text, View,
 } from 'react-native'
@@ -8,10 +8,13 @@ import DrumWheelSidebar from './components/DrumWheelSidebar'
 import FilterTag from './components/FilterTag'
 import ArticleCard from './components/ArticleCard'
 import TrendBriefCard from './components/TrendBriefCard'
+import NewArticlesBanner from './components/NewArticlesBanner'
+import XThreadCard, { XThreadGroup } from './components/XThreadCard'
 
 export default function App() {
   const [articles, setArticles] = useState<Article[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [feedOffset, setFeedOffset] = useState(0)
   const [hasMore, setHasMore] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -27,6 +30,8 @@ export default function App() {
   })
   const [filterLabel, setFilterLabel] = useState('Today')
   const [stepDays, setStepDays] = useState(1)
+  const [newArticlesCount, setNewArticlesCount] = useState(0)
+  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({})
   const wheelControlsRef = useRef<{ resetToToday: () => void; switchTo: (days: 1 | 3 | 7 | 30) => void } | null>(null)
   const listRef = useRef<FlatList>(null)
   const scrollOffsetRef = useRef(0)
@@ -34,6 +39,7 @@ export default function App() {
   const pendingPropRef = useRef<number | null>(null)
   const langRef = useRef(lang)
   const feedOffsetRef = useRef(0)
+  const isInitialLoadRef = useRef(true)
   useEffect(() => { langRef.current = lang }, [lang])
   useEffect(() => { feedOffsetRef.current = feedOffset }, [feedOffset])
 
@@ -81,6 +87,17 @@ export default function App() {
     })
   }, [])
 
+  // Realtime subscription for NewArticlesBanner
+  useEffect(() => {
+    const channel = supabase
+      .channel('public:daily_news')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'daily_news' }, () => {
+        setNewArticlesCount(prev => prev + 1)
+      })
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [])
+
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {
     setLoading(true)
@@ -112,11 +129,13 @@ export default function App() {
     query.range(0, FEED_PAGE_SIZE - 1).then(({ data, error }) => {
       if (error) console.error(error)
       else {
-        // Auto-fallback: if Today returns nothing, widen to 3D
-        if ((!data || data.length === 0) && stepDays === 1 && wheelControlsRef.current) {
+        // Auto-fallback: if Today returns nothing on INITIAL LOAD, widen to 3D
+        if ((!data || data.length === 0) && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
+          isInitialLoadRef.current = false
           wheelControlsRef.current.switchTo(3)
           return
         }
+        isInitialLoadRef.current = false
         setArticles(data as unknown as Article[])
         const loaded = data?.length ?? 0
         setHasMore(loaded === FEED_PAGE_SIZE)
@@ -126,7 +145,12 @@ export default function App() {
       setLoading(false)
       listRef.current?.scrollToOffset({ offset: 0, animated: false })
     })
-  }, [dateRange, activeCategory]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dateRange, activeCategory, refreshTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleLoadNew() {
+    setNewArticlesCount(0)
+    setRefreshTrigger(v => v + 1)
+  }
 
   async function loadMoreArticles() {
     if (loading || loadingMore || !hasMore) return
@@ -179,7 +203,37 @@ export default function App() {
     setActiveCategory(cat)
   }
 
-  const displayArticles = articles
+  const displayArticles = useMemo(() => {
+    const result: (Article | XThreadGroup)[] = []
+    const authorGroupMap = new Map<string, XThreadGroup>()
+
+    for (const item of articles) {
+      const match = item.url?.match(/x\.com\/([^/]+)\/status\//)
+      if (match && match[1]) {
+        const handle = match[1].toLowerCase()
+        if (authorGroupMap.has(handle)) {
+          authorGroupMap.get(handle)!.tweets.push(item)
+        } else {
+          const newGroup: XThreadGroup = {
+            handle: match[1],
+            bio: bioMap[handle],
+            tweets: [item],
+          }
+          authorGroupMap.set(handle, newGroup)
+          result.push(newGroup)
+        }
+      } else {
+        result.push(item)
+      }
+    }
+
+    // Sort tweets within groups by likes desc
+    for (const group of authorGroupMap.values()) {
+      group.tweets.sort((a, b) => (b.engagement?.likes ?? 0) - (a.engagement?.likes ?? 0))
+    }
+
+    return result
+  }, [articles, bioMap])
 
   return (
     <SafeAreaView style={styles.container}>
@@ -201,6 +255,7 @@ export default function App() {
           onMountedControls={controls => { wheelControlsRef.current = controls }}
         />
         <View style={styles.mainFeed}>
+          <NewArticlesBanner count={newArticlesCount} lang={lang} onLoad={handleLoadNew} />
           <FilterTag label={filterLabel} onClear={handleClearFilter} />
           {loading
             ? <ActivityIndicator style={{ flex: 1 }} color="#18181b" />
@@ -219,7 +274,7 @@ export default function App() {
                   />
                 ) : null
               }
-              keyExtractor={item => item.id}
+              keyExtractor={item => 'tweets' in item ? `thread-${item.handle}` : item.id}
               onScroll={({ nativeEvent }) => { scrollOffsetRef.current = nativeEvent.contentOffset.y }}
               scrollEventThrottle={16}
               onContentSizeChange={(_, h) => {
@@ -230,9 +285,21 @@ export default function App() {
                   listRef.current?.scrollToOffset({ offset: target, animated: false })
                 }
               }}
-              renderItem={({ item }) => (
-                <ArticleCard item={item} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
-              )}
+              renderItem={({ item }) => {
+                if ('tweets' in item) {
+                  const handleLower = item.handle.toLowerCase()
+                  const isExpanded = !!expandedThreads[handleLower]
+                  return (
+                    <XThreadCard
+                      group={item}
+                      lang={lang}
+                      isExpanded={isExpanded}
+                      onExpandedChange={(v) => setExpandedThreads(prev => ({ ...prev, [handleLower]: v }))}
+                    />
+                  )
+                }
+                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
+              }}
               onEndReached={loadMoreArticles}
               onEndReachedThreshold={0.2}
               ListEmptyComponent={

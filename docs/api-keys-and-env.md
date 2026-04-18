@@ -20,6 +20,9 @@ This document is the authoritative reference for every secret in the system. Bef
 | `SUPABASE_ANON_KEY` | Supabase → Settings → API | No | No | Yes (`EXPO_PUBLIC_SUPABASE_ANON_KEY`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API | **Yes — all workers. ONLY HERE.** | No | **Never** |
 | `GROQ_API_KEY` | console.groq.com | Yes (`process-queue`, `ingest-builders`) | Yes (`answer-question`, `refresh-questions`) | **Never** |
+| `OPENROUTER_API_KEY` | openrouter.ai → Keys | Yes (`process-queue`, `ingest-builders`) | No | **Never** |
+| `OPENROUTER_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`process-queue`) | No | **Never** |
+| `OPENROUTER_BIO_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`ingest-builders`) | No | **Never** |
 | `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
 | `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-feishu-digest` worker) | No | **Never** |
 
@@ -38,6 +41,8 @@ wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put GROQ_API_KEY
+wrangler secret put OPENROUTER_API_KEY
+wrangler secret put OPENROUTER_MODEL        # paste: google/gemma-2-9b-it:free (or any free model)
 
 # From workers/embed-batch/:
 wrangler secret put SUPABASE_URL
@@ -48,6 +53,8 @@ wrangler secret put COHERE_API_KEY
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put GROQ_API_KEY
+wrangler secret put OPENROUTER_API_KEY
+wrangler secret put OPENROUTER_BIO_MODEL    # paste: google/gemma-2-9b-it:free (or smaller)
 
 # From workers/send-feishu-digest/:
 wrangler secret put SUPABASE_URL
@@ -113,7 +120,8 @@ For Cloudflare Pages deployment, add these same two variables in: Pages → Sett
 |---|---|---|
 | Supabase | 500MB DB, 2M Edge Function calls/mo | <50MB, <10K calls |
 | Cloudflare Workers | 100,000 requests/day | ~300/day |
-| Groq | Free (rate-limited) | ~50–100 API calls/day |
+| Groq | Free (rate-limited) | ~50–100 API calls/day (fallback only after OpenRouter migration) |
+| OpenRouter | Free (free-tier models only — subject to rate limits) | Primary LLM for process-queue + ingest-builders |
 | Cohere | 1,000 API calls/month | ~30 batch calls/month |
 | Cloudflare Pages | Unlimited bandwidth | Static site hosting |
 
