@@ -83,6 +83,8 @@ These are the free-tier limits that directly constrain architecture. Track utili
 
 **Total automated demand: ~266,890 tokens/day vs 100K cap.** The pipeline self-throttles: articles hitting the TPD cap get a 429 from Groq, stay `error` in `raw_ingestion`, and are retried after midnight UTC when the cap resets.
 
+**Keyword gate impact on tweet LLM calls (deployed 2026-04-18):** The pre-LLM keyword gate eliminates LLM calls for tweets with zero AI signal. Estimated 15–25% of broad-network handles' tweets (e.g. @paulg, general tech figures) contain no AI signal. At ~1,235 tokens/tweet, each filtered tweet saves ~1,235 tokens from the TPD total — positive headroom toward the cap.
+
 ---
 
 ## Architectural Principles (Project-Specific)
@@ -231,6 +233,7 @@ These are known issues. Do not fix them as a side effect of other work — fix t
 | Embedding dimension locked to 1024 | Low | Migration to different model requires full table rewrite | `docs/architecture.md` |
 | Symmetric JWT secret, no rotation strategy | Low | Acceptable for beta; upgrade to RS256 for production | `docs/edge-functions.md` |
 | `ingest-x` directory exists but worker deleted | Low | Stale directory; do not reactivate without reclaiming a cron slot | `current-state.md` |
+| Non-AI tweets passing LLM filter | Medium → Resolved | Keyword gate + prompt hardening deployed 2026-04-18: pre-LLM EN regex + ZH substring gate for tweets; `NOT_AI_RELEVANT` prompt tightened in all 4 constants; "content not sender" rule added | `docs/superpowers/specs/2026-04-18-ai-relevance-filter-hardening-design.md` |
 
 ---
 

@@ -1,8 +1,8 @@
 # Design Spec: Replace Google AI Studio with OpenRouter
 
-**Date:** 2026-04-18  
+**Date:** 2026-04-17  
 **Status:** Approved — Ready for implementation  
-**Review:** `docs/superpowers/specs/2026-04-18-openrouter-migration-review.md`
+**Review:** `docs/superpowers/specs/2026-04-17-openrouter-migration-review.md`
 
 ---
 

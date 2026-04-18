@@ -233,3 +233,15 @@ wrangler secret put OPENROUTER_MODEL --name process-queue
 # paste new model ID (e.g. qwen/qwen3-235b-a22b:free)
 # Takes effect on next cron cycle automatically
 ```
+
+---
+
+## AI Keyword Matching — Word Boundary vs. Substring
+
+**The `ai` substring trap:** Never match the string `"ai"` without word boundaries in English text. The substring `ai` appears in: `said`, `main`, `train`, `gained`, `explain`, `remain`, `railroad`, `certain`, and countless other common English words. A regex like `/ai/i` without boundaries would match virtually any English sentence, rendering the AI relevance filter useless.
+
+**Rule:** English AI keywords must use `/\bword\b/i` regex with explicit word boundaries on both sides. The `EN_AI_KEYWORDS` constant in `workers/process-queue/src/index.ts` uses `\b...\b` around every term.
+
+**Exception — Chinese:** Chinese script has no word boundaries (characters are not separated by spaces or punctuation). Chinese AI keywords in `ZH_AI_KEYWORDS` use plain `.includes()` substring matching — this is correct and intentional. Chinese characters are granular enough that false-positive risk is negligible.
+
+**Affected code:** `EN_AI_KEYWORDS` and `ZH_AI_KEYWORDS` constants in `workers/process-queue/src/index.ts`, used by `hasAISignal()`.

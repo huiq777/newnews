@@ -47,18 +47,22 @@ The pipeline is split: **Cloudflare Workers** handle all scheduled, internal pro
 supabase functions deploy <function-name> --no-verify-jwt
 ```
 
-### Groq (Llama 3 70B) for summarization
-Speed. Groq's hardware delivers LLM inference at throughputs that make batch article processing feasible within a tight cron window. The summarization task (3 bullet points from article text) doesn't require reasoning depth — it requires speed and reliability.
+### OpenRouter (primary) + Groq fallback for summarization
+`process-queue` routes all LLM summarization through OpenRouter as primary, with Groq `llama-3.3-70b-versatile` as automatic fallback. OpenRouter provides model flexibility — the active model is set via the `OPENROUTER_MODEL` wrangler secret and can be swapped without redeployment. Groq fallback triggers on connection timeout (8s AbortError), TCP rejection, or 429 from OpenRouter only. Non-2xx non-429 responses from OpenRouter throw immediately without falling back.
 
 ### Cohere embed-english-v3.0 for embeddings
 The model produces 1024-dimensional embeddings, which directly defines the `vector(1024)` column in `daily_news`. The model supports an `input_type` parameter that distinguishes between indexing and querying — this distinction is load-bearing for retrieval quality (see below). It is available from both Cloudflare Workers (for indexing) and Supabase Edge Functions (for query-time embedding), keeping the embedding symmetric.
 
-### Groq `llama-3.3-70b-versatile` for all LLM tasks
-All LLM work uses a single model on Groq's free API tier: bilingual summarization, question generation, bio extraction, and streaming Q&A answers (`answer-question` Edge Function).
+### LLM routing: OpenRouter primary, Groq fallback
 
-- **Summarization + questions:** `process-queue` makes **1 Groq call per article** — the system prompt includes `QUESTIONS_EN` and `QUESTIONS_ZH` sections that the model populates alongside the summary. The single response is parsed by `parseSection` (text) and `parseJsonSection` (JSON arrays). Free tier: 12K TPM, 100K TPD.
-- **Q&A (answer-question):** Streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
+All LLM work falls into two categories:
+
+- **Summarization + questions (`process-queue`):** 1 call per article. Routes through OpenRouter first (JSON output format, `OPENROUTER_MODEL` secret). Falls back to Groq `llama-3.3-70b-versatile` (flat-text format) on AbortError/TCP/429. The single response includes bilingual title, 3-bullet summary, and QUESTIONS_EN/ZH arrays — parsed by `parseSection()` (text) and `parseJsonSection()` (JSON arrays).
+- **Bio extraction (`ingest-builders`):** 1 batch Groq call per run using `llama-3.3-70b-versatile` directly (no OpenRouter routing).
+- **Q&A (`answer-question`):** Groq `llama-3.3-70b-versatile` streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
 - **Upgrade path for reasoning:** DeepSeek API directly (`deepseek-reasoner`) or any model that emits `reasoning_content`. Same API format — one model name change in `answer-question`.
+
+Groq free tier: 12K TPM, 100K TPD.
 
 ---
 
@@ -142,6 +146,24 @@ Raw article text is passed directly to an LLM. Two rules apply:
   ]
 }
 ```
+
+---
+
+## AI Relevance Filter
+
+`process-queue` filters non-AI content at two layers before spending tokens on summarization:
+
+**Layer 1 — Pre-LLM keyword gate (zero token cost, tweets only):**
+Tweets whose `raw_content` contains no AI signal words are marked `status='error', last_error='NOT_AI_RELEVANT'` immediately, before `fetchArticleContent()` or any LLM call. The gate uses:
+- `EN_AI_KEYWORDS`: `/\b(ai|agi|llm|gpt|claude|...)\b/i` — word-boundary matched to prevent false matches on `said`, `main`, `train`, etc.
+- `ZH_AI_KEYWORDS`: plain substring match (no word boundaries in Chinese script)
+
+Articles skip this gate entirely and are evaluated by the LLM with full scraped content.
+
+**Layer 2 — LLM sentinel:**
+Both article and tweet prompts instruct the LLM to output `NOT_AI_RELEVANT` when the story's news value does not depend on AI. The substitution test: if you could replace the AI product with any other software tool and the story would be equally newsworthy, it is not AI-relevant.
+
+**Critical rule:** Author identity is irrelevant — a tweet from @sama about baseball is `NOT_AI_RELEVANT`. The LLM judges content, not sender. This rule is enforced in `TWEET_SYSTEM_PROMPT` and `TWEET_SYSTEM_PROMPT_JSON` in `workers/process-queue/src/index.ts`.
 
 ---
 

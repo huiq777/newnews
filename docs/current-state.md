@@ -1,4 +1,4 @@
-# Current State — 2026-04-15
+# Current State — 2026-04-18
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -19,7 +19,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
 | `ingest-rss` | ✅ Deployed | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
-| `process-queue` | ✅ Deployed | Every 15 min | **Now 1 Groq call per article** (summary + QUESTIONS_EN + QUESTIONS_ZH combined); ~67% fewer Groq tokens; max_tokens raised to 2000; `parseJsonSection` parser added |
+| `process-queue` | ✅ Deployed | Every 15 min | **1 LLM call per article (OpenRouter primary, Groq fallback)**; pre-LLM keyword gate for tweets (zero-cost NOT_AI_RELEVANT filter); summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser |
 | `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
 | `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; 🔥 likes badge for tweets only (HN badge disabled) |
@@ -139,9 +139,13 @@ npx wrangler pages deploy dist --project-name news-app
 
 `EXPO_PUBLIC_*` vars are baked at build time — must be set in `.env.local` before building, or in Pages CI dashboard for GitHub integration.
 
-### Stage 4.5 — Apify Tweet Ingestion ← ACTIVE
+### AI Relevance Filter Hardening ✅ COMPLETE (2026-04-18)
 
-Edge Function `ingest-apify-tweets` implemented. Receives `RUN_SUCCEEDED` webhook from Apify, fetches dataset, batch-inserts to `raw_ingestion`. Downstream handled by existing `process-queue`.
+Pre-LLM keyword gate deployed in `process-queue`. Tweets with zero AI signal (EN word-boundary regex + ZH substring list) are filtered at zero token cost before any LLM call. Both tweet prompt constants updated: "content not sender" rule, @paulg concrete examples, FAILURE MODE tightened to explicit Chinese AI lab names. All four prompt constants updated (Change C).
+
+### Stage 4.5 — Apify Tweet Ingestion ✅ COMPLETE
+
+Edge Function `ingest-apify-tweets` deployed. Receives `RUN_SUCCEEDED` webhook from Apify, fetches dataset, batch-inserts to `raw_ingestion`. Downstream handled by existing `process-queue`.
 
 ### Stage 5 — Trend Brief ✅ COMPLETE
 
@@ -196,10 +200,12 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 
 ## Key Technical Facts
 
-- **Groq model (summaries + questions + bio extraction):** `llama-3.3-70b-versatile` — 12K TPM free tier
-- **Groq model (answer streaming):** `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
+- **LLM (summaries + questions):** OpenRouter primary (`OPENROUTER_MODEL` secret, swappable without redeploy) → Groq `llama-3.3-70b-versatile` fallback (AbortError/TCP/429 only)
+- **LLM (bio extraction):** Groq `llama-3.3-70b-versatile` directly (ingest-builders; no OpenRouter)
+- **LLM (answer streaming):** Groq `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
 - **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG — asymmetry is load-bearing, do not change
-- **process-queue Groq calls per article:** 1 (summary + QUESTIONS_EN + QUESTIONS_ZH combined in one call; `parseJsonSection` extracts the JSON arrays from the response)
+- **process-queue LLM calls per article:** 1 (OpenRouter/Groq; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
+- **process-queue tweet pre-filter:** keyword gate (EN regex + ZH substring) fires before LLM call — zero-cost NOT_AI_RELEVANT for tweets with no AI signal
 - **ingest-builders Groq calls per run:** 1 batch call for all bios; subrequest count ~38/50 (tweets + podcasts)
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — all 5 slots used; ingest-x deleted to make room

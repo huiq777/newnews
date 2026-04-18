@@ -25,7 +25,7 @@ When operating as AI SWE on this project:
 |-------|-----------|-------|
 | Frontend | Expo (React Native) + TypeScript | Web-first; iOS via EAS is Phase 3 |
 | Ingestion | Cloudflare Workers (cron-triggered) | Free tier; 30s wall-clock hard limit |
-| LLM | Groq `llama-3.3-70b-versatile` | Free tier: 12K TPM, **100K TPD** |
+| LLM | OpenRouter (primary, `OPENROUTER_MODEL` secret) + Groq `llama-3.3-70b-versatile` (fallback) | OpenRouter: free-tier models, swappable without redeploy; Groq fallback on AbortError/TCP/429; 12K TPM, **100K TPD** |
 | Embeddings | Cohere `embed-english-v3.0` | 1024-dim; 512 tokens ≈ 2000 chars max |
 | Vector DB | Supabase pgvector (HNSW index) | Cosine distance via `<=>` operator |
 | DB | Supabase PostgreSQL | PostgREST REST API; RLS enforced |
@@ -34,19 +34,19 @@ When operating as AI SWE on this project:
 
 ---
 
-## Current Implementation State (as of 2026-04-05)
+## Current Implementation State (as of 2026-04-18)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| RSS ingestion | ⚠️ Needs deploy | Every 4h; now fetches `source_type IN (rss, wechat, reddit)` — WeChat and Reddit routed through ingest-rss |
+| RSS ingestion | ✅ Live | Every 4h; fetches `source_type IN (rss, wechat, reddit)` — WeChat and Reddit routed through ingest-rss |
 | Full article scraping | ✅ Live | HTMLRewriter in process-queue; 8s timeout; paywall fallback |
-| LLM summarization | ⚠️ Needs deploy | **1 Groq call per article** — summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection()` parser |
-| Question generation | ⚠️ Needs deploy | Embedded in the single summary call; `parseJsonSection()` extracts JSON arrays; `generateQuestions()` function removed |
+| LLM summarization | ✅ Live | **1 LLM call per article** — OpenRouter primary (`OPENROUTER_MODEL` secret) → Groq fallback; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection()` parser |
+| Question generation | ✅ Live | Embedded in the single LLM call; `parseJsonSection()` extracts JSON arrays; `generateQuestions()` function removed |
 | Cohere embeddings | ✅ Live | embed-batch; 2000-char input; article_content preferred |
 | RAG Q&A | ✅ Live | match_articles RPC; top 3 related; Groq streaming SSE |
 | article_content column | ✅ Live | daily_news.article_content TEXT; NULL for WeChat (bridge handles) |
 | match_articles RPC | ✅ Live | pgvector cosine similarity; HNSW index active |
-| `ingest-builders` worker | ⚠️ Needs deploy | Daily 6am UTC; fetches feed-x.json + feed-podcasts.json + GH Trending + PH + Nowcoder + arXiv + Reddit; **missing podcast source no longer kills downstream sources** (early return → else block) |
+| `ingest-builders` worker | ✅ Live | Daily 6am UTC; fetches feed-x.json + feed-podcasts.json + GH Trending + PH + Nowcoder + arXiv + Reddit; **missing podcast source no longer kills downstream sources** (early return → else block) |
 | `send-feishu-digest` worker | ✅ Live | Daily 12pm EST (17:00 UTC); Chinese (summary_zh + title_zh); `X - @handle - role` format; all 3 ZH bullets |
 | AI bio extraction | ✅ Live | Batch Groq call in ingest-builders; verbatim role extraction; cached in sources.metadata |
 | `sources.metadata` JSONB | ✅ Live | Stores `bio_map: {handle: "role"}` — shared by Feishu + App.tsx |
@@ -66,8 +66,9 @@ When operating as AI SWE on this project:
 | Product Hunt ingestion | ✅ Live | Added to ingest-builders; GraphQL API top 30 by VOTES; `PRODUCTHUNT_API_TOKEN` wrangler secret required |
 | Nowcoder ingestion | ✅ Live | Added to ingest-builders; public JSON API `gw-c.nowcoder.com`; type 74 → feed detail, type 0 → discuss; no auth |
 | arXiv ingestion | ✅ Live | Added to ingest-builders; cs.AI + cs.LG; top 10 per category; Atom API; no auth |
-| Reddit ingestion | ⚠️ Needs SQL + deploy | Sources now use `.rss` URLs and `source_type='rss'` → routed through ingest-rss (JSON API blocked from Cloudflare IPs) |
+| Reddit ingestion | ✅ Live | Sources use `.rss` URLs and `source_type='rss'` → routed through ingest-rss (JSON API blocked from Cloudflare IPs) |
 | `published_at` pipeline | ✅ Live | All sources store `metadata.published_at` at ingestion; process-queue propagates to `daily_news.published_at`; HTML meta tag fallback for sources without API dates (Nowcoder, etc.) |
+| AI relevance filter hardening | ✅ Live | Pre-LLM keyword gate (EN `/\b..\b/i` regex + ZH substring list) in `process-queue`; "content not sender" rule + @paulg examples in tweet prompts; FAILURE MODE scoped to explicit Chinese AI lab names in all 4 prompt constants |
 | iOS build | ❌ Not started | Expo EAS is Stage 5 |
 
 ---
@@ -96,7 +97,9 @@ process-queue Worker
          - reddit.com URL → read article.metadata → {score, num_comments}
          - other URLs → engagement = null (HN Algolia disabled; HN source is inactive)
       3. Resolve published_at: metadata.published_at (ingestion) → HTML meta tag (fallback) → null
-      4. POST to Groq (1 call) → bilingual title + 3-bullet summary + QUESTIONS_EN JSON + QUESTIONS_ZH JSON
+      4. Tweet keyword gate: if isTweet AND no AI signal in rawContent (EN `/\b..\b/i` regex + ZH substring) → PATCH status='error', last_error='NOT_AI_RELEVANT'; return (zero LLM cost)
+         POST to OpenRouter primary (JSON format, `OPENROUTER_MODEL` secret) or Groq `llama-3.3-70b-versatile` fallback (flat-text; AbortError/TCP/429 only)
+         → bilingual title + 3-bullet summary + QUESTIONS_EN JSON + QUESTIONS_ZH JSON
          parseSection() extracts text fields; parseJsonSection() extracts question arrays
       5. INSERT INTO daily_news (article_content, summaries, questions, engagement, published_at)
       7. PATCH daily_news.article_content for existing URLs (duplicate URL = silent no-op on INSERT)

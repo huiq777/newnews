@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Animated, Pressable, StyleSheet, Text } from 'react-native'
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native'
 
 export default function NewArticlesBanner({
   count,
@@ -34,14 +34,16 @@ export default function NewArticlesBanner({
     : `↑  ${count} 篇新文章`
 
   return (
-    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
-      <Pressable
-        onPress={onLoad}
-        style={({ pressed }) => [styles.pill, pressed && styles.pillPressed]}
-      >
-        <Text style={styles.label}>{label}</Text>
-      </Pressable>
-    </Animated.View>
+    <View style={styles.wrapper}>
+      <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+        <Pressable
+          onPress={onLoad}
+          style={({ pressed }) => [styles.pill, pressed && styles.pillPressed]}
+        >
+          <Text style={styles.label}>{label}</Text>
+        </Pressable>
+      </Animated.View>
+    </View>
   )
 }
 

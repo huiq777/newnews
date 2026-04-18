@@ -69,7 +69,7 @@ NOT_AI_RELEVANT
   • "Peter Thiel投资的Objection推出AI新闻审判工具" → RELEVANT (AI product launch where AI capability is the product)
   • "Google 推出Gemini 4.0" → RELEVANT (AI model release)
 — WHY: Non-AI articles waste pipeline budget (tokens, embedding, storage) and degrade RAG retrieval by injecting noise embeddings.
-— FAILURE MODE: Outputting NOT_AI_RELEVANT for Chinese AI lab articles when uncertain. When the primary subject is an AI company or model, output the summary.
+— FAILURE MODE: Outputting NOT_AI_RELEVANT for articles whose content explicitly covers a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly.
 
 STRICT RULES:
 1. Start immediately with "TITLE_EN:". No preamble, no "Here is the summary:", no introductory sentence.
@@ -129,15 +129,19 @@ INSUFFICIENT_CONTENT
 
 NOT_AI_RELEVANT
 — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT.
+— The author's identity does NOT determine relevance. A tweet from @sama about baseball is NOT_AI_RELEVANT. A tweet from @paulg about railroad investment is NOT_AI_RELEVANT. Judge the CONTENT of the tweet, not who sent it.
 — AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents.
 — NOT AI-relevant examples:
   • "@joshwoodward: Gemini adds NEET exam questions" → NOT_AI_RELEVANT (product feature tweet for education market; Gemini here is a delivery vehicle, not the subject)
   • "@realDonaldTrump: posts AI-generated Jesus image" → NOT_AI_RELEVANT (political figure's social media content)
   • "@tim_cook: Apple includes AI writing tools in iOS 19" → NOT_AI_RELEVANT (iOS release; AI feature is incidental)
+  • "@paulg: Railroad investment is unprecedented, even on a log scale" → NOT_AI_RELEVANT (economics; no AI content)
+  • "@paulg: 铁路投资前所未有，即使在对数尺度上也是如此" → NOT_AI_RELEVANT (same; Chinese-language economics tweet)
+  • "@sama: Great dinner tonight" → NOT_AI_RELEVANT (personal; sender identity irrelevant)
 — AI-relevant examples (DO NOT filter these):
   • Tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety → RELEVANT
 — WHY: Non-AI tweets waste pipeline budget and degrade RAG retrieval by injecting noise embeddings.
-— FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets about Chinese AI labs when uncertain. When the primary subject is an AI company or model, output the summary.
+— FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets whose content explicitly names a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly regardless of who sent the tweet.
 
 STRICT RULES:
 1. Start immediately with "TITLE_EN:". No preamble, no introductory sentence.
@@ -204,7 +208,7 @@ BILINGUAL RULES:
 SENTINEL DEFINITIONS:
 CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the article has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the article text contains less than 200 words of actual content after stripping navigation, ads, and boilerplate. When in doubt, use this sentinel.
-NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents. NOT AI-relevant: "Trump posts AI-generated image" (AI is an adjective, not the subject), "Gemini adds NEET exam questions" (education product feature; substitute any search tool and the story is identical), earnings reports where AI is one line item. DO NOT filter: Anthropic funding rounds, Gemini model releases, AI safety incidents, Chinese AI lab strategy. FAILURE MODE: Outputting NOT_AI_RELEVANT for Chinese AI lab articles when uncertain — when the primary subject is an AI company or model, output the full summary.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents. NOT AI-relevant: "Trump posts AI-generated image" (AI is an adjective, not the subject), "Gemini adds NEET exam questions" (education product feature; substitute any search tool and the story is identical), earnings reports where AI is one line item. DO NOT filter: Anthropic funding rounds, Gemini model releases, AI safety incidents, Chinese AI lab strategy. FAILURE MODE: Outputting NOT_AI_RELEVANT for articles whose content explicitly covers a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly.
 
 STRICT RULES:
 1. Every bullet text must contain at least one of: a named company, a named person, a specific number, or a direct quote.
@@ -251,7 +255,7 @@ BILINGUAL RULES:
 SENTINEL DEFINITIONS:
 CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the tweet has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the tweet is purely promotional, spam, or contains no extractable claim or observation.
-NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. NOT AI-relevant: "@joshwoodward: Gemini adds NEET exam questions" (education product feature; Gemini is a delivery vehicle), "@realDonaldTrump: posts AI-generated Jesus image" (political figure's social media content). AI-relevant: tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety. FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets about Chinese AI labs when uncertain — when the primary subject is an AI company or model, output the summary.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. The author's identity does NOT determine relevance — a tweet from @sama about baseball is NOT_AI_RELEVANT, a tweet from @paulg about railroad investment is NOT_AI_RELEVANT; judge the CONTENT, not who sent it. NOT AI-relevant: "@joshwoodward: Gemini adds NEET exam questions" (education product feature; Gemini is a delivery vehicle), "@realDonaldTrump: posts AI-generated Jesus image" (political figure's social media content), "@paulg: Railroad investment is unprecedented, even on a log scale" (economics; no AI content), "@paulg: 铁路投资前所未有，即使在对数尺度上也是如此" (same; Chinese-language economics tweet), "@sama: Great dinner tonight" (personal; sender identity irrelevant). AI-relevant: tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety. FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets whose content explicitly names a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly regardless of who sent the tweet.
 
 STRICT RULES:
 1. For quote tweets: clearly separate the original tweet's claim from the quote-tweeter's commentary.
@@ -647,6 +651,23 @@ function parseJsonSection(text: string, tag: string): string[] | null {
   }
 }
 
+// Pre-LLM keyword gate — tweets only.
+// A tweet must contain ZERO of these signals to be filtered at zero token cost.
+// Conservative by design: any genuine AI signal passes through to LLM evaluation.
+const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
+
+const ZH_AI_KEYWORDS = [
+  '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
+  '生成式','多模态','算力','英伟达',
+  '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
+  'DeepSeek','百川','商汤','科大讯飞','华为盘古',
+]
+
+function hasAISignal(text: string): boolean {
+  if (EN_AI_KEYWORDS.test(text)) return true
+  return ZH_AI_KEYWORDS.some(kw => text.includes(kw))
+}
+
 async function processArticle(
   article: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number } },
   env: Env
@@ -682,6 +703,17 @@ async function processArticle(
 
     // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
     // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary
+    // Tweet-specific pre-LLM gate: filter zero-AI-signal tweets at zero token cost
+    if (isTweet && !hasAISignal(rawContent)) {
+      await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+        method: 'PATCH',
+        headers: SB(env),
+        body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
+      })
+      console.log(`SKIP (keyword gate — not AI relevant): ${article.url}`)
+      return
+    }
+
     const isArxiv = article.url.startsWith('https://arxiv.org/')
     const fetched = isArxiv ? { content: '', published_at: null } : await fetchArticleContent(article.url)
     const articleContent = fetched.content
