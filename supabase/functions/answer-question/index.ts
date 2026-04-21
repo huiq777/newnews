@@ -12,6 +12,11 @@ serve(async (req) => {
 
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
   const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY') ?? ''
+  const TOKENROUTER_API_KEY = Deno.env.get('TOKENROUTER_API_KEY') ?? ''
+  const LLM_MODEL           = Deno.env.get('LLM_MODEL') ?? 'qwen/qwen3.6-plus'
+  const OPENROUTER_API_KEY  = Deno.env.get('OPENROUTER_API_KEY') ?? ''
+  const OPENROUTER_MODEL    = Deno.env.get('OPENROUTER_MODEL') ?? ''
   const sbHeaders = {
     'apikey': SERVICE_KEY,
     'Authorization': `Bearer ${SERVICE_KEY}`,
@@ -76,31 +81,94 @@ serve(async (req) => {
     ? `你是一位犀利的科技新闻分析师。主要根据下方文章内容回答问题，用中文作答。如有相关背景文章，可作为补充参考。\n\n规则：\n- 不要编造内容。如果文章没有覆盖问题的答案，直接说明："文章没有直接提到这一点，但根据文章的说法……"\n  失败模式：对文章中没有出现的具体数字或事件给出确定性回答。如果你不确定某个事实是否在提供的内容中，请明确标注。\n- 不要复述摘要。用户已经看过摘要了。直接回答问题。\n  错误示范："这篇文章讨论了OpenAI的新模型发布。文章提到……"\n  正确示范："40%这个数字来自OpenAI的内部评测——文章没有提到外部基准测试，这本身就是值得追问的地方。"\n\n文章标题：${article.title}\n\n文章内容：\n${mainContext}${relatedContext}`
     : `You are a sharp tech news analyst. Answer primarily based on the main article. Use related articles as supplementary context when relevant.\n\nRules:\n- Do not fabricate. If the article does not contain the answer, say so directly: "The article doesn't cover this, but based on what it does say..."\n  FAILURE MODE: Answering confidently about a specific number or event that isn't in the article. If you're not sure the fact is in the provided context, flag it.\n- Do not summarize the article back to the user. They already read the summary. Answer the question.\n  BAD: "This article discusses OpenAI's new model release. The article mentions that..."\n  GOOD: "The 40% figure comes from OpenAI's internal evals — the article doesn't name an external benchmark, which is the suspicious part."\n\nMain article: ${article.title}\n\nContent:\n${mainContext}${relatedContext}`
 
-  // Stream from Groq
-  const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      stream: true,
-      temperature: 0.6,
-      max_tokens: 1024,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: question },
-      ],
-    }),
-  })
-
-  if (!groqRes.ok) {
-    const err = await groqRes.text()
-    return new Response(err, { status: 500, headers: corsHeaders })
+  // Build base request body (same for all providers)
+  const llmBody = {
+    stream: true,
+    temperature: 0.6,
+    max_tokens: 1024,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: question },
+    ],
   }
 
-  const reader = groqRes.body!.getReader()
+  let llmRes: Response | null = null
+
+  // Tier 1: TokenRouter
+  if (TOKENROUTER_API_KEY) {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[answer-question][TokenRouter] calling...')
+      const r = await fetch('https://api.tokenrouter.com/v1/chat/completions', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Authorization': `Bearer ${TOKENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...llmBody, model: LLM_MODEL }),
+      })
+      clearTimeout(timerId)
+      if (r.ok) { llmRes = r }
+      else if (r.status === 429) { console.log('[answer-question][TokenRouter] 429, trying OpenRouter') }
+      else { throw new Error(`TokenRouter ${r.status}`) }
+    } catch (e) {
+      clearTimeout(timerId)
+      const err = e as Error
+      if (err.message.startsWith('TokenRouter')) {
+        console.log('[answer-question][TokenRouter] non-429 error, trying OpenRouter:', err.message)
+      } else {
+        console.log('[answer-question][TokenRouter] timeout or unreachable, trying OpenRouter:', err.message)
+      }
+    }
+  }
+
+  // Tier 2: OpenRouter
+  if (!llmRes && OPENROUTER_API_KEY && OPENROUTER_MODEL) {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[answer-question][OpenRouter] calling...')
+      const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://news-app.internal',
+          'X-Title': 'NewsApp',
+        },
+        body: JSON.stringify({ ...llmBody, model: OPENROUTER_MODEL }),
+      })
+      clearTimeout(timerId)
+      if (r.ok) { llmRes = r }
+      else if (r.status === 429) { console.log('[answer-question][OpenRouter] 429, trying Groq') }
+      else { throw new Error(`OpenRouter ${r.status}`) }
+    } catch (e) {
+      clearTimeout(timerId)
+      const err = e as Error
+      if (err.message.startsWith('OpenRouter')) {
+        console.log('[answer-question][OpenRouter] non-429 error, trying Groq:', err.message)
+      } else {
+        console.log('[answer-question][OpenRouter] timeout or unreachable, trying Groq:', err.message)
+      }
+    }
+  }
+
+  // Tier 3: Groq (always available as last resort)
+  if (!llmRes) {
+    console.log('[answer-question][Groq] calling...')
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...llmBody, model: 'llama-3.3-70b-versatile' }),
+    })
+    if (!r.ok) {
+      const errText = await r.text()
+      return new Response(`LLM unavailable: ${errText.substring(0, 200)}`, { status: 502, headers: corsHeaders })
+    }
+    llmRes = r
+  }
+
+  const reader = llmRes!.body!.getReader()
   const encoder = new TextEncoder()
   const decoder = new TextDecoder()
 

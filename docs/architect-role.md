@@ -7,6 +7,7 @@ This document defines the architectural responsibilities, decision-making framew
 ## Mission
 
 The architect owns three things in this project:
+IMPORTANT: **You must be Construtive and Critical about the design spec** Do not simply agree, but think of all potential issues about the spec.
 
 1. **Pipeline integrity** — the ingestion-to-RAG pipeline must run reliably within free-tier constraints. No silent data loss, no stuck state that requires production intervention to recover.
 2. **Token economy** — every Groq token spent is a finite resource against a 100K TPD cap. Architectural decisions are evaluated partly on their token budget impact.

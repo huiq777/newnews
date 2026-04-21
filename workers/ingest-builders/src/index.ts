@@ -1,9 +1,11 @@
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
-  GROQ_API_KEY: string
+  TOKENROUTER_API_KEY: string        // new primary
+  LLM_MODEL: string                  // used on TokenRouter for bio extraction
   OPENROUTER_API_KEY: string
-  OPENROUTER_BIO_MODEL: string   // separate from OPENROUTER_MODEL — bio is a cheaper task
+  OPENROUTER_BIO_MODEL: string       // used on OpenRouter fallback (cheaper bio model)
+  GROQ_API_KEY: string
   PRODUCTHUNT_API_TOKEN?: string   // optional — skip PH if not set
 }
 
@@ -72,6 +74,17 @@ function extractAccounts(data: unknown): BuilderAccount[] {
 }
 
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
+const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
+
+// Pre-LLM keyword gate — same as process-queue. Must be kept in sync manually.
+const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
+
+const ZH_AI_KEYWORDS = [
+  '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
+  '生成式','多模态','算力','英伟达',
+  '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
+  'DeepSeek','百川','商汤','科大讯飞','华为盘古',
+]
 const BIO_SYSTEM_PROMPT = 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.'
 
 // Extracts the first complete JSON object from a string, ignoring surrounding prose/markdown.
@@ -93,24 +106,141 @@ function extractFirstJson(text: string): string {
   throw new Error('Unterminated JSON object in response')
 }
 
-// One batch LLM call → {handle: "current position"} for all accounts with bios
-// Primary: OpenRouter (model from env.OPENROUTER_BIO_MODEL — swap without redeployment)
-// Fallback: Groq llama-3.3-70b (fast failures only — 429 or connection error)
-async function extractBioMap(accounts: BuilderAccount[], env: Env): Promise<Record<string, string>> {
-  const withBio = accounts.filter(a => a.handle && a.bio)
-  if (withBio.length === 0) return {}
+async function fetchKnownUrls(
+  urls: string[],
+  supabaseUrl: string,
+  headers: Record<string, string>,
+): Promise<Set<string>> {
+  const known = new Set<string>()
+  if (urls.length === 0) return known
+  const chunks: string[][] = []
+  for (let i = 0; i < urls.length; i += 100) {
+    chunks.push(urls.slice(i, i + 100))
+  }
+  await Promise.all(chunks.map(async chunk => {
+    const filterValue = `(${chunk.map(u => `"${u.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(',')})`
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/raw_ingestion?url=in.${encodeURIComponent(filterValue)}&select=url&limit=100`,
+      { headers },
+    )
+    if (!res.ok) return
+    const rows: { url: string }[] = await res.json()
+    for (const r of rows) known.add(r.url)
+  }))
+  return known
+}
 
-  const userPrompt = withBio.map(a => `@${a.handle}: ${a.bio}`).join('\n')
+type BuilderTweetRow = {
+  source_id: string
+  url: string
+  raw_content: string
+  status: string
+  metadata: { likes?: number; retweets?: number }
+  published_at: string | null
+}
 
-  // --- OpenRouter primary ---
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 8000)
-  let useGroqFallback = false
+function gradeTweets(allTweets: BuilderTweetRow[], knownUrls: Set<string>): BuilderTweetRow[] {
+  // Group by author handle extracted from x.com URL
+  const byAuthor = new Map<string, BuilderTweetRow[]>()
+  for (const tweet of allTweets) {
+    const handle = tweet.url.match(/x\.com\/([^/]+)\/status\//)?.[1]?.toLowerCase() ?? 'unknown'
+    if (!byAuthor.has(handle)) byAuthor.set(handle, [])
+    byAuthor.get(handle)!.push(tweet)
+  }
 
-  try {
-    let orRes: Response
+  const survivors: BuilderTweetRow[] = []
+  for (const [, tweets] of byAuthor) {
+    // 1. Filter net-new (not already in raw_ingestion)
+    const netNew = tweets.filter(t => !knownUrls.has(t.url))
+    // 2. Keyword gate
+    const relevant = netNew.filter(t => {
+      const text = t.raw_content
+      return EN_AI_KEYWORDS.test(text) || ZH_AI_KEYWORDS.some(kw => text.includes(kw))
+    })
+    // 3. Sort by likes + retweets descending
+    const sorted = relevant.sort((a, b) => {
+      const scoreA = (a.metadata.likes ?? 0) + (a.metadata.retweets ?? 0)
+      const scoreB = (b.metadata.likes ?? 0) + (b.metadata.retweets ?? 0)
+      return scoreB - scoreA
+    })
+    // 4. Keep top 3
+    survivors.push(...sorted.slice(0, 3))
+  }
+  return survivors
+}
+
+async function extractBioMap(biosText: string, env: Env): Promise<Record<string, string>> {
+  const messages = [
+    {
+      role: 'system',
+      content: 'Respond with valid JSON only. No prose. ' + BIO_SYSTEM_PROMPT,
+    },
+    { role: 'user', content: biosText },
+  ]
+
+  // Helper: parse bio map from flat JSON or JSONL
+  function parseBioJson(text: string): Record<string, string> | null {
     try {
-      orRes = await fetch(OPENROUTER_API, {
+      const rawParsed = JSON.parse(extractFirstJson(text))
+      const flat = (rawParsed.bios && typeof rawParsed.bios === 'object') ? rawParsed.bios : rawParsed
+      const result: Record<string, string> = {}
+      for (const [k, v] of Object.entries(flat)) {
+        if (typeof v === 'string') result[k.replace(/^@/, '').toLowerCase()] = v
+      }
+      return Object.keys(result).length > 0 ? result : null
+    } catch {
+      return null
+    }
+  }
+
+  // ── Tier 1: TokenRouter ─────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][TokenRouter] calling...')
+      const trRes = await fetch(TOKENROUTER_API, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.TOKENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://news-app.internal',
+          'X-Title': 'NewsApp',
+        },
+        body: JSON.stringify({
+          model: env.LLM_MODEL,
+          messages,
+          response_format: { type: 'json_object' },
+          max_tokens: 600,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timerId)
+      if (trRes.ok) {
+        const json = await trRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+        const text = json.choices?.[0]?.message?.content ?? ''
+        const result = parseBioJson(text)
+        if (result) return result
+        console.log('[extractBioMap][TokenRouter] parse failed, trying OpenRouter')
+      } else if (trRes.status === 429) {
+        console.log('[extractBioMap][TokenRouter] 429, trying OpenRouter')
+      } else {
+        console.log(`[extractBioMap][TokenRouter] ${trRes.status}, trying OpenRouter`)
+      }
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][TokenRouter] failed, trying OpenRouter:', (e as Error).message)
+    }
+  }
+
+  // ── Tier 2: OpenRouter ──────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][OpenRouter] calling...')
+      const orRes = await fetch(OPENROUTER_API, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
@@ -120,114 +250,87 @@ async function extractBioMap(accounts: BuilderAccount[], env: Env): Promise<Reco
         },
         body: JSON.stringify({
           model: env.OPENROUTER_BIO_MODEL,
-          messages: [
-            { role: 'system', content: 'Respond with valid JSON only. No reasoning. No self-correction.\n\n' + BIO_SYSTEM_PROMPT },
-            { role: 'user', content: userPrompt },
-          ],
+          messages,
           response_format: { type: 'json_object' },
           max_tokens: 600,
           temperature: 0,
         }),
         signal: controller.signal,
       })
-    } catch (fetchErr: unknown) {
-      clearTimeout(timeoutId)
-      if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-        // Bio is non-critical — timeout fails gracefully, no Groq fallback
-        console.error('OpenRouter bio extraction timeout — failing bio step')
-        return {}
-      }
-      // TCP rejection → Groq fallback
-      console.log('OpenRouter bio unreachable, falling back to Groq:', (fetchErr as Error).message)
-      useGroqFallback = true
-      orRes = undefined as unknown as Response
-    }
-
-    clearTimeout(timeoutId)
-
-    if (!useGroqFallback) {
-      if (orRes!.status === 429) {
-        console.log('OpenRouter bio 429, falling back to Groq')
-        useGroqFallback = true
-      } else if (!orRes!.ok) {
-        console.error(`OpenRouter bio ${orRes!.status} — failing bio step`)
-        return {}
+      clearTimeout(timerId)
+      if (orRes.ok) {
+        const json = await orRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+        const text = json.choices?.[0]?.message?.content ?? ''
+        const result = parseBioJson(text)
+        if (result) return result
+        console.log('[extractBioMap][OpenRouter] parse failed, trying Groq')
+      } else if (orRes.status === 429) {
+        console.log('[extractBioMap][OpenRouter] 429, trying Groq')
       } else {
-        const data = await orRes!.json() as { choices?: Array<{ message?: { content?: string } }> }
-        const text = data?.choices?.[0]?.message?.content
-        if (!text) {
-          console.error('OpenRouter bio: empty choices[0].message.content — failing bio step')
-          return {}
-        }
-        try {
-          // extractFirstJson: handles markdown-wrapped JSON (```json fences)
-          // bios wrapper: defensive fallback for models that emit { bios: {...} } despite flat-object prompt
-          const rawParsed = JSON.parse(extractFirstJson(text)) as Record<string, unknown>
-          const flat = (rawParsed.bios && typeof rawParsed.bios === 'object')
-            ? rawParsed.bios as Record<string, string>
-            : rawParsed as Record<string, string>
-          const result: Record<string, string> = {}
-          for (const [k, v] of Object.entries(flat)) {
-            const handle = k.startsWith('@') ? k.slice(1).toLowerCase() : k.toLowerCase()
-            result[handle] = String(v)
-          }
-          if (Object.keys(result).length > 0) return result
-        } catch {
-          console.error('OpenRouter bio: JSON parse failure — failing bio step')
-          return {}
-        }
+        console.log(`[extractBioMap][OpenRouter] ${orRes.status}, trying Groq`)
       }
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][OpenRouter] failed, trying Groq:', (e as Error).message)
     }
-  } catch (err) {
-    clearTimeout(timeoutId)
-    console.error('OpenRouter bio extraction error:', (err as Error).message)
-    return {}
   }
 
-  if (!useGroqFallback) return {}
+  // ── Tier 3: Groq ───────────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][Groq] calling...')
+      const groqRes = await fetch(GROQ_API, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: BIO_SYSTEM_PROMPT },
+            { role: 'user', content: biosText },
+          ],
+          max_tokens: 600,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timerId)
+      if (!groqRes.ok) {
+        console.log(`[extractBioMap][Groq] ${groqRes.status}, returning empty bio map`)
+        return {}
+      }
+      const data = await groqRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+      const responseText = (data.choices?.[0]?.message?.content || '').trim()
+      if (!responseText) return {}
 
-  // --- Groq fallback (fast failures only) ---
-  const res = await fetch(GROQ_API, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: BIO_SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      max_tokens: 600,
-      temperature: 0,
-    }),
-  })
+      // Try flat JSON first, then JSONL fallback
+      const result = parseBioJson(responseText)
+      if (result) return result
 
-  if (!res.ok) {
-    console.error(`Groq bio extraction fallback failed: ${res.status}`)
-    return {}
+      // JSONL fallback: {"handle": "karpathy", "role": "Director"}
+      const jsonlResult: Record<string, string> = {}
+      for (const line of responseText.split('\n').filter(l => l.trim())) {
+        try {
+          const obj = JSON.parse(line) as { handle?: string; role?: string }
+          if (obj.handle && obj.role) {
+            jsonlResult[obj.handle.replace(/^@/, '').toLowerCase()] = obj.role
+          }
+        } catch { /* skip malformed line */ }
+      }
+      if (Object.keys(jsonlResult).length > 0) return jsonlResult
+
+      console.log('[extractBioMap][Groq] all parse attempts failed, returning empty bio map')
+      return {}
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][Groq] failed, returning empty bio map:', (e as Error).message)
+      return {}
+    }
   }
-
-  const data = await res.json() as { choices: [{ message: { content: string } }] }
-  const content = data.choices[0].message.content.trim()
-
-  // Try flat object first: {"karpathy": "Director of AI"}
-  try {
-    return JSON.parse(content) as Record<string, string>
-  } catch { /* fall through */ }
-
-  // Groq sometimes returns JSONL — one {"handle": x, "role": y} per line
-  try {
-    const result: Record<string, string> = {}
-    content.split('\n').forEach(line => {
-      const trimmed = line.trim()
-      if (!trimmed) return
-      const obj = JSON.parse(trimmed) as { handle?: string; role?: string }
-      if (obj.handle && obj.role) result[obj.handle.toLowerCase()] = obj.role
-    })
-    if (Object.keys(result).length > 0) return result
-  } catch { /* fall through */ }
-
-  console.error('Failed to parse bio map JSON from Groq:', content.slice(0, 200))
-  return {}
 }
 
 export default {
@@ -272,7 +375,9 @@ export default {
         console.log(`Fetched ${tweets.length} builder tweets from feed-x.json`)
 
         // 3. Extract AI-interpreted positions from bios → cache in sources.metadata
-        const bioMap = await extractBioMap(accounts, env)
+        const withBio = accounts.filter((a: { handle?: string; bio?: string }) => a.handle && a.bio)
+        const biosText = withBio.map((a: { handle: string; bio: string }) => `@${a.handle}: ${a.bio}`).join('\n')
+        const bioMap = biosText ? await extractBioMap(biosText, env) : {}
         if (Object.keys(bioMap).length > 0) {
           await fetch(`${env.SUPABASE_URL}/rest/v1/sources?id=eq.${builderSource.id}`, {
             method: 'PATCH',
@@ -286,8 +391,8 @@ export default {
         const validTweets = tweets.filter(t => t.id && t.text && t.url)
         console.log(`Inserting ${validTweets.length} valid tweets`)
 
-        // 5. Batch insert all tweets in ONE subrequest — duplicates silently skipped via ON CONFLICT (url)
-        const tweetRows = validTweets.map(tweet => {
+        // 5. Batch insert surviving tweets — bulk dedup + per-author grading applied first
+        const tweetRows: BuilderTweetRow[] = validTweets.map(tweet => {
           const author = extractAuthor(tweet.url)
           return {
             source_id: builderSource.id,
@@ -298,16 +403,25 @@ export default {
             published_at: tweet.createdAt ?? null,
           }
         })
-        const tweetInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
-          method: 'POST',
-          headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
-          body: JSON.stringify(tweetRows),
-        })
-        if (!tweetInsertRes.ok) {
-          const err = await tweetInsertRes.text()
-          console.error(`Tweet batch insert failed: ${tweetInsertRes.status} — ${err.substring(0, 300)}`)
-        } else {
-          console.log(`Attempted ${validTweets.length} tweet inserts in 1 batch (duplicates silently skipped)`)
+
+        // Bulk dedup + per-author grading
+        const allTweetUrls = tweetRows.map(r => r.url)
+        const knownUrls = await fetchKnownUrls(allTweetUrls, env.SUPABASE_URL, SB(env))
+        const survivingTweets = gradeTweets(tweetRows, knownUrls)
+        console.log(`Tweet grading: ${tweetRows.length} total → ${survivingTweets.length} survivors`)
+
+        if (survivingTweets.length > 0) {
+          const tweetInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
+            method: 'POST',
+            headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
+            body: JSON.stringify(survivingTweets),
+          })
+          if (!tweetInsertRes.ok) {
+            const err = await tweetInsertRes.text()
+            console.error(`Tweet batch insert failed: ${tweetInsertRes.status} — ${err.substring(0, 300)}`)
+          } else {
+            console.log(`Inserted ${survivingTweets.length} surviving tweets (duplicates silently skipped)`)
+          }
         }
       }
     }

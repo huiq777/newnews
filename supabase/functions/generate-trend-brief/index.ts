@@ -90,9 +90,284 @@ async function resolveSecondary(p: Promise<Response>): Promise<string | null> {
   }
 }
 
+// ── callTokenRouterNonStream — blocking JSON call to TokenRouter ───────────────
+async function callTokenRouterNonStream(
+  apiKey: string,
+  model: string,
+  messages: object[],
+  timeoutMs = 90_000,
+): Promise<{ text: string; tokens_used: number }> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  let res: Response
+  try {
+    res = await fetch('https://api.tokenrouter.com/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        temperature: 0.7,
+        max_tokens: 1024,
+        messages,
+      }),
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`TokenRouter error ${res.status}: ${body.substring(0, 200)}`)
+  }
+
+  const json = await res.json() as {
+    choices?: Array<{ message?: { content?: string } }>
+    usage?: { total_tokens?: number }
+  }
+  return {
+    text: json.choices?.[0]?.message?.content ?? '',
+    tokens_used: json.usage?.total_tokens ?? 0,
+  }
+}
+
+// ── handleTrigger — called by pg_cron via ?trigger=true ───────────────────────
+async function handleTrigger(req: Request, url: URL): Promise<Response> {
+  const corsH = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, content-type',
+  }
+
+  const SUPABASE_URL        = Deno.env.get('SUPABASE_URL')!
+  const SERVICE_KEY         = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const CRON_SECRET         = Deno.env.get('CRON_SECRET') ?? ''
+  const TOKENROUTER_API_KEY = Deno.env.get('TOKENROUTER_API_KEY')!
+  const TREND_BRIEF_MODEL   = Deno.env.get('TREND_BRIEF_MODEL') ?? 'anthropic/claude-opus-4.7'
+
+  // Auth: accept either the service role key or a dedicated CRON_SECRET
+  const authHeader = req.headers.get('Authorization') ?? ''
+  const validTokens = [`Bearer ${SERVICE_KEY}`]
+  if (CRON_SECRET) validTokens.push(`Bearer ${CRON_SECRET}`)
+  if (!validTokens.includes(authHeader)) {
+    return new Response('Unauthorized', { status: 401, headers: corsH })
+  }
+
+  const anchor_date = url.searchParams.get('anchor_date') ?? ''
+  const step_days   = parseInt(url.searchParams.get('step_days') ?? '1', 10)
+  const category    = url.searchParams.get('category') ?? 'all'
+
+  if (!anchor_date || isNaN(step_days)) {
+    return new Response('Missing anchor_date or step_days', { status: 400, headers: corsH })
+  }
+
+  const anchorMs   = new Date(anchor_date).getTime()
+  const date_end   = anchor_date
+  const date_start = new Date(anchorMs - step_days * 86_400_000).toISOString().slice(0, 10)
+
+  const sbHeaders = {
+    'apikey': SERVICE_KEY,
+    'Authorization': `Bearer ${SERVICE_KEY}`,
+    'Content-Type': 'application/json',
+  }
+
+  const todayUtc  = new Date().toISOString().slice(0, 10)
+  const isPast    = anchor_date < todayUtc
+  const expiresAt = isPast
+    ? '9999-12-31T00:00:00.000Z'
+    : new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
+  const dateRangeLabel = `${date_start} to ${anchor_date}`
+
+  // Article fetch
+  const s = date_start
+  const e = date_end
+  const selectCols = 'id,title,summary_en,summary_zh,url,published_at,created_at,engagement'
+  const orFilter = encodeURIComponent(
+    `(and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e}))`
+  )
+  const articlesRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/daily_news?or=${orFilter}&select=${selectCols}&limit=200`,
+    { headers: sbHeaders }
+  )
+  if (!articlesRes.ok) return new Response('Failed to fetch articles', { status: 502, headers: corsH })
+
+  type ArticleRow = {
+    id: string; title: string; summary_en: string | null; summary_zh: string | null
+    url: string; published_at: string | null; created_at: string
+    engagement: Record<string, number> | null
+  }
+  const allArticles: ArticleRow[] = await articlesRes.json()
+  if (allArticles.length === 0) {
+    return new Response(
+      JSON.stringify({ status: 'ok', tokens_used: 0, note: 'no_articles' }),
+      { status: 200, headers: { ...corsH, 'Content-Type': 'application/json' } }
+    )
+  }
+
+  function engagementScore(a: ArticleRow): number {
+    if (!a.engagement) return 0
+    return a.engagement.likes ?? a.engagement.votes ?? a.engagement.score ?? 0
+  }
+
+  const selected = [...allArticles]
+    .sort((a, b) => {
+      const diff = engagementScore(b) - engagementScore(a)
+      if (diff !== 0) return diff
+      return new Date(b.published_at || b.created_at).getTime() - new Date(a.published_at || a.created_at).getTime()
+    })
+    .slice(0, 12)
+
+  // Historical enrichment
+  const windowStart = new Date(date_start).getTime()
+  const windowEnd   = new Date(date_end).getTime()
+  const historical: { id: string; title: string; published_at: string | null; summary_en: string | null; summary_zh: string | null }[] = []
+  const seedId = selected[0]?.id
+  if (seedId) {
+    try {
+      const embRes = await fetch(`${SUPABASE_URL}/rest/v1/daily_news?id=eq.${seedId}&select=embedding`, { headers: sbHeaders })
+      if (embRes.ok) {
+        const embRows: { embedding: number[] | null }[] = await embRes.json()
+        const embedding = embRows[0]?.embedding
+        if (embedding) {
+          const rpcRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/match_articles`, {
+            method: 'POST', headers: sbHeaders,
+            body: JSON.stringify({ query_embedding: embedding, match_count: 15 }),
+          })
+          if (rpcRes.ok) {
+            const results: { id: string; title: string; summary: string; score: number }[] = await rpcRes.json()
+            const selectedIds = new Set(selected.map(a => a.id))
+            for (const r of results) {
+              if (historical.length >= 8) break
+              if (selectedIds.has(r.id)) continue
+              const detRes = await fetch(
+                `${SUPABASE_URL}/rest/v1/daily_news?id=eq.${r.id}&select=id,title,published_at,created_at,summary_en,summary_zh`,
+                { headers: sbHeaders }
+              )
+              if (!detRes.ok) continue
+              const rows: { id: string; title: string; published_at: string | null; created_at: string; summary_en: string | null; summary_zh: string | null }[] = await detRes.json()
+              if (!rows[0]) continue
+              const articleDate = new Date(rows[0].published_at || rows[0].created_at).getTime()
+              if (articleDate >= windowStart && articleDate < windowEnd) continue
+              historical.push({ id: rows[0].id, title: rows[0].title, published_at: rows[0].published_at || rows[0].created_at, summary_en: rows[0].summary_en, summary_zh: rows[0].summary_zh })
+            }
+          }
+        }
+      }
+    } catch { /* non-blocking */ }
+  }
+
+  const sourcesJson = [
+    ...selected.map((a, i) => ({ index: i + 1, id: a.id, title: a.title, url: a.url, published_at: a.published_at || a.created_at, is_historical: false })),
+    ...historical.map((h, i) => ({ index: selected.length + i + 1, id: h.id, title: h.title, url: null, published_at: h.published_at, is_historical: true })),
+  ]
+
+  function fmtDate(d: string | null): string {
+    if (!d) return ''
+    const dt = new Date(d)
+    const mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    return `${mo[dt.getMonth()]} ${dt.getDate()}`
+  }
+
+  const windowLabel = step_days === 1
+    ? fmtDate(date_start)
+    : `${fmtDate(date_start)} – ${fmtDate(date_end)}`
+
+  function bulletLinesFor(a: ArticleRow | typeof historical[0], targetLang: 'en' | 'zh'): string {
+    const summary = targetLang === 'zh'
+      ? ('summary_zh' in a ? a.summary_zh : null)
+      : ('summary_en' in a ? a.summary_en : null)
+    if (!summary) return ''
+    return summary.split('\n').filter(l => l.trim().startsWith('•') || l.trim().startsWith('-')).join(' | ')
+  }
+
+  function buildMessages(targetLang: 'en' | 'zh'): object[] {
+    const systemPrompt = (targetLang === 'zh' ? ZH_SYSTEM_PROMPT : EN_SYSTEM_PROMPT).replace('{WINDOW_LABEL}', windowLabel)
+    const currentBlock = selected.map((a, i) => `[${i + 1}] ${a.title} | ${fmtDate(a.published_at || a.created_at)} | ${bulletLinesFor(a, targetLang)}`).join('\n')
+    const historicalBlock = historical.length > 0
+      ? '\n\nHistorical context:\n' + historical.map((h, i) => `[${selected.length + i + 1}] ${h.title} | ${fmtDate(h.published_at)} | ${bulletLinesFor(h, targetLang)}`).join('\n')
+      : ''
+    const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n${currentBlock}${historicalBlock}`
+    return [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }]
+  }
+
+  // Parallel TokenRouter calls for both languages
+  let enResult: { text: string; tokens_used: number }
+  let zhResult: { text: string; tokens_used: number }
+  try {
+    ;[enResult, zhResult] = await Promise.all([
+      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, buildMessages('en')),
+      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, buildMessages('zh')),
+    ])
+  } catch (e) {
+    const reason = (e as Error).message ?? String(e)
+    console.error(JSON.stringify({ event: 'trigger_brief_error', anchor_date, step_days, reason }))
+    return new Response(
+      JSON.stringify({ status: 'error', reason }),
+      { status: 502, headers: { ...corsH, 'Content-Type': 'application/json' } }
+    )
+  }
+
+  const totalTokens = enResult.tokens_used + zhResult.tokens_used
+  const writePayload = {
+    synthesis_en: enResult.text,
+    synthesis_zh: zhResult.text,
+    sources_json: sourcesJson,
+    expires_at: expiresAt,
+    generated_at: new Date().toISOString(),
+    model: TREND_BRIEF_MODEL,
+    tokens_used: totalTokens,
+  }
+
+  // PATCH first; INSERT if no existing row
+  const patchRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
+    {
+      method: 'PATCH',
+      headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
+      body: JSON.stringify(writePayload),
+    }
+  )
+  if (!patchRes.ok) {
+    console.error(`[handleTrigger] PATCH failed: ${patchRes.status}`)
+  }
+  const contentRange = patchRes.headers.get('content-range') ?? ''
+  const updatedCount = patchRes.ok
+    ? parseInt(contentRange.split('/')[1] ?? '0', 10)
+    : 0
+  console.log(`[handleTrigger] PATCH status=${patchRes.status} content-range="${contentRange}" updatedCount=${updatedCount}`)
+
+  if (updatedCount === 0) {
+    const insertBody = JSON.stringify({ anchor_date, step_days, date_range: dateRangeLabel, ...writePayload })
+    const insertRes = await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
+      method: 'POST',
+      headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
+      body: insertBody,
+    })
+    const insertText = await insertRes.text().catch(() => '')
+    console.log(`[handleTrigger] INSERT status=${insertRes.status} body=${insertText.substring(0, 300)}`)
+  }
+
+  console.log(JSON.stringify({ event: 'trigger_brief_generated', anchor_date, step_days, tokens_used: totalTokens, model: TREND_BRIEF_MODEL }))
+  return new Response(
+    JSON.stringify({ status: 'ok', tokens_used: totalTokens }),
+    { status: 200, headers: { ...corsH, 'Content-Type': 'application/json' } }
+  )
+}
+
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+
+  // ── Trigger mode: called by pg_cron, not by user browser ──────────────────
+  const reqUrl = new URL(req.url)
+  if (reqUrl.searchParams.get('trigger') === 'true') {
+    return await handleTrigger(req, reqUrl)
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
   const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!

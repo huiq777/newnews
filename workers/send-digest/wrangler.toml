@@ -1,7 +1,6 @@
-name = "send-feishu-digest"
+name = "send-digest"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 [triggers]
-# crons = ["0 17 * * *"]
-
+crons = ["30 0 * * *"]

@@ -264,9 +264,11 @@ STRICT RULES:
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
-  GROQ_API_KEY: string
+  TOKENROUTER_API_KEY: string        // new primary provider
+  LLM_MODEL: string                  // e.g. "qwen/qwen3.6-plus" — used on TokenRouter
   OPENROUTER_API_KEY: string
-  OPENROUTER_MODEL: string   // e.g. "google/gemma-2-9b-it:free" — runtime secret, no redeploy needed
+  OPENROUTER_MODEL: string           // used on OpenRouter fallback — no redeploy needed
+  GROQ_API_KEY: string
 }
 
 const SB = (env: Env) => ({
@@ -275,6 +277,7 @@ const SB = (env: Env) => ({
   'Content-Type': 'application/json',
 })
 
+const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions'
 
@@ -368,19 +371,77 @@ function extractFirstJson(text: string): string {
 }
 
 // Central LLM routing function.
-// Primary: OpenRouter (model from env.OPENROUTER_MODEL — swap without redeployment)
-// Fallback: Groq llama-3.3-70b (fast failures only — AbortError, TCP rejection, 429)
+// Primary: TokenRouter (model from env.LLM_MODEL — swap without redeployment)
+// Secondary: OpenRouter (model from env.OPENROUTER_MODEL — fast failures only)
+// Tertiary: Groq llama-3.3-70b (fast failures only — AbortError, TCP rejection, 429)
 // Non-429 non-2xx throws immediately — no fallback, fail the row.
 async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
   const controller = new AbortController()
-  // Phase 1: 8s connection timeout — guards until headers are received
-  // If >5% of invocations hit this, bump to 10s (10s + ~10s Groq + ~2s DB = 22s, within 30s)
+  const timerId = setTimeout(() => controller.abort(), 25000)
+
+  const body = buildOpenRouterRequest(isTweet, content, env.LLM_MODEL)
+
+  let trRes: Response
+  try {
+    console.log('[TokenRouter] calling...')
+    trRes = await fetch(TOKENROUTER_API, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.TOKENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://news-app.internal',
+        'X-Title': 'NewsApp',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } catch (fetchErr: unknown) {
+    clearTimeout(timerId)
+    if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
+      console.log('[TokenRouter] 8s timeout — no headers received, falling back to OpenRouter')
+      return await callOpenRouterFallback(isTweet, content, env)
+    }
+    console.log('[TokenRouter] unreachable, falling back to OpenRouter:', (fetchErr as Error).message)
+    return await callOpenRouterFallback(isTweet, content, env)
+  }
+
+  clearTimeout(timerId)
+
+  if (trRes.status === 429) {
+    const body429 = await trRes.text().catch(() => '')
+    console.log(`[TokenRouter] 429 — falling back to OpenRouter. Body: ${body429.substring(0, 200)}`)
+    return await callOpenRouterFallback(isTweet, content, env)
+  }
+
+  if (!trRes.ok) {
+    const errBody = await trRes.text().catch(() => '(unreadable)')
+    throw new Error(`TokenRouter ${trRes.status} — failing row. Body: ${errBody}`)
+  }
+
+  const data = await trRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+  const textContent = data?.choices?.[0]?.message?.content
+  if (!textContent) throw new Error('TokenRouter: empty choices[0].message.content')
+
+  console.log(`[TokenRouter] ok (${trRes.status})`)
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(extractFirstJson(textContent))
+  } catch (err) {
+    console.log(`[TokenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to OpenRouter.`)
+    return await callOpenRouterFallback(isTweet, content, env)
+  }
+  return normalizeGemmaResponse(parsed, env.LLM_MODEL)
+}
+
+async function callOpenRouterFallback(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+  const controller = new AbortController()
   const connectionTimeoutId = setTimeout(() => controller.abort(), 8000)
 
   const body = buildOpenRouterRequest(isTweet, content, env.OPENROUTER_MODEL)
 
   let orRes: Response
   try {
+    console.log('[OpenRouter] calling...')
     orRes = await fetch(OPENROUTER_API, {
       method: 'POST',
       headers: {
@@ -395,16 +456,13 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
   } catch (fetchErr: unknown) {
     clearTimeout(connectionTimeoutId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-      // No headers within 8s — falling back to Groq (8s + ~10s Groq + ~2s write = ~20s, within 30s)
-      console.log('OpenRouter Phase 1 timeout (8s) — no headers received, falling back to Groq')
+      console.log('[OpenRouter] 8s timeout — no headers received, falling back to Groq')
       return await callGroqFallback(isTweet, content, env)
     }
-    // TCP rejection → fast failure → Groq fallback
-    console.log('OpenRouter unreachable, falling back to Groq:', (fetchErr as Error).message)
+    console.log('[OpenRouter] unreachable, falling back to Groq:', (fetchErr as Error).message)
     return await callGroqFallback(isTweet, content, env)
   }
 
-  // Phase 2: headers received — clear the connection timeout
   clearTimeout(connectionTimeoutId)
 
   if (orRes.status === 429) {
@@ -412,7 +470,7 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
     const reason = body429.toLowerCase().includes('daily') || body429.toLowerCase().includes('limit')
       ? `DAILY CAP HIT — wait until midnight UTC reset. Body: ${body429.substring(0, 200)}`
       : `MODEL OVERLOADED — switch OPENROUTER_MODEL to a less-contested model. Body: ${body429.substring(0, 200)}`
-    console.log(`OpenRouter 429 (${reason}), falling back to Groq`)
+    console.log(`[OpenRouter] 429 (${reason}), falling back to Groq`)
     return await callGroqFallback(isTweet, content, env)
   }
 
@@ -421,14 +479,17 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
     throw new Error(`OpenRouter ${orRes.status} — failing row. Body: ${errBody}`)
   }
 
-  // OpenAI envelope: choices[0].message.content
   const data = await orRes.json() as { choices?: Array<{ message?: { content?: string } }> }
   const textContent = data?.choices?.[0]?.message?.content
   if (!textContent) throw new Error('OpenRouter: empty choices[0].message.content')
 
-  // extractFirstJson handles markdown-wrapped JSON and trailing prose
-  // JSON.parse failure throws → caught by processArticle catch → retry
-  const parsed = JSON.parse(extractFirstJson(textContent)) as Record<string, unknown>
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(extractFirstJson(textContent))
+  } catch (err) {
+    console.log(`[OpenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to Groq.`)
+    return await callGroqFallback(isTweet, content, env)
+  }
   return normalizeGemmaResponse(parsed, env.OPENROUTER_MODEL)
 }
 
