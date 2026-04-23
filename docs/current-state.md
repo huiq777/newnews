@@ -19,7 +19,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
 | `ingest-rss` | ✅ Deployed | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
-| `process-queue` | ✅ Deployed | Every 15 min | **1 LLM call per article (OpenRouter primary, Groq fallback)**; pre-LLM keyword gate for tweets (zero-cost NOT_AI_RELEVANT filter); summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser |
+| ~~`process-queue`~~ | ❌ Deleted | — | Migrated to Supabase Edge Function (2026-04-21); CF Worker directory deleted 2026-04-23 |
 | `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
 | `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; 🔥 likes badge for tweets only (HN badge disabled) |
@@ -33,6 +33,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
 | `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required |
 | `generate-trend-brief` | ✅ Deployed | Cross-window trend synthesis (all categories); SSE streaming; `trend_briefs` 6h TTL cache; llama-3.3-70b-versatile; two-pass clustering; historical enrichment via match_articles RPC |
+| `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate for tweets; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser; triggered by pg_cron `*/5 * * * *` |
 
 ### Supabase Tables & RPC
 
@@ -204,11 +205,11 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **LLM (bio extraction):** Groq `llama-3.3-70b-versatile` directly (ingest-builders; no OpenRouter)
 - **LLM (answer streaming):** Groq `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
 - **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG — asymmetry is load-bearing, do not change
-- **process-queue LLM calls per article:** 1 (OpenRouter/Groq; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
+- **process-queue LLM calls per article:** 1 (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
 - **process-queue tweet pre-filter:** keyword gate (EN regex + ZH substring) fires before LLM call — zero-cost NOT_AI_RELEVANT for tweets with no AI signal
 - **ingest-builders Groq calls per run:** 1 batch call for all bios; subrequest count ~38/50 (tweets + podcasts)
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
-- **Cloudflare cron limit:** 5 triggers (free tier hard limit) — all 5 slots used; ingest-x deleted to make room
+- **Cloudflare cron limit:** 5 triggers (free tier hard limit) — **4/5 slots used**; ingest-x deleted to make room; process-queue migrated to Supabase Edge Function (pg_cron) freeing one slot
 - **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
 - **Feishu digest:** Chinese content (title_zh, summary_zh); X articles show as `X - @handle - role` using bio_map from sources.metadata
 - **answer-question SSE events:** `{ type: "content", content: "..." }` chunks then `data: [DONE]`
@@ -222,7 +223,7 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 | File | Purpose |
 |---|---|
 | `workers/ingest-rss/src/index.ts` | RSS fetcher — every 4h |
-| `workers/process-queue/src/index.ts` | Scrape + bilingual summarize + questions + engagement propagation |
+| `supabase/functions/process-queue/index.ts` | Scrape + bilingual summarize + questions + engagement propagation (Edge Function; node-html-parser) |
 | `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (podcasts) → raw_ingestion; bio extraction; engagement metadata |
 | `workers/embed-batch/src/index.ts` | Cohere embeddings — every 5 min |
 | `workers/send-feishu-digest/src/index.ts` | Daily Feishu card — 17:00 UTC, Chinese |

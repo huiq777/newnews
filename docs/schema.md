@@ -66,7 +66,8 @@ CREATE TABLE raw_ingestion (
     retry_count  INTEGER           NOT NULL DEFAULT 0,
     last_error   TEXT,
     processed_at TIMESTAMPTZ,
-    metadata     JSONB                              -- {likes, retweets} for github_feed tweets; NULL for RSS/WeChat
+    metadata     JSONB,                             -- {likes, retweets} for github_feed tweets; NULL for RSS/WeChat
+    published_at TIMESTAMPTZ                        -- article publish date extracted from HTML meta tags by process-queue; NULL for tweets/RSS without a date
 );
 
 
@@ -159,6 +160,40 @@ $$;
 -- generate-trend-brief uses this to find historical context: it excludes results
 -- whose published_at falls within the current window, then deduplicates across seeds.
 -- Similarity threshold (0.82) is also applied post-query in the Edge Function.
+
+
+-- ============================================================
+-- claim_pending_batch RPC (used by process-queue Edge Function)
+-- ============================================================
+
+-- Atomic batch claim: atomically marks up to batch_size pending rows as 'processing'
+-- and returns them. Replaces the two-step SELECT + PATCH pattern.
+-- Prevents concurrent invocations from processing the same rows.
+-- SECURITY DEFINER + REVOKE FROM PUBLIC — callable only by service_role via PostgREST RPC.
+CREATE OR REPLACE FUNCTION claim_pending_batch(batch_size int DEFAULT 5)
+RETURNS SETOF raw_ingestion
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+BEGIN
+  IF auth.role() != 'service_role' THEN
+    RAISE EXCEPTION 'Unauthorized: service_role required';
+  END IF;
+  RETURN QUERY
+  UPDATE raw_ingestion SET status = 'processing'
+  WHERE id IN (
+    SELECT id FROM raw_ingestion
+    WHERE status = 'pending'
+    ORDER BY fetched_at ASC
+    LIMIT batch_size
+  )
+  RETURNING *;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION claim_pending_batch(int) FROM PUBLIC;
+
+-- NOTE: No FOR UPDATE SKIP LOCKED — causes "Lock was stolen by another request" errors
+-- via PostgREST. The plain atomic UPDATE is safe because PostgREST wraps each RPC
+-- call in a transaction; the WHERE status='pending' predicate acts as the guard.
 
 
 -- ============================================================

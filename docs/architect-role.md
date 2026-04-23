@@ -45,10 +45,9 @@ These are the free-tier limits that directly constrain architecture. Track utili
 |---|---|---|---|
 | Groq TPD (tokens/day) | 100,000 | ~266,890 demand (267% — self-throttles via retry_count) | Negative |
 | Groq TPM (tokens/min) | 12,000 | process-queue batch of 5 articles × ~2,510 = ~12,550 | At limit |
-| Cloudflare cron triggers | 5 | 5 used | **0** |
+| Cloudflare cron triggers | 5 | 4 used | **1** |
 | Cloudflare subrequests/invocation | 50 | ingest-builders: ~38 | 12 |
 | Cloudflare CPU time/invocation | 10ms | Not a concern (I/O-bound workload) | N/A |
-| Cloudflare wall-clock time | 30s | process-queue at risk with 5 parallel Groq calls | Thin |
 
 **Red lines:**
 - Never add a new cron trigger without removing one or upgrading to paid
@@ -57,15 +56,16 @@ These are the free-tier limits that directly constrain architecture. Track utili
 
 ---
 
-## Cron Slot Registry (All 5 Used)
+## Cron Slot Registry (4/5 Used)
 
 | Worker | Schedule | Function |
 |---|---|---|
 | `ingest-rss` | Every 30 min | Fetches RSS / WeChat / Reddit sources → `raw_ingestion` |
-| `process-queue` | Every 5 min | Dequeues pending rows → article scrape → Groq summarize |
 | `ingest-builders` | Daily 6am UTC | Fetches tweets, podcasts, GitHub trending, Product Hunt, Nowcoder → `raw_ingestion` |
 | `embed-batch` | Every 5 min | Embeds unindexed `daily_news` rows via Cohere |
 | `send-feishu-digest` | Daily 12pm EST | Sends Feishu digest of Chinese content |
+
+**4/5 CF cron slots used** (one freed — `process-queue` migrated to Supabase Edge Function triggered by pg_cron `*/5 * * * *` on 2026-04-21)
 
 `ingest-x` directory still exists but the worker was deleted — its slot freed for `send-feishu-digest`. Do not reactivate it.
 
@@ -159,7 +159,7 @@ Affected functions: `ingest-apify-tweets`.
 
 Cloudflare Workers have a 30-second wall-clock limit. Network I/O does not count against CPU time, but it does count against wall-clock time. All batch API calls (Groq, Cohere, Supabase inserts) must use `Promise.all()`. Sequential awaits in a batch loop will hit the wall-clock timeout.
 
-`process-queue` processes 5 articles in parallel for this reason — that is also why it sits at the TPM ceiling.
+The `process-queue` Edge Function processes 5 articles in parallel for throughput — that is also why it sits at the TPM ceiling.
 
 ---
 

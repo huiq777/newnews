@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
-  ActivityIndicator, FlatList, SafeAreaView, StyleSheet, Text, View,
+  ActivityIndicator, AppState, FlatList, SafeAreaView, StyleSheet, Text, View,
 } from 'react-native'
 import { supabase, FEED_PAGE_SIZE, Article, Category } from './lib/config'
 import NavBar from './components/NavBar'
@@ -87,16 +87,74 @@ export default function App() {
     })
   }, [])
 
-  // Realtime subscription for NewArticlesBanner
+  const activeCategoryRef = useRef(activeCategory)
+  const dateRangeRef = useRef(dateRange)
+  const articlesRef = useRef(articles)
+  const appStateRef = useRef(AppState.currentState)
+
+  useEffect(() => { activeCategoryRef.current = activeCategory }, [activeCategory])
+  useEffect(() => { dateRangeRef.current = dateRange }, [dateRange])
+  useEffect(() => { articlesRef.current = articles }, [articles])
+
+  const checkMissedArticles = useCallback(async () => {
+    let latestDate = articlesRef.current[0]?.created_at
+    if (!latestDate && dateRangeRef.current) {
+      latestDate = dateRangeRef.current.start.toISOString()
+    }
+    if (!latestDate) return
+
+    const cat = activeCategoryRef.current
+    const dr = dateRangeRef.current
+
+    let query = supabase
+      .from('daily_news')
+      .select(cat === 'all' ? 'id' : 'id, sources!inner(category)', { count: 'exact', head: true })
+      .gt('created_at', latestDate)
+
+    if (cat !== 'all') {
+      query = query.eq('sources.category', cat)
+    }
+
+    if (dr) {
+      const s = dr.start.toISOString()
+      const e = dr.end.toISOString()
+      query = query.or(
+        `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
+      )
+    }
+
+    const { count, error } = await query
+    if (error) {
+      console.error('Error checking missed articles:', error)
+      return
+    }
+
+    if (count != null && count > 0) {
+      setNewArticlesCount(count)
+    }
+  }, [])
+
+  // Realtime subscription and AppState watcher for background catch-up
   useEffect(() => {
     const channel = supabase
       .channel('public:daily_news')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'daily_news' }, () => {
-        setNewArticlesCount(prev => prev + 1)
+        checkMissedArticles()
       })
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
-  }, [])
+
+    const appStateSubscription = AppState.addEventListener('change', nextAppState => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        checkMissedArticles()
+      }
+      appStateRef.current = nextAppState
+    })
+
+    return () => {
+      supabase.removeChannel(channel)
+      appStateSubscription.remove()
+    }
+  }, [checkMissedArticles])
 
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {

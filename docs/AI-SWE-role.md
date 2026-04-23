@@ -24,8 +24,8 @@ When operating as AI SWE on this project:
 | Layer | Technology | Notes |
 |-------|-----------|-------|
 | Frontend | Expo (React Native) + TypeScript | Web-first; iOS via EAS is Phase 3 |
-| Ingestion | Cloudflare Workers (cron-triggered) | Free tier; 30s wall-clock hard limit |
-| LLM | OpenRouter (primary, `OPENROUTER_MODEL` secret) + Groq `llama-3.3-70b-versatile` (fallback) | OpenRouter: free-tier models, swappable without redeploy; Groq fallback on AbortError/TCP/429; 12K TPM, **100K TPD** |
+| Ingestion | Cloudflare Workers (cron-triggered) + Supabase Edge Functions (pg_cron) | CF Workers: free tier, 30s wall-clock; Edge Functions: no wall-clock limit |
+| LLM | TokenRouter `qwen/qwen3.6-plus` (primary) → OpenRouter `OPENROUTER_MODEL` (secondary) → Groq `llama-3.3-70b-versatile` (tertiary) | TokenRouter: 120s timeout; OpenRouter/Groq: fallback on AbortError/TCP/429/timeout; Groq: 12K TPM, **100K TPD** |
 | Embeddings | Cohere `embed-english-v3.0` | 1024-dim; 512 tokens ≈ 2000 chars max |
 | Vector DB | Supabase pgvector (HNSW index) | Cosine distance via `<=>` operator |
 | DB | Supabase PostgreSQL | PostgREST REST API; RLS enforced |
@@ -34,13 +34,13 @@ When operating as AI SWE on this project:
 
 ---
 
-## Current Implementation State (as of 2026-04-18)
+## Current Implementation State (as of 2026-04-21)
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | RSS ingestion | ✅ Live | Every 4h; fetches `source_type IN (rss, wechat, reddit)` — WeChat and Reddit routed through ingest-rss |
-| Full article scraping | ✅ Live | HTMLRewriter in process-queue; 8s timeout; paywall fallback |
-| LLM summarization | ✅ Live | **1 LLM call per article** — OpenRouter primary (`OPENROUTER_MODEL` secret) → Groq fallback; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection()` parser |
+| Full article scraping | ✅ Live | node-html-parser in process-queue Edge Function (HTMLRewriter/linkedom both fail on Deno Deploy — WASM blocked / native binary blocked); 8s timeout; paywall fallback |
+| LLM summarization | ✅ Live | **1 LLM call per article** — TokenRouter `qwen/qwen3.6-plus` primary (120s timeout) → OpenRouter secondary → Groq tertiary; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection()` parser |
 | Question generation | ✅ Live | Embedded in the single LLM call; `parseJsonSection()` extracts JSON arrays; `generateQuestions()` function removed |
 | Cohere embeddings | ✅ Live | embed-batch; 2000-char input; article_content preferred |
 | RAG Q&A | ✅ Live | match_articles RPC; top 3 related; Groq streaming SSE |
@@ -83,12 +83,11 @@ ingest-rss Worker
   → extract <link> + <description>/<content:encoded>/<summary> + <pubDate>/<published>/<dc:date> from each item
   → INSERT INTO raw_ingestion (status='pending', metadata={published_at}) ON CONFLICT url DO NOTHING
 
-Every 15 min
-process-queue Worker
-  → SELECT 5 pending rows from raw_ingestion
-  → PATCH all 5 to status='processing' (pessimistic lock)
+Every 5 min
+process-queue Edge Function (pg_cron → net.http_post; returns 200 immediately; processes via EdgeRuntime.waitUntil)
+  → RPC claim_pending_batch(5) — atomic UPDATE ORDER BY fetched_at, returns claimed rows
   → Promise.all(5x processArticle):
-      1. fetchArticleContent(url) → HTMLRewriter (8s AbortController timeout)
+      1. fetchArticleContent(url) → node-html-parser (8s AbortController timeout)
          returns { content, published_at } — extracts text + date from HTML meta tags
          fallback: stripHtml(raw_content) if scraped < 500 chars
       2. Determine engagement:
@@ -98,14 +97,14 @@ process-queue Worker
          - other URLs → engagement = null (HN Algolia disabled; HN source is inactive)
       3. Resolve published_at: metadata.published_at (ingestion) → HTML meta tag (fallback) → null
       4. Tweet keyword gate: if isTweet AND no AI signal in rawContent (EN `/\b..\b/i` regex + ZH substring) → PATCH status='error', last_error='NOT_AI_RELEVANT'; return (zero LLM cost)
-         POST to OpenRouter primary (JSON format, `OPENROUTER_MODEL` secret) or Groq `llama-3.3-70b-versatile` fallback (flat-text; AbortError/TCP/429 only)
+         POST to TokenRouter primary (qwen/qwen3.6-plus, 120s timeout) → OpenRouter secondary → Groq tertiary (flat-text; AbortError/TCP/429 only)
          → bilingual title + 3-bullet summary + QUESTIONS_EN JSON + QUESTIONS_ZH JSON
          parseSection() extracts text fields; parseJsonSection() extracts question arrays
       5. INSERT INTO daily_news (article_content, summaries, questions, engagement, published_at)
-      7. PATCH daily_news.article_content for existing URLs (duplicate URL = silent no-op on INSERT)
-      8. PATCH raw_ingestion status='done'
+      6. PATCH daily_news.article_content for existing URLs (duplicate URL = silent no-op on INSERT)
+      7. PATCH raw_ingestion status='done'
   → error: increment retry_count; status='error' after 3 failures (no backoff)
-  (subrequest count: ~26/50 — 1 Groq call instead of 3; HN fetch removed)
+  (no CF subrequest limit — Edge Function; ~21 fetch() calls equivalent)
 
 Daily @ 6am UTC
 ingest-builders Worker (requires GROQ_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -232,7 +231,7 @@ WeChat scraping will always fail. RSS bridge content after `stripHtml()` is the 
 | Max articles/day (articles only) | ~40 | At ~2,510 tokens per article |
 | Max tweets/day | ~81 | At ~1,235 tokens per tweet |
 
-**When you hit 429 TPD:** Stop processing immediately. Retrying burns retry_count. The limit resets at midnight UTC. Failed articles will be automatically retried next day via the 15-min scheduler.
+**When you hit 429 TPD:** Stop processing immediately. Retrying burns retry_count. The limit resets at midnight UTC. Failed articles will be automatically retried next day via the pg_cron 5-min scheduler.
 
 Do not bulk-reprocess articles during the same day — spread reprocessing across multiple days.
 
@@ -261,8 +260,6 @@ ORDER BY score DESC                           -- WRONG: sequential scan
 ### 4. Cloudflare Workers 30s wall-clock limit
 - Network I/O (fetch, Groq, Cohere) does NOT count toward CPU time
 - But real elapsed time IS hard-capped at 30s
-- 5 articles via Promise.all: wall clock = max(individual times)
-- Each article: 8s fetch + ~5s Groq = ~13s worst case — within 30s
 - Always use AbortController + timeout on outbound fetches
 
 ### 5. Duplicate URL insert is a silent no-op
@@ -312,7 +309,6 @@ WHERE status IN ('done', 'error');
 - Free tier hard cap: **50 subrequests** per Worker invocation (scheduled or fetch trigger)
 - Count every outbound `fetch()`: DB reads, DB writes, Groq, Cohere, GitHub, HN Algolia, etc.
 - **ingest-builders** current count: 1 (sources GET) + 1 (feed-x.json) + 1 (Groq bio) + 1 (PATCH sources.metadata) + **1 (tweet batch INSERT — all tweets in one POST)** + 1 (feed-podcasts.json) + 1 (podcast batch INSERT) + 1 (GitHub Trending HTML) + 1 (Product Hunt GraphQL) + 1 (Nowcoder API) + 1 (arXiv cs.AI) + 1 (arXiv cs.LG) + 1 (Reddit r/MachineLearning) + 1 (Reddit r/cscareerquestions) + 1 (Reddit r/layoffs) + 1 (combined batch INSERT) = **~19/50 ✅ SAFE** — tweet per-item loop was replaced with a single batch POST (same pattern as podcasts); GitHub API date fetches were never in the actual code
-- **process-queue** current count: 1 (SELECT) + 5 (PATCH processing) + 5×(1 scrape + 1 Groq summary + 2 Groq questions + 1 INSERT + 1 PATCH content + 1 PATCH done) = **~36/50** (HN fetch removed)
 - When limit is hit: Worker throws immediately — no partial completion, no error row written
 - Do NOT add per-item INSERT loops — use a single batch POST with a JSON array body (`Prefer: resolution=ignore-duplicates`)
 - Upgrade path: Cloudflare Workers Paid ($5/mo) raises limit to 1,000 subrequests
@@ -486,7 +482,8 @@ RETURNS TABLE (id uuid, title text, summary text, score float)
 | `workers/ingest-x/src/index.ts` | **Deleted** — freed cron slot; was disabled anyway ($100/mo X API) | — |
 | `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (episodes) + GitHub Trending (HTML) + Product Hunt (GraphQL) + Nowcoder (JSON API) + arXiv (Atom API) + Reddit (JSON API) → raw_ingestion | `extractAccounts()`, `extractBioMap()`, `extractAuthor()`, `extractPodcasts()` |
 | `workers/send-feishu-digest/src/index.ts` | daily_news → Feishu webhook card | Daily 12pm EST (17:00 UTC); all 3 ZH bullets; 🔥 likes badge for tweets only (GitHub star badge not added to Feishu) |
-| `workers/process-queue/src/index.ts` | Scrape + summarize + questions + engagement + published_at → daily_news | `fetchArticleContent()` (returns {content, published_at}), `processArticle()`, `parseSection()`, `parseJsonSection()` (questions extraction), `insertAndMarkDone()`, `stripHtml()` — `generateQuestions()` removed; `fetchHNEngagement()` disabled |
+| `supabase/functions/process-queue/index.ts` | Scrape + summarize + questions + engagement + published_at → daily_news | `fetchArticleContent()` (node-html-parser; returns {content, published_at}), `processArticle()`, `parseSection()`, `parseJsonSection()` (questions extraction), `insertAndMarkDone()`, `stripHtml()` — triggered by pg_cron every 5 min via `EdgeRuntime.waitUntil`; atomic `claim_pending_batch` RPC |
+| ~~`workers/process-queue/src/index.ts`~~ | ~~Replaced by Supabase Edge Function (2026-04-21)~~ | ~~Deleted 2026-04-23~~ |
 | `workers/embed-batch/src/index.ts` | Cohere batch embed → daily_news.embedding | Scheduled handler |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG Q&A | RAG + Groq SSE |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question regeneration | No RAG dependency |
@@ -649,9 +646,11 @@ Expected log: `Feishu digest sent: N articles for YYYY-MM-DD` → check Feishu g
 |--------|----------|--------|
 | ingest-rss | `0 */4 * * *` | RSS feeds → raw_ingestion |
 | ingest-builders | `0 6 * * *` | Builder tweets → raw_ingestion |
-| process-queue | `*/15 * * * *` | raw_ingestion → daily_news (Groq) |
+| ~~process-queue~~ | ~~`*/15 * * * *`~~ | ~~CF Worker — migrated to Supabase Edge Function (2026-04-21); directory deleted 2026-04-23~~ |
 | embed-batch | `*/5 * * * *` | daily_news → Cohere embeddings |
 | send-feishu-digest | `0 17 * * *` | daily_news → Feishu card (12pm EST) |
+
+**4/5 CF cron slots used** (one freed — `process-queue` migrated to Supabase Edge Function triggered by pg_cron `*/5 * * * *`)
 
 **Tweet quality note:** X blocks scraping, so tweets fall back to `rawContent = "@handle: tweet text"` (280 chars). Summaries are thin but acceptable.
 

@@ -95,18 +95,16 @@ Groq stays hardcoded as the tertiary fallback. It is the only provider with sub-
 
 ## 2. Processing Throughput
 
-The batch size of 5 articles per run and 15-minute cron schedule remain unchanged.
+The batch size of 5 articles per run remains unchanged. **Cron schedule changed from 15 min → 5 min** (pg_cron trigger after Edge Function migration on 2026-04-21).
 
 With the Groq 100K TPD cap removed as the primary constraint:
-- Theoretical capacity: 5 × 96 runs = 480 articles/day
+- Theoretical capacity: 5 × 288 runs = 1,440 articles/day (pg_cron every 5 min)
 - Current ingestion demand: ~155 items/day
 - All articles process same-day
 
 The 429 → OpenRouter → Groq fallback chain handles any TokenRouter rate limits transparently.
 
-**Timeout change in `process-queue`:** The current 15s AbortController fires before `qwen/qwen3.6-plus` returns headers, causing every call to fall through to OpenRouter. Raise to **25s** in `process-queue` only. Rationale: 5 parallel calls run concurrently via `Promise.all()` — wall-clock = slowest single call, not the sum. If qwen responds in ~20–24s, the batch resolves inside CF's 30s wall-clock limit.
-
-**Wall-clock monitoring (first 48h):** If `Worker exceeded time limit` errors appear in the Cloudflare dashboard, lower batch size from `limit=5` to `limit=3`. At 3 articles/run × 96 runs/day = 288/day — still clears the 155/day ingestion demand. If timeouts persist at limit=3, fall back to migrating `process-queue` to a Supabase Edge Function (no wall-clock constraint, frees one CF cron slot).
+**Timeout change (SUPERSEDED):** The 25s raise was insufficient — qwen/qwen3.6-plus consistently exceeds 25s. `process-queue` was migrated to a Supabase Edge Function (no wall-clock limit) with a **120s** TokenRouter AbortController. Wall-clock monitoring no longer applies. See `2026-04-21-process-queue-edge-function-migration-design.md`.
 
 ---
 
@@ -281,12 +279,12 @@ The EN regex and ZH substring array are duplicated into both `ingest-builders` a
 
 ## Cron Slot Registry (Post-Implementation)
 
-All 5 slots remain fully used — no change:
+**4/5 slots used** (one freed — `process-queue` migrated to Supabase Edge Function on 2026-04-21):
 
 | Worker | Schedule | Function |
 |---|---|---|
 | `ingest-rss` | Every 30 min | RSS/WeChat/Reddit → `raw_ingestion` |
-| `process-queue` | Every 15 min | Dequeue → scrape → summarize |
+| ~~`process-queue`~~ | ~~Every 15 min~~ | **Freed — migrated to pg_cron (2026-04-21)** |
 | `ingest-builders` | Daily 6am UTC | Tweets/podcasts/GitHub → `raw_ingestion` |
 | `embed-batch` | Every 5 min | Embed unindexed `daily_news` via Cohere |
 | `send-digest` | Daily 00:30 UTC | Feishu + Slack + Discord + Notion delivery |
@@ -313,9 +311,9 @@ pg_cron runs inside Supabase — does not consume a Cloudflare slot.
 - Check Cloudflare Worker logs for provider label (add `console.log('[TokenRouter] calling...')` in implementation)
 - Temporarily set `TOKENROUTER_API_KEY` to an invalid value → confirm logs show fallback to OpenRouter, then Groq
 
-### 2. Qwen wall-clock monitoring (monitor first 48h post-launch)
-- Check Cloudflare dashboard for `Worker exceeded CPU time limit` or `Script execution timeout` errors on `process-queue`
-- **Rollback if observed:** Lower `process-queue` batch size from `limit=5` to `limit=3` (~line 473 in `index.ts`). Throughput drops from 480 to 288 articles/day — still clears the 155/day ingestion demand same-day
+### 2. Qwen wall-clock monitoring (SUPERSEDED — 2026-04-21)
+- `process-queue` migrated to Supabase Edge Function — no CF wall-clock limit. Monitoring no longer applies.
+- See `2026-04-21-process-queue-edge-function-migration-design.md` for production deployment notes.
 
 ### 3. Tweet limiting
 - Manually trigger `ingest-builders`

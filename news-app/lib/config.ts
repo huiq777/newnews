@@ -30,7 +30,7 @@ export type Article = {
   created_at: string
   published_at?: string | null
   questions: { en: string[]; zh: string[] } | null
-  engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number; stars?: number } | null
+  engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number; stars?: number; show_name?: string } | null
 }
 
 export function formatPublishedDate(dateStr: string | undefined | null, lang: 'en' | 'zh'): string {

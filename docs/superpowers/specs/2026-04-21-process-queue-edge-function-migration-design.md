@@ -1,7 +1,7 @@
 # Design Spec: Migrate `process-queue` to Supabase Edge Function
 
 **Date:** 2026-04-21  
-**Status:** Approved  
+**Status:** Complete (2026-04-23)  
 **Author:** Architect role  
 **Related spec:** `2026-04-20-tokenrouter-upgrade-design.md`
 
@@ -17,6 +17,22 @@ Extending the AbortController timeout to 25s was attempted and is insufficient. 
 
 ---
 
+## Production Learnings (what diverged from spec)
+
+| Spec said | Reality |
+|---|---|
+| Use `HTMLRewriter` from `deno.land/x/html_rewriter` | Module not found at bundle time — WASM binary blocked on Deno Deploy |
+| Fallback to `linkedom` via `esm.sh` | Pulls in `canvas@3.2.3` (native `.node` binary) — same bundle failure |
+| **Correct fallback: `node-html-parser@6.1.13`** | Pure JS, no WASM, no native deps. API diff: `.text` not `.textContent` |
+| Deploy with `--no-verify-jwt` + `timingSafeEqual` auth check | `jsr:@std/crypto/timing-safe-equal` failed at runtime → every request returned 401 |
+| **Correct: deploy without `--no-verify-jwt`** | Supabase native JWT verification accepts the service role key directly |
+| `FOR UPDATE SKIP LOCKED` in `claim_pending_batch` | Caused "Lock was stolen by another request" errors via PostgREST |
+| **Correct: plain atomic UPDATE** | `WHERE status='pending'` predicate is atomic; `ON CONFLICT DO NOTHING` guards duplicates |
+| `ORDER BY created_at ASC` in RPC | Column does not exist — table uses `fetched_at` |
+| TokenRouter timeout: 60s | qwen still times out at 60s and 90s intermittently — raised to **120s** |
+
+---
+
 ## What Changes
 
 | | Before | After |
@@ -24,7 +40,7 @@ Extending the AbortController timeout to 25s was attempted and is insufficient. 
 | Runtime | Cloudflare Worker | Supabase Edge Function |
 | Trigger | CF cron (`*/15 * * * *`) | pg_cron → `net.http_post` every **5 min** |
 | Cron interval | 15 min (96 runs/day, 480 items max) | **5 min** (288 runs/day, 1,440 items max) |
-| LLM timeout | 25s AbortController (still times out) | 60s AbortController (qwen fits comfortably) |
+| LLM timeout | 25s AbortController (still times out) | **120s** AbortController (qwen needs up to 90–120s intermittently) |
 | Execution model | Synchronous (response = completion) | **Fire-and-forget** (200 returned instantly, processing via background execution) |
 | CF cron slots used | 5/5 | **4/5** (one freed) |
 | Code logic | Unchanged | Ported with atomic batch claim + background execution pattern |
@@ -77,10 +93,10 @@ SELECT cron.schedule(
 
 ### Deployment flag
 
-Must be deployed with `--no-verify-jwt` — pg_cron's `net.http_post` sends a service role Bearer token, not a user JWT. Without this flag, Supabase's gateway rejects the request with a 401 before the function runs.
+**Deployed WITHOUT `--no-verify-jwt`** — Supabase native JWT verification accepts the service role Bearer token directly. The `--no-verify-jwt` flag + manual `timingSafeEqual` check was attempted but `jsr:@std/crypto/timing-safe-equal` failed at runtime (see Production Learnings above).
 
 ```bash
-supabase functions deploy process-queue --no-verify-jwt
+supabase functions deploy process-queue
 ```
 
 ---
@@ -212,14 +228,14 @@ Everything else (all LLM routing, scraping, parsing, DB writes, retry logic, key
 
 `process-queue` uses `HTMLRewriter` to strip article DOM elements during scraping. In Cloudflare Workers, `HTMLRewriter` is a global — no import needed. **In Deno (Supabase Edge Functions), it is NOT a global.** A verbatim copy of the Worker code will crash in production with `ReferenceError: HTMLRewriter is not defined`.
 
-Add this import at the top of `supabase/functions/process-queue/index.ts`:
-```typescript
-import { HTMLRewriter } from "https://deno.land/x/html_rewriter@v0.1.0-pre.17/mod.ts"
-```
+~~Add this import at the top of `supabase/functions/process-queue/index.ts`:~~
+~~`import { HTMLRewriter } from "https://deno.land/x/html_rewriter@v0.1.0-pre.17/mod.ts"`~~
 
-No other code changes needed — the API surface is identical once imported.
+**CONFIRMED UNBUNDLEABLE:** `html_rewriter` cannot be imported on Deno Deploy — Supabase's bundler rejects it at deploy time with `Module not found`. Do not attempt to import it.
 
-### HTMLRewriter validation gate (MUST PASS BEFORE MIGRATION PROCEEDS)
+**Required action:** Replace `fetchArticleContent()` in the ported code with the `node-html-parser` implementation below (see "HTMLRewriter validation gate" section). No other code changes are needed beyond the function body.
+
+### HTMLRewriter validation gate (RESOLVED — skip step 0)
 
 The Deno `html_rewriter` package wraps a WASM binary (`lol-html`). Supabase Edge Functions run on Deno Deploy, which has restrictions on WASM execution. **If WASM is blocked, `fetchArticleContent()` is completely broken — not degraded, broken.** No articles get scraped, no summaries get generated.
 
@@ -249,10 +265,14 @@ curl <SUPABASE_URL>/functions/v1/htmlrewriter-test
 # Then delete: supabase functions delete htmlrewriter-test
 ```
 
-**If validation fails:** Replace `HTMLRewriter` with `linkedom` — a **pure JavaScript** DOM implementation with zero WASM dependency. Do NOT use `deno-dom` (`deno-dom-wasm.ts`) as a fallback — it also relies on WASM and would fail for the same reason.
+**If validation fails (confirmed: HTMLRewriter cannot bundle on Deno Deploy):** Use `node-html-parser` — a genuinely pure JavaScript parser with zero WASM and zero native binary dependencies. 
+
+**Do NOT use:**
+- `deno-dom` (`deno-dom-wasm.ts`) — WASM-based, same failure as HTMLRewriter
+- `linkedom` via `esm.sh` — pulls in `canvas@3.2.3` as a transitive dependency, which has a native `.node` binary that Deno Deploy cannot bundle (`Module not found: canvas.node`)
 
 ```typescript
-import { parseHTML } from "https://esm.sh/linkedom@0.16.8"
+import { parse } from "https://esm.sh/node-html-parser@6.1.13"
 
 async function fetchArticleContent(url: string): Promise<{ content: string; published_at: string | null }> {
   const controller = new AbortController()
@@ -270,17 +290,17 @@ async function fetchArticleContent(url: string): Promise<{ content: string; publ
     if (!res.ok) return { content: '', published_at: null }
 
     const htmlText = await res.text()
-    const { document } = parseHTML(htmlText)
+    const root = parse(htmlText)
 
     // Strip unwanted elements
     for (const sel of ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript']) {
-      document.querySelectorAll(sel).forEach((el: Element) => el.remove())
+      root.querySelectorAll(sel).forEach(el => el.remove())
     }
 
     // Extract text from content elements
     const texts: string[] = []
-    document.querySelectorAll('p, h1, h2, h3').forEach((el: Element) => {
-      const t = (el as unknown as { textContent: string }).textContent?.trim()
+    root.querySelectorAll('p, h1, h2, h3').forEach(el => {
+      const t = el.text?.trim()
       if (t) texts.push(t)
     })
 
@@ -288,12 +308,12 @@ async function fetchArticleContent(url: string): Promise<{ content: string; publ
     let htmlPublishedAt: string | null = null
     const dataMetas = ['article:published_time', 'publishdate', 'date', 'og:article:published_time']
     for (const name of dataMetas) {
-      const meta = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`)
-      if (meta) { htmlPublishedAt = meta.getAttribute('content'); break }
+      const meta = root.querySelector(`meta[property="${name}"]`) ?? root.querySelector(`meta[name="${name}"]`)
+      if (meta) { htmlPublishedAt = meta.getAttribute('content') ?? null; break }
     }
     if (!htmlPublishedAt) {
-      const timeEl = document.querySelector('time[datetime]')
-      if (timeEl) htmlPublishedAt = timeEl.getAttribute('datetime')
+      const timeEl = root.querySelector('time[datetime]')
+      if (timeEl) htmlPublishedAt = timeEl.getAttribute('datetime') ?? null
     }
 
     const result = texts.join(' ').replace(/\s+/g, ' ').trim()
@@ -307,9 +327,9 @@ async function fetchArticleContent(url: string): Promise<{ content: string; publ
 }
 ```
 
-**Why `linkedom` over `deno-dom`:** `deno-dom`'s import (`deno-dom-wasm.ts`) is itself WASM-based — if Deno Deploy blocks WASM for `HTMLRewriter`, it will block `deno-dom` for the same reason. `linkedom` is pure JavaScript with no native/WASM dependencies, making it a genuine fallback.
+**API difference from `HTMLRewriter`:** `node-html-parser` uses `.text` (not `.textContent`) to get element text. The full HTML is fetched as a string first (`await res.text()`), then parsed — HTMLRewriter streamed in-flight. For articles capped at 24K chars this is not a performance concern.
 
-**Key difference from `HTMLRewriter`:** `linkedom` requires fetching the full HTML as a string first (`await res.text()`), then parsing. The CF `HTMLRewriter` streams and transforms in-flight. For articles capped at 24K chars this is not a performance concern — the full HTML fits in memory.
+**Note:** The HTMLRewriter validation gate in the Implementation Order is now moot — HTMLRewriter is confirmed unbundleable. `node-html-parser` is the unconditional replacement for `fetchArticleContent()`. Skip step 0 (validation gate) and go directly to step 1.
 
 ### Delete: `workers/process-queue/`
 
@@ -420,7 +440,7 @@ This migration **must happen after** the TokenRouter provider chain is wired up 
 6. **Disable CF Worker cron** — remove the `[triggers]` section from `workers/process-queue/wrangler.toml` and redeploy (`wrangler deploy`). The worker stays deployed but inert — no cron fires, no code deleted.
 7. Register pg_cron job (SQL above)
 8. Monitor for **48 hours** — confirm `pending` count drains each cycle, no concurrent execution overlap in Edge Function logs
-9. Delete `workers/process-queue/` directory (only after 48h stable operation)
+9. ~~Delete `workers/process-queue/` directory~~ ✅ Done 2026-04-23
 
 ---
 

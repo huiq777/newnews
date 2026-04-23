@@ -454,7 +454,7 @@ export default {
       url: ep.url,
       raw_content: `${ep.name}: ${ep.title}\n\n${ep.transcript}`,
       status: 'pending',
-      metadata: null,
+      metadata: { show_name: ep.name },
       published_at: ep.publishedAt ?? null,
     }))
 

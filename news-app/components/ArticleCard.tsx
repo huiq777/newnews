@@ -33,11 +33,12 @@ export default function ArticleCard({
   const isReddit = item.url?.includes('reddit.com') || sourceName?.toLowerCase().includes('reddit')
   const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
   const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
+  const showName = item.engagement?.show_name
   const sourceLabel = isWechat
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
     : xHandle
       ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}`
-      : sourceName
+      : showName || sourceName
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
   useEffect(() => { setAnswers({}) }, [lang])

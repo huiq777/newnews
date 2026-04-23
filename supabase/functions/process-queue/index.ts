@@ -1,3 +1,5 @@
+import { parse } from "https://esm.sh/node-html-parser@6.1.13"
+
 const ARTICLE_SYSTEM_PROMPT = `You are a senior AI correspondent. Your readers are smart and time-poor — some build AI systems, others are deeply curious about where AI is going. Write like the most informed person in the room who also knows how to make ideas land.
 
 Analyze the article and produce a bilingual title and summary for a mobile news feed.
@@ -63,11 +65,17 @@ NOT_AI_RELEVANT
   • "Gemini adds NEET exam question bank for Indian students" → NOT_AI_RELEVANT (product feature for education use case; substitute "Google Search" and the story is identical)
   • "Apple includes AI writing tools in iOS 19" → NOT_AI_RELEVANT (iOS release; the AI feature is incidental to the hardware/OS story)
   • General earnings reports that mention AI revenue as one line item → NOT_AI_RELEVANT
+  • "Samsung停售Galaxy Z TriFold，存储芯片涨价仅存活3个月" → NOT_AI_RELEVANT (consumer device lifecycle story; substitute "supply chain cost increase" and the story is identical; 存储芯片 is storage/memory, not AI compute)
+  • "蓝色起源火箭第三次发射失败，AST卫星未能入轨" → NOT_AI_RELEVANT (aerospace launch failure; no AI content)
+  • "FedRAMP在缺失加密文档情况下仍授权GCC High" → NOT_AI_RELEVANT (government cloud compliance; security gap is about documentation, not AI systems)
+  • "Kagi推出Small Web移动端应用，收录纯人工创作站点" → NOT_AI_RELEVANT (web curation product; no AI capability involved)
+— Chip stories: AI-relevant ONLY if the chip is AI compute (GPU, NPU, HBM for LLM training/inference). Storage chip (存储芯片, NAND, DRAM) price stories are supply chain news → NOT_AI_RELEVANT.
 — AI-relevant examples (DO NOT filter these):
   • "Anthropic拒绝8000亿美元估值融资，维持独立掌控权" → RELEVANT (AI company strategy and power dynamics)
   • "Accel筹集50亿美元资金，重点布局后期AI软件与机器人领域" → RELEVANT (VC thesis on AI ecosystem)
   • "Peter Thiel投资的Objection推出AI新闻审判工具" → RELEVANT (AI product launch where AI capability is the product)
   • "Google 推出Gemini 4.0" → RELEVANT (AI model release)
+  • "三星发布Galaxy S26 Ultra，主打Agentic AI功能" → RELEVANT (AI as a flagship feature on a major release is signal worth tracking)
 — WHY: Non-AI articles waste pipeline budget (tokens, embedding, storage) and degrade RAG retrieval by injecting noise embeddings.
 — FAILURE MODE: Outputting NOT_AI_RELEVANT for articles whose content explicitly covers a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly.
 
@@ -138,8 +146,13 @@ NOT_AI_RELEVANT
   • "@paulg: Railroad investment is unprecedented, even on a log scale" → NOT_AI_RELEVANT (economics; no AI content)
   • "@paulg: 铁路投资前所未有，即使在对数尺度上也是如此" → NOT_AI_RELEVANT (same; Chinese-language economics tweet)
   • "@sama: Great dinner tonight" → NOT_AI_RELEVANT (personal; sender identity irrelevant)
+  • "@anyhandle: 蓝色起源火箭发射失败" → NOT_AI_RELEVANT (aerospace; no AI content)
+  • "@anyhandle: Samsung停售TriFold，存储芯片涨价" → NOT_AI_RELEVANT (consumer device; 存储芯片 is storage/memory, not AI compute)
+  • "@anyhandle: FedRAMP授权GCC High，微软缺失加密文档" → NOT_AI_RELEVANT (cloud compliance; not AI)
+— Chip stories: AI-relevant ONLY if the chip is AI compute (GPU, NPU, HBM). Storage chip (存储芯片, NAND, DRAM) price stories → NOT_AI_RELEVANT.
 — AI-relevant examples (DO NOT filter these):
   • Tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety → RELEVANT
+  • "@anyhandle: 三星S26 Ultra主打Agentic AI功能" → RELEVANT (AI as a flagship device feature)
 — WHY: Non-AI tweets waste pipeline budget and degrade RAG retrieval by injecting noise embeddings.
 — FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets whose content explicitly names a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly regardless of who sent the tweet.
 
@@ -208,7 +221,7 @@ BILINGUAL RULES:
 SENTINEL DEFINITIONS:
 CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the article has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the article text contains less than 200 words of actual content after stripping navigation, ads, and boilerplate. When in doubt, use this sentinel.
-NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents. NOT AI-relevant: "Trump posts AI-generated image" (AI is an adjective, not the subject), "Gemini adds NEET exam questions" (education product feature; substitute any search tool and the story is identical), earnings reports where AI is one line item. DO NOT filter: Anthropic funding rounds, Gemini model releases, AI safety incidents, Chinese AI lab strategy. FAILURE MODE: Outputting NOT_AI_RELEVANT for articles whose content explicitly covers a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. AI-relevant means: AI model releases, AI company strategy (funding, leadership, M&A), AI research (papers, benchmarks, evals, capabilities), AI regulation/policy whose primary scope is AI, AI safety incidents. NOT AI-relevant: "Trump posts AI-generated image" (AI is an adjective, not the subject), "Gemini adds NEET exam questions" (education product feature; substitute any search tool and the story is identical), earnings reports where AI is one line item, "Samsung停售TriFold，存储芯片涨价" (consumer device lifecycle; 存储芯片 is storage not AI compute), "蓝色起源火箭发射失败" (aerospace; no AI), "FedRAMP授权GCC High缺失加密文档" (cloud compliance; not AI), "Kagi推出Small Web应用" (web curation; no AI capability). Chip stories: AI-relevant ONLY if the chip is AI compute (GPU, NPU, HBM); storage chip price stories are NOT_AI_RELEVANT. DO NOT filter: Anthropic funding rounds, Gemini/GPT model releases, AI safety incidents, Chinese AI lab strategy, "三星S26 Ultra主打Agentic AI功能" (AI as flagship feature is signal). FAILURE MODE: Outputting NOT_AI_RELEVANT for articles whose content explicitly covers a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly.
 
 STRICT RULES:
 1. Every bullet text must contain at least one of: a named company, a named person, a specific number, or a direct quote.
@@ -255,27 +268,20 @@ BILINGUAL RULES:
 SENTINEL DEFINITIONS:
 CRITICAL: summary_en and summary_zh MUST be non-empty strings. If the tweet has insufficient content to generate a meaningful summary, output the INSUFFICIENT_CONTENT sentinel — do NOT output an empty summary_en or summary_zh. An empty summary field is never a valid response.
 INSUFFICIENT_CONTENT — Use when: the tweet is purely promotional, spam, or contains no extractable claim or observation.
-NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. The author's identity does NOT determine relevance — a tweet from @sama about baseball is NOT_AI_RELEVANT, a tweet from @paulg about railroad investment is NOT_AI_RELEVANT; judge the CONTENT, not who sent it. NOT AI-relevant: "@joshwoodward: Gemini adds NEET exam questions" (education product feature; Gemini is a delivery vehicle), "@realDonaldTrump: posts AI-generated Jesus image" (political figure's social media content), "@paulg: Railroad investment is unprecedented, even on a log scale" (economics; no AI content), "@paulg: 铁路投资前所未有，即使在对数尺度上也是如此" (same; Chinese-language economics tweet), "@sama: Great dinner tonight" (personal; sender identity irrelevant). AI-relevant: tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety. FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets whose content explicitly names a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly regardless of who sent the tweet.
+NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Apply the substitution test: if you replaced the AI product with any other software tool and the story would be equally newsworthy, it is NOT_AI_RELEVANT. The author's identity does NOT determine relevance — a tweet from @sama about baseball is NOT_AI_RELEVANT, a tweet from @paulg about railroad investment is NOT_AI_RELEVANT; judge the CONTENT, not who sent it. NOT AI-relevant: "@joshwoodward: Gemini adds NEET exam questions" (education product feature; Gemini is a delivery vehicle), "@realDonaldTrump: posts AI-generated Jesus image" (political figure's social media content), "@paulg: Railroad investment is unprecedented, even on a log scale" (economics; no AI content), "@paulg: 铁路投资前所未有，即使在对数尺度上也是如此" (same; Chinese-language economics tweet), "@sama: Great dinner tonight" (personal; sender identity irrelevant), "Samsung停售TriFold，存储芯片涨价" (consumer device; 存储芯片 is storage not AI compute), "蓝色起源火箭发射失败" (aerospace; no AI), "FedRAMP缺失加密文档仍授权GCC High" (cloud compliance; not AI). Chip stories: AI-relevant ONLY if the chip is AI compute (GPU, NPU, HBM); storage chip price stories are NOT_AI_RELEVANT. DO NOT filter: "三星S26 Ultra主打Agentic AI功能" (AI as flagship feature is signal worth tracking). AI-relevant: tweets about AI model releases, AI company funding/strategy, AI research findings, AI safety. FAILURE MODE: Outputting NOT_AI_RELEVANT for tweets whose content explicitly names a Chinese AI lab (DeepSeek, 智谱, 文心, 通义, 混元, 月之暗面, 阶跃星辰, 零一万物) — these are AI-relevant by definition even if uncertain. For all other content, apply the substitution test strictly regardless of who sent the tweet.
 
 STRICT RULES:
 1. For quote tweets: clearly separate the original tweet's claim from the quote-tweeter's commentary.
 2. Engagement figures (likes, retweets) are context, not content. Do not lead with engagement numbers.`
 
-export interface Env {
-  SUPABASE_URL: string
-  SUPABASE_SERVICE_ROLE_KEY: string
-  TOKENROUTER_API_KEY: string        // new primary provider
-  LLM_MODEL: string                  // e.g. "qwen/qwen3.6-plus" — used on TokenRouter
-  OPENROUTER_API_KEY: string
-  OPENROUTER_MODEL: string           // used on OpenRouter fallback — no redeploy needed
-  GROQ_API_KEY: string
-}
+// ── Supabase helpers ──────────────────────────────────────────────────────────
 
-const SB = (env: Env) => ({
-  'apikey': env.SUPABASE_SERVICE_ROLE_KEY,
-  'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+const SB_HEADERS = () => ({
+  'apikey': Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+  'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!}`,
   'Content-Type': 'application/json',
 })
+const SB_URL = () => Deno.env.get('SUPABASE_URL')!
 
 const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
@@ -371,15 +377,15 @@ function extractFirstJson(text: string): string {
 }
 
 // Central LLM routing function.
-// Primary: TokenRouter (model from env.LLM_MODEL — swap without redeployment)
-// Secondary: OpenRouter (model from env.OPENROUTER_MODEL — fast failures only)
+// Primary: TokenRouter (model from LLM_MODEL — swap without redeployment)
+// Secondary: OpenRouter (model from OPENROUTER_MODEL — fast failures only)
 // Tertiary: Groq llama-3.3-70b (fast failures only — AbortError, TCP rejection, 429)
 // Non-429 non-2xx throws immediately — no fallback, fail the row.
-async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+async function callLLM(isTweet: boolean, content: string): Promise<LLMResult> {
   const controller = new AbortController()
-  const timerId = setTimeout(() => controller.abort(), 25000)
+  const timerId = setTimeout(() => controller.abort(), 120000)
 
-  const body = buildOpenRouterRequest(isTweet, content, env.LLM_MODEL)
+  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('LLM_MODEL')!)
 
   let trRes: Response
   try {
@@ -387,7 +393,7 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
     trRes = await fetch(TOKENROUTER_API, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${env.TOKENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${Deno.env.get('TOKENROUTER_API_KEY')!}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://news-app.internal',
         'X-Title': 'NewsApp',
@@ -398,11 +404,11 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
   } catch (fetchErr: unknown) {
     clearTimeout(timerId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
-      console.log('[TokenRouter] 8s timeout — no headers received, falling back to OpenRouter')
-      return await callOpenRouterFallback(isTweet, content, env)
+      console.log('[TokenRouter] 120s timeout — no headers received, falling back to OpenRouter')
+      return await callOpenRouterFallback(isTweet, content)
     }
     console.log('[TokenRouter] unreachable, falling back to OpenRouter:', (fetchErr as Error).message)
-    return await callOpenRouterFallback(isTweet, content, env)
+    return await callOpenRouterFallback(isTweet, content)
   }
 
   clearTimeout(timerId)
@@ -410,7 +416,7 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
   if (trRes.status === 429) {
     const body429 = await trRes.text().catch(() => '')
     console.log(`[TokenRouter] 429 — falling back to OpenRouter. Body: ${body429.substring(0, 200)}`)
-    return await callOpenRouterFallback(isTweet, content, env)
+    return await callOpenRouterFallback(isTweet, content)
   }
 
   if (!trRes.ok) {
@@ -428,16 +434,16 @@ async function callLLM(isTweet: boolean, content: string, env: Env): Promise<LLM
     parsed = JSON.parse(extractFirstJson(textContent))
   } catch (err) {
     console.log(`[TokenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to OpenRouter.`)
-    return await callOpenRouterFallback(isTweet, content, env)
+    return await callOpenRouterFallback(isTweet, content)
   }
-  return normalizeGemmaResponse(parsed, env.LLM_MODEL)
+  return normalizeGemmaResponse(parsed, Deno.env.get('LLM_MODEL')!)
 }
 
-async function callOpenRouterFallback(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+async function callOpenRouterFallback(isTweet: boolean, content: string): Promise<LLMResult> {
   const controller = new AbortController()
   const connectionTimeoutId = setTimeout(() => controller.abort(), 8000)
 
-  const body = buildOpenRouterRequest(isTweet, content, env.OPENROUTER_MODEL)
+  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('OPENROUTER_MODEL')!)
 
   let orRes: Response
   try {
@@ -445,7 +451,7 @@ async function callOpenRouterFallback(isTweet: boolean, content: string, env: En
     orRes = await fetch(OPENROUTER_API, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+        'Authorization': `Bearer ${Deno.env.get('OPENROUTER_API_KEY')!}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://news-app.internal',
         'X-Title': 'NewsApp',
@@ -457,10 +463,10 @@ async function callOpenRouterFallback(isTweet: boolean, content: string, env: En
     clearTimeout(connectionTimeoutId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
       console.log('[OpenRouter] 8s timeout — no headers received, falling back to Groq')
-      return await callGroqFallback(isTweet, content, env)
+      return await callGroqFallback(isTweet, content)
     }
     console.log('[OpenRouter] unreachable, falling back to Groq:', (fetchErr as Error).message)
-    return await callGroqFallback(isTweet, content, env)
+    return await callGroqFallback(isTweet, content)
   }
 
   clearTimeout(connectionTimeoutId)
@@ -471,7 +477,7 @@ async function callOpenRouterFallback(isTweet: boolean, content: string, env: En
       ? `DAILY CAP HIT — wait until midnight UTC reset. Body: ${body429.substring(0, 200)}`
       : `MODEL OVERLOADED — switch OPENROUTER_MODEL to a less-contested model. Body: ${body429.substring(0, 200)}`
     console.log(`[OpenRouter] 429 (${reason}), falling back to Groq`)
-    return await callGroqFallback(isTweet, content, env)
+    return await callGroqFallback(isTweet, content)
   }
 
   if (!orRes.ok) {
@@ -488,77 +494,102 @@ async function callOpenRouterFallback(isTweet: boolean, content: string, env: En
     parsed = JSON.parse(extractFirstJson(textContent))
   } catch (err) {
     console.log(`[OpenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to Groq.`)
-    return await callGroqFallback(isTweet, content, env)
+    return await callGroqFallback(isTweet, content)
   }
-  return normalizeGemmaResponse(parsed, env.OPENROUTER_MODEL)
+  return normalizeGemmaResponse(parsed, Deno.env.get('OPENROUTER_MODEL')!)
 }
 
-// Groq fallback — uses existing flat-text prompts and parsers
-async function callGroqFallback(isTweet: boolean, content: string, env: Env): Promise<LLMResult> {
+// Groq fallback — uses existing flat-text prompts and parsers.
+// Explicit 30s AbortController required: no CF wall-clock kill on Supabase Edge Functions.
+// A hung Groq socket stalls processBatch() indefinitely without this timeout.
+async function callGroqFallback(isTweet: boolean, content: string): Promise<LLMResult> {
   const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
-  const groqRes = await fetch(GROQ_API, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.GROQ_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.1,
-      max_tokens: 2000,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
-      ],
-    }),
-  })
+  const controller = new AbortController()
+  const timerId = setTimeout(() => controller.abort(), 30000)
+  try {
+    const groqRes = await fetch(GROQ_API, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')!}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.1,
+        max_tokens: 2000,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
+        ],
+      }),
+      signal: controller.signal,
+    })
+    clearTimeout(timerId)
 
-  if (!groqRes.ok) {
-    const errText = await groqRes.text()
-    throw new Error(`Groq ${groqRes.status}: ${errText.substring(0, 200)}`)
-  }
-
-  const data: unknown = await groqRes.json()
-  const responseText = ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '').trim()
-  if (!responseText) throw new Error('Groq returned empty response')
-  return groqResponseToResult(responseText)
-}
-
-export default {
-  async fetch() {
-    return new Response('ok')
-  },
-
-  async scheduled(_event: ScheduledEvent, env: Env) {
-    const res = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?status=eq.pending&limit=5&select=id,source_id,url,raw_content,metadata,published_at`,
-      { headers: SB(env) }
-    )
-    const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number } }[] = await res.json()
-
-    if (articles.length === 0) {
-      console.log('No pending articles.')
-      return
+    if (!groqRes.ok) {
+      const errText = await groqRes.text()
+      throw new Error(`Groq ${groqRes.status}: ${errText.substring(0, 200)}`)
     }
 
-    console.log(`Processing ${articles.length} articles`)
-
-    await Promise.all(
-      articles.map(a =>
-        fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${a.id}`, {
-          method: 'PATCH',
-          headers: SB(env),
-          body: JSON.stringify({ status: 'processing' }),
-        })
-      )
-    )
-
-    await Promise.all(articles.map(a => processArticle(a, env)))
-    console.log('Done.')
-  },
+    const data: unknown = await groqRes.json()
+    const responseText = ((data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content || '').trim()
+    if (!responseText) throw new Error('Groq returned empty response')
+    return groqResponseToResult(responseText)
+  } catch (fetchErr: unknown) {
+    clearTimeout(timerId)
+    throw new Error(`Groq unreachable: ${(fetchErr as Error).message}`)
+  }
 }
 
+// ── Entry point ───────────────────────────────────────────────────────────────
 
+// JWT verification is handled by Supabase's gateway (deployed without --no-verify-jwt).
+// The service role key is a valid JWT signed with the project secret — the gateway
+// accepts it and rejects all unauthenticated requests before the function runs.
+Deno.serve(async (_req) => {
+  // Return 200 immediately — pg_net's connection is released.
+  // Heavy processing runs in the background via EdgeRuntime.waitUntil().
+  // This prevents pg_net timeout from killing the execution context.
+  // Catch top-level rejections from processBatch() to prevent unhandled promise
+  // rejection from crashing the Deno isolate and terminating overlapping tasks.
+  EdgeRuntime.waitUntil(processBatch().catch(err => console.error('[processBatch] unhandled rejection:', err)))
+  return new Response(JSON.stringify({ status: 'accepted' }), {
+    headers: { 'Content-Type': 'application/json' }
+  })
+})
+
+// ── Batch processing ──────────────────────────────────────────────────────────
+
+async function processBatch() {
+  // Atomic batch claim — FOR UPDATE SKIP LOCKED prevents concurrent invocations
+  // from processing the same rows. Replaces the two-step SELECT + PATCH that was
+  // race-prone when multiple Edge Function invocations ran simultaneously.
+  const res = await fetch(`${SB_URL()}/rest/v1/rpc/claim_pending_batch`, {
+    method: 'POST',
+    headers: { ...SB_HEADERS(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ batch_size: 5 }),
+  })
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '(unreadable)')
+    throw new Error(`claim_pending_batch RPC failed (${res.status}): ${errBody}`)
+  }
+  const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } }[] = await res.json()
+
+  if (articles.length === 0) {
+    console.log('No pending articles.')
+    return
+  }
+
+  console.log(`Processing ${articles.length} articles`)
+  await Promise.all(articles.map(a => processArticle(a)))
+  console.log('Done.')
+}
+
+// ── Article scraping ──────────────────────────────────────────────────────────
+
+// Uses linkedom (pure JS, no WASM) instead of HTMLRewriter — Deno Deploy blocks WASM bundles.
+// linkedom requires fetching the full HTML as a string first, then parsing.
+// For articles capped at 24K chars this is not a performance concern.
 async function fetchArticleContent(url: string): Promise<{ content: string; published_at: string | null }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 8000)
@@ -574,35 +605,32 @@ async function fetchArticleContent(url: string): Promise<{ content: string; publ
     clearTimeout(timeout)
     if (!res.ok) return { content: '', published_at: null }
 
-    const texts: string[] = []
-    let htmlPublishedAt: string | null = null
-    const STRIP = ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript']
-    let rewriter = new HTMLRewriter()
-    for (const sel of STRIP) {
-      rewriter = rewriter.on(sel, { element(el) { el.remove() } })
+    const htmlText = await res.text()
+    const root = parse(htmlText)
+
+    // Strip unwanted elements
+    for (const sel of ['nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript']) {
+      root.querySelectorAll(sel).forEach(el => el.remove())
     }
-    rewriter = rewriter.on('p, h1, h2, h3', {
-      text(chunk) { if (chunk.text.trim()) texts.push(chunk.text.trim()) },
-    })
-    // Extract publish date from HTML meta tags
-    rewriter = rewriter.on('meta', {
-      element(el) {
-        const prop = el.getAttribute('property') || el.getAttribute('name') || ''
-        if (['article:published_time', 'publishdate', 'date', 'og:article:published_time'].includes(prop.toLowerCase())) {
-          const val = el.getAttribute('content')
-          if (val && !htmlPublishedAt) htmlPublishedAt = val
-        }
-      },
-    })
-    rewriter = rewriter.on('time[datetime]', {
-      element(el) {
-        const dt = el.getAttribute('datetime')
-        if (dt && !htmlPublishedAt) htmlPublishedAt = dt
-      },
+
+    // Extract text from content elements
+    const texts: string[] = []
+    root.querySelectorAll('p, h1, h2, h3').forEach(el => {
+      const t = el.text?.trim()
+      if (t) texts.push(t)
     })
 
-    // Must consume the output stream or HTMLRewriter never runs
-    await rewriter.transform(res).text()
+    // Extract publish date from meta tags
+    let htmlPublishedAt: string | null = null
+    const dataMetas = ['article:published_time', 'publishdate', 'date', 'og:article:published_time']
+    for (const name of dataMetas) {
+      const meta = root.querySelector(`meta[property="${name}"]`) ?? root.querySelector(`meta[name="${name}"]`)
+      if (meta) { htmlPublishedAt = meta.getAttribute('content') ?? null; break }
+    }
+    if (!htmlPublishedAt) {
+      const timeEl = root.querySelector('time[datetime]')
+      if (timeEl) htmlPublishedAt = timeEl.getAttribute('datetime') ?? null
+    }
 
     const result = texts.join(' ').replace(/\s+/g, ' ').trim()
 
@@ -616,6 +644,8 @@ async function fetchArticleContent(url: string): Promise<{ content: string; publ
     return { content: '', published_at: null }
   }
 }
+
+// ── DB writes ─────────────────────────────────────────────────────────────────
 
 // HN engagement disabled — HN source paused due to low content quality (碎片化)
 // async function fetchHNEngagement(url: string): Promise<{ hn_score: number; hn_comments: number } | null> {
@@ -643,14 +673,13 @@ async function insertAndMarkDone(
   summary_zh: string,
   questions: { en: string[]; zh: string[] } | null,
   articleContent: string,
-  engagement: Record<string, number> | null,
+  engagement: Record<string, number | string> | null,
   published_at: string | null,
   llm_model: string,
-  env: Env
 ) {
-  await fetch(`${env.SUPABASE_URL}/rest/v1/daily_news`, {
+  await fetch(`${SB_URL()}/rest/v1/daily_news`, {
     method: 'POST',
-    headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
+    headers: { ...SB_HEADERS(), 'Prefer': 'resolution=ignore-duplicates' },
     body: JSON.stringify({
       source_id: article.source_id,
       raw_ingestion_id: article.id,
@@ -672,19 +701,21 @@ async function insertAndMarkDone(
   // For articles already in daily_news (duplicate URL), patch article_content separately
   // since ignore-duplicates silently skips the insert without updating existing rows
   if (articleContent) {
-    await fetch(`${env.SUPABASE_URL}/rest/v1/daily_news?url=eq.${encodeURIComponent(article.url)}`, {
+    await fetch(`${SB_URL()}/rest/v1/daily_news?url=eq.${encodeURIComponent(article.url)}`, {
       method: 'PATCH',
-      headers: SB(env),
+      headers: SB_HEADERS(),
       body: JSON.stringify({ article_content: articleContent }),
     })
   }
 
-  await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+  await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
     method: 'PATCH',
-    headers: SB(env),
+    headers: SB_HEADERS(),
     body: JSON.stringify({ status: 'done', processed_at: new Date().toISOString() }),
   })
 }
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function stripHtml(html: string): string {
   return html
@@ -719,7 +750,7 @@ const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|dee
 
 const ZH_AI_KEYWORDS = [
   '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
-  '生成式','多模态','算力','英伟达',
+  '生成式','多模态','算力','芯片','英伟达',
   '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
   'DeepSeek','百川','商汤','科大讯飞','华为盘古',
 ]
@@ -729,17 +760,18 @@ function hasAISignal(text: string): boolean {
   return ZH_AI_KEYWORDS.some(kw => text.includes(kw))
 }
 
+// ── Article pipeline ──────────────────────────────────────────────────────────
+
 async function processArticle(
-  article: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number } },
-  env: Env
+  article: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } },
 ) {
   try {
     const rawContent = stripHtml((article.raw_content || '').trim())
 
     if (rawContent.length === 0) {
-      await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+      await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
         method: 'PATCH',
-        headers: SB(env),
+        headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'empty raw_content' }),
       })
       console.log(`SKIP (empty): ${article.url}`)
@@ -750,25 +782,24 @@ async function processArticle(
     // RSS/other articles get HN score if the article was posted to Hacker News
     const isTweet  = article.url.includes('x.com') && article.url.includes('/status/')
     const isGitHub = article.url.startsWith('https://github.com/')
-    let engagement: Record<string, number> | null = null
+    let engagement: Record<string, number | string> | null = null
     if (isTweet && article.metadata) {
       engagement = { likes: article.metadata.likes ?? 0, retweets: article.metadata.retweets ?? 0 }
     } else if (isGitHub && article.metadata?.stars != null) {
       engagement = { stars: article.metadata.stars }
     } else if (article.url.includes('reddit.com') && article.metadata?.score != null) {
       engagement = { score: article.metadata.score, num_comments: article.metadata.num_comments ?? 0 }
-    } else if (!isTweet && !isGitHub) {
-      // HN engagement disabled — HN source paused due to low content quality
-      // engagement = await fetchHNEngagement(article.url)
+    } else if (article.metadata?.show_name) {
+      engagement = { show_name: article.metadata.show_name }
     }
 
     // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
     // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary
     // Tweet-specific pre-LLM gate: filter zero-AI-signal tweets at zero token cost
     if (isTweet && !hasAISignal(rawContent)) {
-      await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+      await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
         method: 'PATCH',
-        headers: SB(env),
+        headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
       })
       console.log(`SKIP (keyword gate — not AI relevant): ${article.url}`)
@@ -784,11 +815,11 @@ async function processArticle(
     // Resolve published_at: prefer metadata (from ingestion), fall back to HTML meta tag
     const published_at = article.published_at || fetched.published_at || null
 
-    const result = await callLLM(isTweet, contentForLLM, env)
+    const result = await callLLM(isTweet, contentForLLM)
 
     if (result.sentinel === 'INSUFFICIENT_CONTENT') {
-      await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
-        method: 'PATCH', headers: SB(env),
+      await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+        method: 'PATCH', headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'INSUFFICIENT_CONTENT' }),
       })
       console.log(`SKIP (insufficient): ${article.url}`)
@@ -796,8 +827,8 @@ async function processArticle(
     }
 
     if (result.sentinel === 'NOT_AI_RELEVANT') {
-      await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
-        method: 'PATCH', headers: SB(env),
+      await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+        method: 'PATCH', headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
       })
       console.log(`SKIP (not AI relevant): ${article.url}`)
@@ -813,22 +844,22 @@ async function processArticle(
     const summary = summary_en || summary_zh || ''
     const questions = (questions_en && questions_zh) ? { en: questions_en, zh: questions_zh } : null
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, env)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model)
     console.log(`OK: ${article.url}`)
 
   } catch (err: unknown) {
     console.error(`FAIL: ${article.url}`, (err as Error).message)
 
     const countRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}&select=retry_count`,
-      { headers: SB(env) }
+      `${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}&select=retry_count`,
+      { headers: SB_HEADERS() }
     )
     const countData = await countRes.json() as { retry_count: number }[]
     const newCount = (countData[0]?.retry_count ?? 0) + 1
 
-    await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+    await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
       method: 'PATCH',
-      headers: SB(env),
+      headers: SB_HEADERS(),
       body: JSON.stringify({
         retry_count: newCount,
         last_error: (err as Error).message || String(err),

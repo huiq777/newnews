@@ -144,7 +144,7 @@ Fixed left sidebar `w-64` for temporal navigation and horizontal real estate on 
 | Component | Status |
 |---|---|
 | RSS ingestion | ⚠️ Needs deploy — now routes `source_type IN (rss, wechat, reddit)` |
-| Full article scraping | ✅ Live (HTMLRewriter; 8s timeout; paywall fallback) |
+| Full article scraping | ✅ Live (node-html-parser; 8s timeout; paywall fallback) |
 | LLM summarization + question generation | ⚠️ Needs deploy — **1 Groq call/article** (was 3); `parseJsonSection()` parser; max_tokens 2000 |
 | Vector embeddings (Cohere) | ✅ Live (embed-batch every 5 min; article_content preferred) |
 | Inline Q&A on article cards | ✅ Live |
@@ -189,7 +189,8 @@ Three workers have local changes not yet deployed:
 
 ```bash
 cd workers/ingest-rss && npx wrangler deploy
-cd workers/process-queue && npx wrangler deploy
+supabase functions deploy process-queue   # Edge Function (no --no-verify-jwt)
+# workers/process-queue wrangler.toml has [triggers] removed — worker stays deployed but inert
 cd workers/ingest-builders && npx wrangler deploy
 ```
 
@@ -289,7 +290,7 @@ Before adding any feature, ask:
 
 | File | Purpose |
 |---|---|
-| `/workers/process-queue/src/index.ts` | LLM summarization + question generation pipeline |
+| `supabase/functions/process-queue/index.ts` | LLM summarization + question generation pipeline (Edge Function; pg_cron trigger) |
 | `/workers/ingest-builders/src/index.ts` | Reads follow-builders feed-x.json + feed-podcasts.json → raw_ingestion |
 | `/workers/send-feishu-digest/src/index.ts` | Daily Feishu digest card |
 | `/supabase/functions/answer-question/index.ts` | Streaming RAG chatbot endpoint |

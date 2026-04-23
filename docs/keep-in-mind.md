@@ -161,7 +161,7 @@ See `current-state.md` for the live deployment status of every component.
 
 Free tier allows **50 subrequests per invocation**. Each `fetch()` call counts as one.
 
-Current counts: ingest-builders ~38/50, process-queue ~36/50. See gotcha #13 in `AI-SWE-skill.md` for exact per-worker breakdown.
+Current counts: ingest-builders ~38/50. (process-queue moved to Supabase Edge Function — no CF subrequest limit applies)
 
 Upgrade path: Cloudflare Workers Paid ($5/mo) raises limit to 1,000 subrequests.
 
@@ -244,4 +244,4 @@ wrangler secret put OPENROUTER_MODEL --name process-queue
 
 **Exception — Chinese:** Chinese script has no word boundaries (characters are not separated by spaces or punctuation). Chinese AI keywords in `ZH_AI_KEYWORDS` use plain `.includes()` substring matching — this is correct and intentional. Chinese characters are granular enough that false-positive risk is negligible.
 
-**Affected code:** `EN_AI_KEYWORDS` and `ZH_AI_KEYWORDS` constants in `workers/process-queue/src/index.ts`, used by `hasAISignal()`.
+**Affected code:** `EN_AI_KEYWORDS` and `ZH_AI_KEYWORDS` constants in `supabase/functions/process-queue/index.ts`, used by `hasAISignal()`.
