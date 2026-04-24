@@ -36,7 +36,11 @@ const ZH_SYSTEM_PROMPT = `你是一位直言不讳、观点鲜明的资深科技
 原因：强行将不相关文章串成一个趋势，是最危险的幻觉——听起来合理，但结构上是假的。
 
 写作规范：密度高、具体、有观点、保持质疑。正文段落不用项目符号。不写开场白废话。有把握地写——如果要保留不确定性，用证据来表达，不要用"有待观察"。
-禁用词：重大、里程碑、值得注意的是、生态系统、格局。`
+禁用词：重大、里程碑、值得注意的是、生态系统、格局。
+
+字数约束：你的完整回复必须在2000个token以内。请提前规划篇幅——不要开始一个你无法完成的章节。必须以完整的句子结尾，不得在句子中途截断。
+错误结尾示范："…这是把蒸馏从"灰色竞争手段"变成"
+正确结尾示范："…这是把蒸馏从"灰色竞争手段"变成合法的知识产权攻击面。"`
 
 const EN_SYSTEM_PROMPT = `You are a ruthless, high-conviction senior technology analyst writing for a sophisticated, time-poor audience. You cut through industry hype to identify structural shifts, asymmetric risks, and changing leverage. You write for builders and curious professionals — people who can spot a weak argument.
 
@@ -69,22 +73,18 @@ BAD: Connecting a model release, a regulatory hearing, and a funding round into 
 GOOD: "**This cycle has no single thesis — three independent stories follow.** First: [story A]. Second: [story B]. Third: [story C]."
 
 Style constraints: Dense, specific, opinionated, and skeptical. No bullet points in the body paragraphs. No introductory filler ("In today's fast-paced AI landscape..."). Write with authority — if you hedge, hedge with evidence, not with "it remains to be seen."
-Banned words: "significant," "major," "key," "milestone," "landscape," "ecosystem," "it is worth noting."`
+Banned words: "significant," "major," "key," "milestone," "landscape," "ecosystem," "it is worth noting."
 
-// ── resolveSecondary — await secondary Groq call with 25s timeout ─────────────
-// Returns null on timeout, non-200, or parse failure.
-// Callers treat null as "skip this column" — never write null over an existing value.
-async function resolveSecondary(p: Promise<Response>): Promise<string | null> {
+LENGTH CONSTRAINT: Your entire response must fit within 2,000 tokens. Plan accordingly — do not begin a section you cannot finish. End on a complete sentence. Never truncate mid-clause.
+BAD ending: "…which would functionally criminalize the open-weight distillation pipeline that made DeepSeek"
+GOOD ending: "…which would functionally criminalize the open-weight distillation pipeline that made DeepSeek competitive."`
+
+// ── resolveSecondary — await secondary TokenRouter call ───────────────────────
+// Returns null on timeout or error. Callers treat null as "skip this column".
+async function resolveSecondary(p: Promise<{ text: string; tokens_used: number }>): Promise<string | null> {
   try {
-    const res = await Promise.race([
-      p,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('secondary_timeout')), 25_000)
-      ),
-    ])
-    if (!res.ok) return null
-    const json = await res.json()
-    return (json.choices?.[0]?.message?.content as string) ?? null
+    const result = await p
+    return result.text || null
   } catch {
     return null
   }
@@ -113,7 +113,7 @@ async function callTokenRouterNonStream(
         model,
         stream: false,
         temperature: 0.7,
-        max_tokens: 1024,
+        max_tokens: 2000,
         messages,
       }),
     })
@@ -166,8 +166,8 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
   }
 
   const anchorMs   = new Date(anchor_date).getTime()
-  const date_end   = anchor_date
-  const date_start = new Date(anchorMs - step_days * 86_400_000).toISOString().slice(0, 10)
+  const date_end   = new Date(anchorMs + 86_400_000).toISOString().slice(0, 10)
+  const date_start = new Date(anchorMs - (step_days - 1) * 86_400_000).toISOString().slice(0, 10)
 
   const sbHeaders = {
     'apikey': SERVICE_KEY,
@@ -369,9 +369,10 @@ serve(async (req) => {
   }
   // ─────────────────────────────────────────────────────────────────────────
 
-  const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
-  const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-  const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY')!
+  const SUPABASE_URL          = Deno.env.get('SUPABASE_URL')!
+  const SERVICE_KEY           = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const TOKENROUTER_API_KEY   = Deno.env.get('TOKENROUTER_API_KEY')!
+  const TREND_BRIEF_MODEL     = Deno.env.get('TREND_BRIEF_MODEL') ?? 'anthropic/claude-opus-4.7'
 
   const sbHeaders = {
     'apikey': SERVICE_KEY,
@@ -570,37 +571,25 @@ serve(async (req) => {
   const sourcesPreamble = encoder.encode(
     `data: ${JSON.stringify({ type: 'sources', sources_json: sourcesJson })}\n\n`
   )
-  const groqHeaders = {
-    'Authorization': `Bearer ${GROQ_API_KEY}`,
-    'Content-Type': 'application/json',
-  }
 
-  // ── Secondary: server-to-server, blocking JSON. No req.signal. ───────────
-  const secondaryPromise = fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: groqHeaders,
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      stream: false,
-      temperature: 0.7,
-      max_tokens: 1024,
-      messages: buildMessages(secondaryLang),
-    }),
-  })
+  let secondaryPromise: ReturnType<typeof callTokenRouterNonStream> | undefined
 
-  // ── Primary: streaming, tied to req.signal ────────────────────────────────
-  let groqRes: Response
+  // ── Primary: streaming SSE, tied to req.signal ───────────────────────────
+  let trRes: Response
   try {
-    groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    trRes = await fetch('https://api.tokenrouter.com/v1/chat/completions', {
       method: 'POST',
       signal: req.signal,
-      headers: groqHeaders,
+      headers: {
+        'Authorization': `Bearer ${TOKENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: TREND_BRIEF_MODEL,
         stream: true,
         stream_options: { include_usage: true },
         temperature: 0.7,
-        max_tokens: 1024,
+        max_tokens: 2000,
         messages: buildMessages(resolvedLang),
       }),
     })
@@ -608,12 +597,12 @@ serve(async (req) => {
     if (err instanceof Error && err.name === 'AbortError') {
       console.log(JSON.stringify({ event: 'client_disconnected', duration_ms: Date.now() - startMs, chars_streamed: 0, anchor_date, step_days }))
       // Secondary still in-flight — resolve and save if complete
-      const secondaryText = await resolveSecondary(secondaryPromise)
+      const secondaryText = secondaryPromise ? await resolveSecondary(secondaryPromise) : null
       if (secondaryText) {
         const patchRes = await fetch(
           `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
           { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
-            body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: sourcesJson, model: 'llama-3.3-70b-versatile', expires_at: expiresAt }) }
+            body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: sourcesJson, model: TREND_BRIEF_MODEL, expires_at: expiresAt }) }
         )
         const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
         if (updatedCount === 0) {
@@ -624,7 +613,7 @@ serve(async (req) => {
               anchor_date, step_days,
               synthesis_en: secondaryLang === 'en' ? secondaryText : null,
               synthesis_zh: secondaryLang === 'zh' ? secondaryText : null,
-              sources_json: sourcesJson, model: 'llama-3.3-70b-versatile', expires_at: expiresAt,
+              sources_json: sourcesJson, model: TREND_BRIEF_MODEL, expires_at: expiresAt,
             }),
           })
         }
@@ -637,15 +626,21 @@ serve(async (req) => {
     throw err
   }
 
-  if (!groqRes.ok) {
-    if (groqRes.status === 429) {
-      console.log(JSON.stringify({ event: 'rate_limited_429', anchor_date, step_days }))
+  if (!trRes.ok) {
+    if (trRes.status === 429) {
+      const reason = await trRes.text().catch(() => '')
+      console.log(JSON.stringify({ event: 'rate_limited_429', anchor_date, step_days, reason: reason.substring(0, 500) }))
       return new Response('Rate limited', { status: 429, headers: corsHeaders })
     }
-    return new Response('Groq error', { status: 502, headers: corsHeaders })
+    return new Response('TokenRouter error', { status: 502, headers: corsHeaders })
   }
 
-  const reader = groqRes.body!.getReader()
+  // ── Secondary: fires after primary is accepted — no longer simultaneously in-flight ──
+  secondaryPromise = callTokenRouterNonStream(
+    TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, buildMessages(secondaryLang), 25_000
+  )
+
+  const reader = trRes.body!.getReader()
   let synthesisAccum = ''
   let charsStreamed = 0
   let tokensUsed: number | null = null
@@ -682,12 +677,12 @@ serve(async (req) => {
 
           // Truncated primary — do NOT write synthesisField.
           // Await secondary with 25s timeout and write only if complete.
-          const secondaryText = await resolveSecondary(secondaryPromise)
+          const secondaryText = secondaryPromise ? await resolveSecondary(secondaryPromise) : null
           if (secondaryText) {
             const patchRes = await fetch(
               `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
               { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
-                body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: sourcesJson, model: 'llama-3.3-70b-versatile', expires_at: expiresAt }) }
+                body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: sourcesJson, model: TREND_BRIEF_MODEL, expires_at: expiresAt }) }
             )
             const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
             if (updatedCount === 0) {
@@ -698,7 +693,7 @@ serve(async (req) => {
                   anchor_date, step_days,
                   synthesis_en: secondaryLang === 'en' ? secondaryText : null,
                   synthesis_zh: secondaryLang === 'zh' ? secondaryText : null,
-                  sources_json: sourcesJson, model: 'llama-3.3-70b-versatile', expires_at: expiresAt,
+                  sources_json: sourcesJson, model: TREND_BRIEF_MODEL, expires_at: expiresAt,
                 }),
               })
             }
@@ -715,15 +710,16 @@ serve(async (req) => {
 
       // Full completion — atomic bilingual DB write
       if (synthesisAccum.length > 0) {
-        const secondaryText = await resolveSecondary(secondaryPromise)
+        const secondaryText = secondaryPromise ? await resolveSecondary(secondaryPromise) : null
 
         const writePayload = {
           [synthesisField]: synthesisAccum,
           ...(secondaryText !== null ? { [secondarySynthesisField]: secondaryText } : {}),
           sources_json: sourcesJson,
-          model: 'llama-3.3-70b-versatile',
+          model: TREND_BRIEF_MODEL,
           tokens_used: tokensUsed,
           expires_at: expiresAt,
+          generated_at: new Date().toISOString(),
         }
 
         // PATCH first — updates only changed fields on existing row, leaves other lang intact
@@ -743,7 +739,7 @@ serve(async (req) => {
               synthesis_en: resolvedLang === 'en' ? synthesisAccum : (secondaryText ?? null),
               synthesis_zh: resolvedLang === 'zh' ? synthesisAccum : (secondaryText ?? null),
               sources_json: sourcesJson,
-              model: 'llama-3.3-70b-versatile',
+              model: TREND_BRIEF_MODEL,
               tokens_used: tokensUsed,
               expires_at: expiresAt,
             }),

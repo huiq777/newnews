@@ -248,7 +248,12 @@ export default function App() {
   }
 
   const handleFilterChange = useCallback((start: Date, end: Date, label: string, days: number) => {
-    setDateRange({ start, end })
+    setDateRange(prev => {
+      if (prev && prev.start.getTime() === start.getTime() && prev.end.getTime() === end.getTime()) {
+        return prev
+      }
+      return { start, end }
+    })
     setFilterLabel(label)
     setStepDays(days)
   }, [])

@@ -6,12 +6,14 @@
 
 ---
 
-## All Groq API Calls in the Codebase
+## All LLM Calls in the Codebase
+
+> `process-queue` routes through TokenRouter (`qwen/qwen3.6-plus`) primary → OpenRouter secondary → Groq (`llama-3.3-70b-versatile`) tertiary. All other functions call Groq directly.
 
 | Worker / Function | Purpose | Model | max_tokens | Temp | Input cap |
 |---|---|---|---|---|---|
-| `process-queue` — ARTICLE prompt | Bilingual title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | llama-3.3-70b-versatile | 2000 | 0.1 | 24,000 chars of scraped content |
-| `process-queue` — TWEET prompt | Tweet title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | llama-3.3-70b-versatile | 2000 | 0.1 | 24,000 chars (tweets ~280) |
+| `process-queue` — ARTICLE prompt | Bilingual title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | TokenRouter→Groq | 2000 | 0.1 | 24,000 chars of scraped content |
+| `process-queue` — TWEET prompt | Tweet title + 3-bullet summary + QUESTIONS_EN + QUESTIONS_ZH | TokenRouter→Groq | 2000 | 0.1 | 24,000 chars (tweets ~280) |
 | `ingest-builders` — bio extraction | Bio map JSON `{handle: "role"}` | llama-3.3-70b-versatile | 600 | 0 | All bios concatenated (~25 accounts) |
 | `answer-question` — RAG answer | Streaming Q&A with RAG context | llama-3.3-70b-versatile | 1024 | 0.6 | article_content + 3 related articles (**no char limit**) |
 | `refresh-questions` — EN | Regenerate 3 EN questions | llama-3.3-70b-versatile | 300 | 0.7 | `summary_en` |
@@ -194,7 +196,9 @@ On-demand calls firing during the day reduce how many articles process-queue can
 
 ## TPD Ceiling: When It Hits and What Happens
 
-**When:** process-queue returns Groq 429 (rate limit exceeded).
+> **Note:** With TokenRouter as primary, Groq 429s only occur when TokenRouter + OpenRouter both fail. The 100K TPD analysis below is worst-case (Groq-only fallback day). On normal days, TokenRouter handles the bulk at no TPD cost.
+
+**When:** process-queue exhausts all three tiers and Groq returns 429.
 
 **What happens:**
 1. The `catch` block in `processArticle()` increments `retry_count`

@@ -155,7 +155,7 @@ supabase secrets set APIFY_WEBHOOK_SECRET=your-secret --project-ref <ref>
 ### Critical Gotchas
 - **`--no-verify-jwt` is required.** Without it, Supabase validates the Authorization header as a JWT and returns 401 before the function code runs.
 - **Test payload has no datasetId.** Apify's "Send test notification" button sends a fake payload (Chuck Norris joke). The function returns 400 on test — this is expected. Only real `RUN_SUCCEEDED` events carry `resource.defaultDatasetId`.
-- **Downstream:** `process-queue` picks up inserted rows every 15 min. `isTweet=true` detection (via `x.com/status` URL) routes to `TWEET_SYSTEM_PROMPT` instead of `ARTICLE_SYSTEM_PROMPT`.
+- **Downstream:** `process-queue` picks up inserted rows every 5 min. `isTweet=true` detection (via `x.com/status` URL) routes to `TWEET_SYSTEM_PROMPT` instead of `ARTICLE_SYSTEM_PROMPT`.
 
 ### Diagnostic Logs
 ```bash
@@ -221,7 +221,7 @@ supabase functions logs generate-trend-brief --tail
 ## `generate-trend-brief` — Cross-Window Trend Synthesis ✅ Live
 
 ### Purpose
-Fetches all articles in a selected time window (ALL categories), clusters them by semantic similarity, selects up to 12 representative articles, enriches with historically related articles via pgvector, and streams a synthesis prose analysis via MiMo-V2-Flash. Result cached in `trend_briefs` for 6 hours. Only called on cache miss — cache hit renders immediately from the DB.
+Fetches all articles in a selected time window (ALL categories), clusters them by semantic similarity, selects up to 12 representative articles, enriches with historically related articles via pgvector, and streams a synthesis analysis via TokenRouter (`TREND_BRIEF_MODEL` secret, default `anthropic/claude-opus-4.7`) SSE. The other language is generated in parallel as a non-streaming call and written to DB on completion. Result cached in `trend_briefs` for 6 hours. Only called on cache miss — cache hit renders immediately from the DB.
 
 ### Request
 
@@ -274,7 +274,7 @@ Frontend AbortController fires on window change — `req.signal` is propagated t
    Current:    [N] title | date | bullet1 | bullet2 | bullet3
    Historical: [N] title | date | bullet1
 
-6. Stream to MiMo-V2-Flash (stream_options: { include_usage: true })
+6. Primary language: TokenRouter streaming SSE with TREND_BRIEF_MODEL; secondary language: TokenRouter non-streaming (parallel, 25s timeout) — both written to DB on completion
    System prompt: ruthless senior tech analyst; structural shift + blast radius + weak signals + citations + catalyst
 
 7. On full completion: INSERT into trend_briefs (synthesis, sources_json, tokens_used, expires_at = now() + 6h)
@@ -295,7 +295,8 @@ Frontend AbortController fires on window change — `req.signal` is propagated t
 ```
 
 ### Required Secrets
-- `GROQ_API_KEY` — uses `llama-3.3-70b-versatile`
+- `TOKENROUTER_API_KEY` — all LLM calls (synthesis + streaming SSE)
+- `TREND_BRIEF_MODEL` — model ID for TokenRouter (default: `anthropic/claude-opus-4.7`)
 - `COHERE_API_KEY` — for historical enrichment embedding
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`

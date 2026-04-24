@@ -17,7 +17,7 @@ wrangler dev --remote --test-scheduled
 
 Then trigger the scheduled handler:
 ```bash
-curl "http://localhost:8787/__scheduled?cron=0+7+*+*+*"
+curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"
 ```
 
 **Why `--remote`:** Worker secrets set via `wrangler secret put` are stored in Cloudflare's cloud. Local dev mode (`wrangler dev` without `--remote`) does not have access to them. Without `--remote`, any line that uses `env.SUPABASE_URL` or similar will throw `TypeError: Invalid URL string` because the value is undefined.
@@ -82,13 +82,12 @@ Secrets are set per worker. If you haven't `cd`'d into the worker directory, use
 wrangler secret put SUPABASE_URL --name ingest-rss
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name ingest-rss
 
-wrangler secret put SUPABASE_URL --name process-queue
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name process-queue
-wrangler secret put GROQ_API_KEY --name process-queue
-
 wrangler secret put SUPABASE_URL --name embed-batch
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY --name embed-batch
 wrangler secret put COHERE_API_KEY --name embed-batch
+
+# process-queue is now a Supabase Edge Function — set secrets via supabase CLI, not wrangler
+# See docs/instructions.md → process-queue section
 ```
 
 Verify secrets are set (values stay hidden):
@@ -102,8 +101,8 @@ wrangler secret list --name ingest-rss
 
 ```bash
 cd workers/ingest-rss && wrangler deploy
-cd workers/process-queue && wrangler deploy
-cd workers/embed-batch && wrangler deploy   # Phase 2
+cd workers/embed-batch && wrangler deploy
+# process-queue: supabase functions deploy process-queue
 ```
 
 Deploy must be run from inside the worker directory (where `wrangler.toml` lives), or pass `--name`.

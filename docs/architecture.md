@@ -47,17 +47,17 @@ The pipeline is split: **Cloudflare Workers** handle all scheduled, internal pro
 supabase functions deploy <function-name> --no-verify-jwt
 ```
 
-### OpenRouter (primary) + Groq fallback for summarization
-`process-queue` routes all LLM summarization through OpenRouter as primary, with Groq `llama-3.3-70b-versatile` as automatic fallback. OpenRouter provides model flexibility — the active model is set via the `OPENROUTER_MODEL` wrangler secret and can be swapped without redeployment. Groq fallback triggers on connection timeout (8s AbortError), TCP rejection, or 429 from OpenRouter only. Non-2xx non-429 responses from OpenRouter throw immediately without falling back.
+### LLM routing: TokenRouter (primary) → OpenRouter → Groq
+`process-queue` routes all LLM summarization through a three-tier chain: TokenRouter (`qwen/qwen3.6-plus`) is primary (120s AbortController timeout), OpenRouter is secondary (model set via `OPENROUTER_MODEL` secret), and Groq `llama-3.3-70b-versatile` is tertiary fallback. Fallback triggers on AbortError, TCP rejection, or 429. Non-2xx non-429 responses throw immediately without falling back. TokenRouter and OpenRouter model IDs are set as secrets and can be swapped without redeployment.
 
 ### Cohere embed-english-v3.0 for embeddings
 The model produces 1024-dimensional embeddings, which directly defines the `vector(1024)` column in `daily_news`. The model supports an `input_type` parameter that distinguishes between indexing and querying — this distinction is load-bearing for retrieval quality (see below). It is available from both Cloudflare Workers (for indexing) and Supabase Edge Functions (for query-time embedding), keeping the embedding symmetric.
 
-### LLM routing: OpenRouter primary, Groq fallback
+### LLM routing details
 
 All LLM work falls into two categories:
 
-- **Summarization + questions (`process-queue`):** 1 call per article. Routes through OpenRouter first (JSON output format, `OPENROUTER_MODEL` secret). Falls back to Groq `llama-3.3-70b-versatile` (flat-text format) on AbortError/TCP/429. The single response includes bilingual title, 3-bullet summary, and QUESTIONS_EN/ZH arrays — parsed by `parseSection()` (text) and `parseJsonSection()` (JSON arrays).
+- **Summarization + questions (`process-queue`):** 1 call per article. Routes through TokenRouter first, then OpenRouter, then Groq `llama-3.3-70b-versatile` as tertiary fallback. The single response includes bilingual title, 3-bullet summary, and QUESTIONS_EN/ZH arrays — parsed by `parseSection()` (text) and `parseJsonSection()` (JSON arrays).
 - **Bio extraction (`ingest-builders`):** 1 batch Groq call per run using `llama-3.3-70b-versatile` directly (no OpenRouter routing).
 - **Q&A (`answer-question`):** Groq `llama-3.3-70b-versatile` streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
 - **Upgrade path for reasoning:** DeepSeek API directly (`deepseek-reasoner`) or any model that emits `reasoning_content`. Same API format — one model name change in `answer-question`.
@@ -71,7 +71,7 @@ Groq free tier: 12K TPM, 100K TPD.
 The pipeline does **not** fetch articles and summarize them in a single workflow. It uses two separate workflows with `raw_ingestion` as the buffer between them.
 
 ```
-Workflow 1 (daily)        Workflow 2 (every 15 min)
+Workflow 1 (daily)        Workflow 2 (every 5 min)
 ─────────────────         ──────────────────────────
 RSS feeds                 raw_ingestion (pending rows)
     │                              │
@@ -106,7 +106,7 @@ The pipeline is designed to be safe to run multiple times without creating dupli
          ┌─────────┐
          │ pending │  ← Initial state on RSS fetch
          └────┬────┘
-              │ n8n picks up the row (sets status = 'processing')
+              │ process-queue Edge Function picks up the row (sets status = 'processing')
               ▼
        ┌────────────┐
        │ processing │  ← In-flight: Groq API call in progress

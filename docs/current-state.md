@@ -18,11 +18,11 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
-| `ingest-rss` | ✅ Deployed | Every 4 hours | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
+| `ingest-rss` | ✅ Deployed | Every hour | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
 | ~~`process-queue`~~ | ❌ Deleted | — | Migrated to Supabase Edge Function (2026-04-21); CF Worker directory deleted 2026-04-23 |
 | `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
-| `send-feishu-digest` | ✅ Deployed | Daily 17:00 UTC (12pm EST) | Queries daily_news last 24h; Chinese content; X - @handle - role format; all 3 ZH bullets; 🔥 likes badge for tweets only (HN badge disabled) |
+| `send-digest` | ✅ Deployed | Daily 00:30 UTC | Feishu (ZH) + optional Slack/Discord/Notion (EN); includes trend brief; last 24h articles, limit 10; 🔥 likes badge for tweets |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
 
 ### Supabase Edge Functions
@@ -211,7 +211,7 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — **4/5 slots used**; ingest-x deleted to make room; process-queue migrated to Supabase Edge Function (pg_cron) freeing one slot
 - **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
-- **Feishu digest:** Chinese content (title_zh, summary_zh); X articles show as `X - @handle - role` using bio_map from sources.metadata
+- **send-digest:** Feishu (ZH) + optional Slack/Discord/Notion (EN); includes trend brief prepended; X articles show as `X - @handle - role` using bio_map from sources.metadata
 - **answer-question SSE events:** `{ type: "content", content: "..." }` chunks then `data: [DONE]`
 - **Streaming in Expo:** use `fetch` + `ReadableStream` with line buffer — do NOT use `supabase.functions.invoke()` (buffers entire response)
 - **PostgREST join staleness:** always fetch sources separately and join client-side — do not use embedded joins
@@ -226,7 +226,7 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 | `supabase/functions/process-queue/index.ts` | Scrape + bilingual summarize + questions + engagement propagation (Edge Function; node-html-parser) |
 | `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (podcasts) → raw_ingestion; bio extraction; engagement metadata |
 | `workers/embed-batch/src/index.ts` | Cohere embeddings — every 5 min |
-| `workers/send-feishu-digest/src/index.ts` | Daily Feishu card — 17:00 UTC, Chinese |
+| `workers/send-digest/src/index.ts` | Daily digest — 00:30 UTC; Feishu (ZH) + optional Slack/Discord/Notion (EN); includes trend brief |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG answer — deployed with RAG |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question refresh |
 | `news-app/App.tsx` | Expo frontend — Stage 3 redesign complete (warm editorial, MarkdownText, scroll fix) |

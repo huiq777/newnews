@@ -24,7 +24,7 @@ This document is the authoritative reference for every secret in the system. Bef
 | `OPENROUTER_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`process-queue`) | No | **Never** |
 | `OPENROUTER_BIO_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`ingest-builders`) | No | **Never** |
 | `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
-| `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-feishu-digest` worker) | No | **Never** |
+| `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-digest` worker) | No | **Never** |
 
 ---
 
@@ -56,7 +56,7 @@ wrangler secret put GROQ_API_KEY
 wrangler secret put OPENROUTER_API_KEY
 wrangler secret put OPENROUTER_BIO_MODEL    # paste: google/gemma-2-9b-it:free (or smaller)
 
-# From workers/send-feishu-digest/:
+# From workers/send-digest/:
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put FEISHU_WEBHOOK_URL
