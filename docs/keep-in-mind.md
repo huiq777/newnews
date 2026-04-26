@@ -244,3 +244,24 @@ wrangler secret put OPENROUTER_MODEL --name process-queue
 **Exception — Chinese:** Chinese script has no word boundaries (characters are not separated by spaces or punctuation). Chinese AI keywords in `ZH_AI_KEYWORDS` use plain `.includes()` substring matching — this is correct and intentional. Chinese characters are granular enough that false-positive risk is negligible.
 
 **Affected code:** `EN_AI_KEYWORDS` and `ZH_AI_KEYWORDS` constants in `supabase/functions/process-queue/index.ts`, used by `hasAISignal()`.
+
+---
+
+## Digest Channels — Markdown Dialects Are Not Interchangeable
+
+The trend-brief LLM emits CommonMark (`**bold**`, `\n\n` paragraphs). Each digest channel speaks a different dialect, and the wrong one ships either literal asterisks or a broken message.
+
+| Channel | Bold syntax | What breaks if you ship CommonMark `**X**` raw |
+|---|---|---|
+| Feishu (`lark_md`) | `**X**` ✅ | nothing — `lark_md` is a CommonMark superset |
+| Slack (`mrkdwn`) | `*X*` (single asterisk) | `**X**` shows as literal text; readers see `**verdict**` |
+| Discord embed `description` | `**X**` ✅ | nothing — standard MD works |
+| Telegram `MarkdownV2` | `*X*` (single asterisk) but `*` MUST be escaped elsewhere | escaping `*` blindly turns `**X**` into `\*\*X\*\*` (literal); slicing the escaped string can split a `\X` pair → 400 `can't parse entities` |
+| Telegram `HTML` | `<b>X</b>` ✅ | only `<`, `>`, `&` need escaping — far simpler than MarkdownV2 |
+
+**Rule:** `workers/send-digest/src/render.ts` converts CommonMark per channel:
+- `slackifyMd`: `**X**` → `*X*`
+- Telegram: `htmlEscape` then `tgBoldify` (`**X**` → `<b>X</b>`), with `parse_mode: 'HTML'`
+- Discord & Feishu: pass through
+
+**Length:** A 2K-token brief is ~6–8K chars — exceeds every channel's single-message limit. Chunk at `\n\n` paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message). For Telegram, send chunks **sequentially** so messages arrive in reading order.

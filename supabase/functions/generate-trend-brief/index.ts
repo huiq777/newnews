@@ -149,11 +149,24 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
   const TOKENROUTER_API_KEY = Deno.env.get('TOKENROUTER_API_KEY')!
   const TREND_BRIEF_MODEL   = Deno.env.get('TREND_BRIEF_MODEL') ?? 'anthropic/claude-opus-4.7'
 
-  // Auth: accept either the service role key or a dedicated CRON_SECRET
+  // Auth: gateway already enforces verify_jwt, so any caller holds a JWT signed
+  // by this project. Accept any service_role JWT (rotation-proof) OR an exact
+  // CRON_SECRET match. Strict-equal SERVICE_KEY check removed — Vault and the
+  // auto-injected env var drift across rotations and break pg_cron silently.
   const authHeader = req.headers.get('Authorization') ?? ''
-  const validTokens = [`Bearer ${SERVICE_KEY}`]
-  if (CRON_SECRET) validTokens.push(`Bearer ${CRON_SECRET}`)
-  if (!validTokens.includes(authHeader)) {
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/)
+  const bearerToken = bearerMatch?.[1] ?? ''
+  let role: string | null = null
+  const parts = bearerToken.split('.')
+  if (parts.length === 3) {
+    try {
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+      role = payload.role ?? null
+    } catch { /* not a JWT */ }
+  }
+  const isServiceRoleJwt = role === 'service_role'
+  const isCronSecret     = CRON_SECRET !== '' && bearerToken === CRON_SECRET
+  if (!isServiceRoleJwt && !isCronSecret) {
     return new Response('Unauthorized', { status: 401, headers: corsH })
   }
 

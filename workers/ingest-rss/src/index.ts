@@ -17,7 +17,7 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     // 1. Get active sources
     const sourcesRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(rss,wechat,reddit)&select=id,rss_url`,
+      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(rss,wechat)&select=id,rss_url`,
       { headers: SB(env) }
     )
     const sources: { id: string; rss_url: string }[] = await sourcesRes.json()

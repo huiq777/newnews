@@ -21,6 +21,35 @@ SUMMARY_ZH:
 
 QUESTIONS_EN: [JSON array of exactly 3 strings. Questions a curious reader would ask a knowledgeable friend after reading. Rules: (1) Each must reference a specific named company, exact number, or outcome from your summary above — no floating generalities. (2) No question starting with "What is," "Can you explain," "How does." (3) Exactly one must be skeptical — challenging an assumption or claim, not hostile but not credulous. Sound like a message to a smart friend, not an essay question. Raw JSON array only, no markdown fences.]
 QUESTIONS_ZH: [包含恰好3个字符串的JSON数组。读者读完后真正想问懂AI朋友的问题，像发微信那样自然。规则：(1) 每个必须引用你上方摘要中的具体公司名、数字或结果，不能是套用任何文章的泛泛问题。(2) 禁止以"什么是"、"请解释"、"如何理解"开头。(3) 三个中必须有一个带质疑性——追问某个假设、数据或叙事框架，不是否定，是追问。15-35汉字。只输出原始JSON数组，不加代码块。]
+CATEGORY: [Output exactly one of: industry | technical_frontier | career_community. Pick the dominant frame of the article — what makes this newsworthy. If two categories tie, pick the one closer to the actor in the title.]
+
+CATEGORY DEFINITIONS:
+
+1. industry — Company strategy, funding rounds, M&A, product launches by labs/vendors, regulation/policy, market share dynamics, leadership changes at AI orgs.
+   WHY: This is the "who's winning, who's spending, who's regulating" lane. The reader is tracking the AI ecosystem as a market and power structure.
+   GOOD: "Anthropic Cuts API Prices 80%, Targeting OpenAI's Enterprise Customers" → industry (pricing strategy by a named vendor against named competitor)
+   GOOD: "Accel筹集50亿美元资金，重点布局后期AI软件与机器人领域" → industry (VC fund close + thesis)
+   GOOD: "EU AI Act Phase 2 Enforcement Begins, GPAI Providers Face €35M Fines" → industry (regulation with concrete penalty)
+   BAD: "Researchers at Anthropic publish paper on circuit tracing" → NOT industry, this is technical_frontier (research output, not corporate strategy)
+   FAILURE MODE: Defaulting every article that mentions a company name to industry. The substitution test: if you removed the company and replaced with a research result, would the story still hold? If yes → technical_frontier. If the story collapses without the company actor, → industry.
+
+2. technical_frontier — Research papers, new model architectures, training breakthroughs, benchmark advances, capability evaluations, novel datasets, agentic-system research.
+   WHY: This is the "what's now possible that wasn't last week" lane. The reader is tracking the capability frontier and how it moves.
+   GOOD: "DeepSeek-V4 Hits 92% on SWE-bench Verified, Beating Claude Opus 4 by 6 Points" → technical_frontier (benchmark result on a research-relevant task)
+   GOOD: "Anthropic Publishes Circuit Tracing Method, Identifies 50K Features in Claude 3 Sonnet" → technical_frontier (interpretability research output)
+   GOOD: "ICLR 2026 Submission: Mixture-of-Depths Reduces Transformer FLOPs 40%" → technical_frontier (architecture research)
+   BAD: "OpenAI Hires Former Meta VP to Lead Research" → NOT technical_frontier, this is industry (leadership/strategy, no capability claim)
+   BAD: "Cursor adds Claude Sonnet 4.6 to its model picker" → NOT technical_frontier, this is industry (product integration, not capability research)
+   FAILURE MODE: Routing every paper-shaped article here even if its content is a corporate announcement dressed up as research. If the headline number is a price or a funding round, it is not technical_frontier regardless of who published it.
+
+3. career_community — Hiring/layoffs at AI orgs, comp data, interview prep, career advice from practitioners, community/culture stories (developer relations, conference recaps, online discourse threads), early-career and student-facing content.
+   WHY: This is the "what does this mean for me as a person working in or entering AI" lane. The reader is asking job-market and skill-positioning questions.
+   GOOD: "OpenAI Lays Off 200 from Applied AI Team, 60% of Cuts in San Francisco" → career_community (workforce impact, geography-specific)
+   GOOD: "r/cscareerquestions: New-grad ML PhD offers from FAANG drop 35% YoY, base comp flat" → career_community (job-market data from community)
+   GOOD: "Karpathy: 90% of AI courses teach the wrong things — 3 alternatives I recommend" → career_community (career advice from a practitioner)
+   BAD: "Meta cuts AI infra costs 30% via custom inference stack" → NOT career_community even though jobs exist behind the cuts; the news is the cost-engineering story, not the workforce → industry
+   BAD: "DeepMind paper: agents trained on developer interview transcripts solve 23% more LeetCode" → NOT career_community despite the topic, this is a research result → technical_frontier
+   FAILURE MODE: Putting any article that mentions hiring or jobs in career_community. The test: is the workforce/career angle the dominant frame, or is it a side detail? If the headline number is workforce-side (layoff count, comp number, hiring spike), → career_community. If the headline number is product or research, route to that lane instead.
 
 BILINGUAL RULES:
 1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
@@ -106,6 +135,35 @@ SUMMARY_ZH:
 
 QUESTIONS_EN: [JSON array of exactly 3 strings. Questions a curious reader would ask a knowledgeable friend after reading. Rules: (1) Each must reference a specific named person, exact claim, or number from your summary above. (2) No question starting with "What is," "Can you explain," "How does." (3) Exactly one must be skeptical. Sound like a message to a smart friend. Raw JSON array only, no markdown fences.]
 QUESTIONS_ZH: [包含恰好3个字符串的JSON数组。读者读完后真正想问懂AI朋友的问题，像发微信那样自然。规则：(1) 每个必须引用你上方摘要中的具体人名、主张或数字。(2) 禁止以"什么是"、"请解释"开头。(3) 必须有一个带质疑性。15-35汉字。只输出原始JSON数组。]
+CATEGORY: [Output exactly one of: industry | technical_frontier | career_community. Pick the dominant frame of the tweet — what makes this signal worth tracking. If two categories tie, pick the one closer to the named actor or claim.]
+
+CATEGORY DEFINITIONS:
+
+1. industry — Company strategy, funding rounds, M&A, product launches, regulation/policy, market share dynamics, leadership changes at AI orgs.
+   WHY: This is the "who's winning, who's spending, who's regulating" lane. The reader is tracking the AI ecosystem as a market and power structure.
+   GOOD: "@sama: Anthropic just cut API prices 80% — direct shot at our enterprise pricing" → industry (vendor pricing dynamics named)
+   GOOD: "@elonmusk: xAI raised $5B at $50B post-money valuation" → industry (funding round)
+   GOOD: "@KaiFuLee: 中国AI Lab Q1融资额下滑40%，Sequoia等LP重新评估配置" → industry (market dynamics with figure)
+   BAD: "@karpathy: New paper on circuit tracing in Sonnet identifies 50K features" → NOT industry, this is technical_frontier (research output)
+   FAILURE MODE: Defaulting every tweet that mentions a company to industry. Substitution test: if you removed the company and the claim was a generic research result, would the tweet still be tweet-worthy? If yes → technical_frontier. If the tweet collapses without the named actor, → industry.
+
+2. technical_frontier — Research findings, new model architectures, training breakthroughs, benchmark advances, capability evaluations, novel datasets, agentic-system research.
+   WHY: This is the "what's now possible that wasn't last week" lane. The reader is tracking the capability frontier and how it moves.
+   GOOD: "@karpathy: SWE-bench Verified — DeepSeek-V4 hits 92%, beats Claude Opus 4 by 6pp" → technical_frontier (benchmark result)
+   GOOD: "@anthropic: Released circuit tracing method, 50K interpretable features in Claude 3 Sonnet" → technical_frontier (interpretability research)
+   GOOD: "@yi_tay: Mixture-of-depths paper cuts transformer FLOPs 40% with no accuracy hit" → technical_frontier (architecture research)
+   BAD: "@sama: We hired a new VP of Research from Meta" → NOT technical_frontier, this is industry (leadership move, no capability claim)
+   BAD: "@cursor_ai: We added Claude Sonnet 4.6 to the model picker" → NOT technical_frontier, this is industry (product integration)
+   FAILURE MODE: Routing any tweet that mentions a paper or benchmark here even when the news is corporate. If the headline number is a price, fundraise, or layoff, it is not technical_frontier regardless of who tweeted it.
+
+3. career_community — Hiring/layoffs at AI orgs, comp data, interview prep, career advice from practitioners, community/culture stories, early-career and student-facing content.
+   WHY: This is the "what does this mean for me as a person working in or entering AI" lane. The reader is asking job-market and skill-positioning questions.
+   GOOD: "@levelsio: OpenAI laid off 200 from Applied AI team, San Francisco hit hardest" → career_community (workforce impact)
+   GOOD: "@karpathy: 90% of AI courses teach the wrong things, here are 3 alternatives I'd actually recommend" → career_community (practitioner career advice)
+   GOOD: "@swyx: New-grad ML offers from FAANG dropped 35% YoY based on community data" → career_community (job-market data)
+   BAD: "@meta_ai: Cut AI infra costs 30% via custom inference stack" → NOT career_community even though jobs exist behind the cut — the news is cost engineering → industry
+   BAD: "@DeepMind: Agents trained on developer interview transcripts solve 23% more LeetCode" → NOT career_community despite the topic — this is a research result → technical_frontier
+   FAILURE MODE: Putting any tweet that mentions hiring or jobs in career_community. Test: is the workforce/career angle the dominant frame, or a side detail? Headline number workforce-side (layoff count, comp, hiring spike) → career_community. Headline number product or research → route to that lane.
 
 BILINGUAL RULES:
 1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
@@ -186,7 +244,8 @@ For a normal article:
   "summary_en": "• **[The Move]:** 2 sentences exactly. Name the specific company or person, what they did, and the exact figure or date involved.\n• **[The Number That Matters]:** 2 sentences exactly. The single most specific metric, figure, quote, or technical specification that makes this story real. Not a category — an actual number or name.\n• **[Who Gets Hurt or Wins]:** 2 sentences exactly. Name the specific companies, developers, or users who gain or lose from this. Forward-looking but grounded in what the article actually claims.",
   "summary_zh": "• **[这一动作]:** 恰好2句话。点名具体公司或人物、做了什么、涉及的精确数字或日期。\n• **[关键数字]:** 恰好2句话。让这个故事变得真实的最具体的指标、数据、引言或技术规格。不是类别——是实际的数字或名称。\n• **[谁输谁赢]:** 恰好2句话。点名从中获益或受损的具体公司、开发者或用户。前瞻性，但必须基于文章的实际表述。",
   "questions_en": ["question 1 — complete sentence referencing a specific named entity or number", "question 2", "question 3 (one must be skeptical)"],
-  "questions_zh": ["问题1", "问题2", "问题3（三个中必须有一个带质疑性）"]
+  "questions_zh": ["问题1", "问题2", "问题3（三个中必须有一个带质疑性）"],
+  "category": "industry | technical_frontier | career_community"
 }
 
 For sentinel conditions:
@@ -196,6 +255,33 @@ For sentinel conditions:
 QUESTIONS RULES:
 - questions_en: exactly 3 strings. Each must reference a specific named company, exact number, or outcome from your summary. No question starting with "What is," "Can you explain," "How does." Exactly one must be skeptical — challenging an assumption or claim, not hostile but not credulous.
 - questions_zh: 恰好3个字符串。每个必须引用摘要中的具体公司名、数字或结果。禁止以"什么是"、"请解释"、"如何理解"开头。三个中必须有一个带质疑性。15-35汉字。
+
+CATEGORY RULES:
+- category: output exactly one of "industry", "technical_frontier", "career_community". Pick the dominant frame of the article — what makes this newsworthy. If two categories tie, pick the one closer to the actor in the title.
+
+CATEGORY DEFINITIONS:
+
+1. industry — Company strategy, funding rounds, M&A, product launches by labs/vendors, regulation/policy, market share dynamics, leadership changes at AI orgs.
+   WHY: This is the "who's winning, who's spending, who's regulating" lane. The reader is tracking the AI ecosystem as a market and power structure.
+   GOOD: "Anthropic Cuts API Prices 80%, Targeting OpenAI's Enterprise Customers" → industry (pricing strategy, named vendor against named competitor)
+   GOOD: "Accel筹集50亿美元资金，重点布局后期AI软件与机器人领域" → industry (VC fund close + thesis)
+   BAD: "Researchers at Anthropic publish paper on circuit tracing" → NOT industry, this is technical_frontier (research output, not corporate strategy)
+   FAILURE MODE: Defaulting every article that mentions a company to industry. Substitution test: if you removed the company and replaced with a research result, would the story still hold? If yes → technical_frontier. If the story collapses without the company actor, → industry.
+
+2. technical_frontier — Research papers, new model architectures, training breakthroughs, benchmark advances, capability evaluations, novel datasets, agentic-system research.
+   WHY: This is the "what's now possible that wasn't last week" lane.
+   GOOD: "DeepSeek-V4 Hits 92% on SWE-bench Verified, Beating Claude Opus 4 by 6 Points" → technical_frontier (benchmark result)
+   GOOD: "Anthropic Publishes Circuit Tracing Method, Identifies 50K Features in Claude 3 Sonnet" → technical_frontier (interpretability research)
+   BAD: "OpenAI Hires Former Meta VP to Lead Research" → NOT technical_frontier, this is industry (leadership move)
+   BAD: "Cursor adds Claude Sonnet 4.6 to its model picker" → NOT technical_frontier, this is industry (product integration)
+   FAILURE MODE: Routing every paper-shaped article here even when its content is a corporate announcement dressed up as research. If the headline number is a price or fundraise, it is not technical_frontier regardless of who published it.
+
+3. career_community — Hiring/layoffs at AI orgs, comp data, interview prep, career advice from practitioners, community/culture stories, early-career and student-facing content.
+   WHY: This is the "what does this mean for me as a person working in or entering AI" lane.
+   GOOD: "OpenAI Lays Off 200 from Applied AI Team, 60% of Cuts in San Francisco" → career_community (workforce impact)
+   GOOD: "Karpathy: 90% of AI courses teach the wrong things — 3 alternatives I recommend" → career_community (career advice from a practitioner)
+   BAD: "Meta cuts AI infra costs 30% via custom inference stack" → NOT career_community even though jobs exist behind it; the news is cost engineering → industry
+   FAILURE MODE: Putting any article that mentions hiring or jobs in career_community. Test: is the workforce/career angle the dominant frame, or a side detail? If the headline number is workforce-side, → career_community. If the headline number is product or research, route to that lane.
 
 BILINGUAL RULES:
 1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
@@ -243,7 +329,8 @@ For a normal tweet:
   "summary_en": "• **[The Claim]:** 2 sentences exactly. What the person or account actually said. If quoting, use their words. If paraphrasing, make clear it's a paraphrase.\n• **[The Context]:** 2 sentences exactly. Why this person saying this matters right now. Who are they, what's the backdrop, what makes this tweet signal rather than noise.\n• **[The Reaction or Gap]:** 2 sentences exactly. What's being contested, confirmed, or left unanswered. If a quote tweet, distinguish the original from the commentary.",
   "summary_zh": "• **[核心主张]:** 恰好2句话。这个人或账号实际说了什么。直接引用用他们的原话；转述时注明是转述。\n• **[背景]:** 恰好2句话。为什么这个人现在说这话很重要。他们是谁，背景是什么，为什么这条推文是信号而非噪音。\n• **[值得思考]:** 恰好2句话。什么在被争论、被证实或被悬置。如是转推，区分原推观点和转推者评论。",
   "questions_en": ["question 1", "question 2", "question 3 (one must be skeptical)"],
-  "questions_zh": ["问题1", "问题2", "问题3（必须有一个带质疑性）"]
+  "questions_zh": ["问题1", "问题2", "问题3（必须有一个带质疑性）"],
+  "category": "industry | technical_frontier | career_community"
 }
 
 For sentinel conditions:
@@ -253,6 +340,31 @@ For sentinel conditions:
 QUESTIONS RULES:
 - questions_en: exactly 3 strings. Each must reference a specific named person, exact claim, or number from your summary. No question starting with "What is," "Can you explain," "How does." Exactly one must be skeptical.
 - questions_zh: 恰好3个字符串。每个必须引用摘要中的具体人名、主张或数字。禁止以"什么是"、"请解释"开头。必须有一个带质疑性。15-35汉字。
+
+CATEGORY RULES:
+- category: output exactly one of "industry", "technical_frontier", "career_community". Pick the dominant frame of the tweet — what makes this signal worth tracking. If two categories tie, pick the one closer to the named actor or claim.
+
+CATEGORY DEFINITIONS:
+
+1. industry — Company strategy, funding rounds, M&A, product launches, regulation/policy, market share dynamics, leadership changes at AI orgs.
+   GOOD: "@sama: Anthropic just cut API prices 80% — direct shot at our enterprise pricing" → industry (vendor pricing dynamics)
+   GOOD: "@elonmusk: xAI raised $5B at $50B post-money valuation" → industry (funding round)
+   BAD: "@karpathy: New paper on circuit tracing in Sonnet identifies 50K features" → NOT industry, this is technical_frontier
+   FAILURE MODE: Substitution test — if the named company were removed and the claim was a generic research result, would the tweet still be tweet-worthy? If yes → technical_frontier. If the tweet collapses without the named actor, → industry.
+
+2. technical_frontier — Research findings, new model architectures, training breakthroughs, benchmark advances, capability evaluations, novel datasets, agentic-system research.
+   GOOD: "@karpathy: SWE-bench Verified — DeepSeek-V4 hits 92%, beats Claude Opus 4 by 6pp" → technical_frontier (benchmark result)
+   GOOD: "@yi_tay: Mixture-of-depths paper cuts transformer FLOPs 40% with no accuracy hit" → technical_frontier (architecture research)
+   BAD: "@sama: We hired a new VP of Research from Meta" → NOT technical_frontier, this is industry (leadership move)
+   BAD: "@cursor_ai: We added Claude Sonnet 4.6 to the model picker" → NOT technical_frontier, this is industry (product integration)
+   FAILURE MODE: If the headline number is a price, fundraise, or layoff, it is not technical_frontier regardless of who tweeted it.
+
+3. career_community — Hiring/layoffs at AI orgs, comp data, interview prep, career advice from practitioners, community/culture stories, early-career and student-facing content.
+   GOOD: "@levelsio: OpenAI laid off 200 from Applied AI team, San Francisco hit hardest" → career_community (workforce impact)
+   GOOD: "@karpathy: 90% of AI courses teach the wrong things, here are 3 alternatives I'd actually recommend" → career_community (practitioner career advice)
+   GOOD: "@swyx: New-grad ML offers from FAANG dropped 35% YoY based on community data" → career_community (job-market data)
+   BAD: "@meta_ai: Cut AI infra costs 30% via custom inference stack" → NOT career_community — the news is cost engineering → industry
+   FAILURE MODE: Test — is the workforce/career angle the dominant frame, or a side detail? Headline number workforce-side (layoff count, comp, hiring spike) → career_community. Headline number product or research → route to that lane.
 
 BILINGUAL RULES:
 1. Never translate proper nouns. OpenAI stays OpenAI. Sam Altman stays Sam Altman. GPT-4o stays GPT-4o.
@@ -273,6 +385,16 @@ NOT_AI_RELEVANT — Use when: the story's news value does not depend on AI. Appl
 STRICT RULES:
 1. For quote tweets: clearly separate the original tweet's claim from the quote-tweeter's commentary.
 2. Engagement figures (likes, retweets) are context, not content. Do not lead with engagement numbers.`
+
+// ── Category enum (Spec C — per-article categorization) ──────────────────────
+// daily_news.category is NOT NULL CHECK (industry|technical_frontier|career_community).
+// Spec C migration backfilled existing rows from sources.category.
+const ALLOWED_CATEGORIES = ['industry', 'technical_frontier', 'career_community'] as const
+type Category = typeof ALLOWED_CATEGORIES[number]
+
+function isValidCategory(v: unknown): v is Category {
+  return typeof v === 'string' && (ALLOWED_CATEGORIES as readonly string[]).includes(v)
+}
 
 // ── Supabase helpers ──────────────────────────────────────────────────────────
 
@@ -295,20 +417,30 @@ interface LLMResult {
   summary_zh: string
   questions_en: string[] | null
   questions_zh: string[] | null
+  category: string | null
   sentinel: string | null
   llm_model: string
 }
 
+// arXiv abstracts run ~150–250 words. Without this header the LLM mis-applies the
+// 200-word INSUFFICIENT_CONTENT threshold to the abstract itself. The header tells
+// the model the abstract IS the article so it summarizes instead of rejecting.
+const ARXIV_USER_HEADER = `SOURCE_TYPE: arxiv
+CONTENT_KIND: This content is the title and abstract of an academic paper. The abstract IS the article — do not flag as INSUFFICIENT_CONTENT based on length alone. Treat any abstract of 50+ words as sufficient.
+
+`
+
 // Build OpenRouter (OpenAI-compatible) request body for article/tweet summarization.
 // Uses response_format: json_object (best-effort — not constrained decoding).
 // extractFirstJson() in callLLM() handles markdown-wrapped responses.
-function buildOpenRouterRequest(isTweet: boolean, content: string, model: string): object {
+function buildOpenRouterRequest(isTweet: boolean, content: string, model: string, sourceType: string): object {
   const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT_JSON : ARTICLE_SYSTEM_PROMPT_JSON
+  const header = sourceType === 'arxiv' ? ARXIV_USER_HEADER : ''
   return {
     model,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
+      { role: 'user', content: `${header}Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
     ],
     response_format: { type: 'json_object' },
     temperature: 0.3,
@@ -320,40 +452,44 @@ function buildOpenRouterRequest(isTweet: boolean, content: string, model: string
 // summary_en/summary_zh are pre-formatted bullet strings — pass through directly.
 function normalizeGemmaResponse(parsed: Record<string, unknown>, model: string): LLMResult {
   if (parsed.sentinel) {
-    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: String(parsed.sentinel), llm_model: model }
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, category: null, sentinel: String(parsed.sentinel), llm_model: model }
   }
 
   const en = Array.isArray(parsed.questions_en) ? (parsed.questions_en as string[]).slice(0, 3) : null
   const zh = Array.isArray(parsed.questions_zh) ? (parsed.questions_zh as string[]).slice(0, 3) : null
+  const category = typeof parsed.category === 'string' ? parsed.category : null
 
   return {
-    title_en:     String(parsed.title_en ?? ''),
-    title_zh:     String(parsed.title_zh ?? ''),
-    summary_en:   String(parsed.summary_en ?? ''),
-    summary_zh:   String(parsed.summary_zh ?? ''),
+    title_en: String(parsed.title_en ?? ''),
+    title_zh: String(parsed.title_zh ?? ''),
+    summary_en: String(parsed.summary_en ?? ''),
+    summary_zh: String(parsed.summary_zh ?? ''),
     questions_en: en,
     questions_zh: zh,
-    sentinel:     null,
-    llm_model:    model,
+    category,
+    sentinel: null,
+    llm_model: model,
   }
 }
 
 // Build a LLMResult from the existing Groq flat-text response format
 function groqResponseToResult(responseText: string): LLMResult {
   if (responseText === 'INSUFFICIENT_CONTENT' || responseText === 'NOT_AI_RELEVANT') {
-    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, sentinel: responseText, llm_model: 'llama-3.3-70b-versatile' }
+    return { title_en: '', title_zh: '', summary_en: '', summary_zh: '', questions_en: null, questions_zh: null, category: null, sentinel: responseText, llm_model: 'llama-3.3-70b-versatile' }
   }
   const en = parseJsonSection(responseText, 'QUESTIONS_EN')
   const zh = parseJsonSection(responseText, 'QUESTIONS_ZH')
+  const rawCategory = parseSection(responseText, 'CATEGORY')
   return {
-    title_en:     parseSection(responseText, 'TITLE_EN'),
-    title_zh:     parseSection(responseText, 'TITLE_ZH'),
-    summary_en:   parseSection(responseText, 'SUMMARY_EN'),
-    summary_zh:   parseSection(responseText, 'SUMMARY_ZH'),
+    title_en: parseSection(responseText, 'TITLE_EN'),
+    title_zh: parseSection(responseText, 'TITLE_ZH'),
+    summary_en: parseSection(responseText, 'SUMMARY_EN'),
+    summary_zh: parseSection(responseText, 'SUMMARY_ZH'),
     questions_en: en,
     questions_zh: zh,
-    sentinel:     null,
-    llm_model:    'llama-3.3-70b-versatile',
+    category: rawCategory || null,
+    sentinel: null,
+    llm_model: 'llama-3.3-70b-versatile',
   }
 }
 
@@ -381,11 +517,11 @@ function extractFirstJson(text: string): string {
 // Secondary: OpenRouter (model from OPENROUTER_MODEL — fast failures only)
 // Tertiary: Groq llama-3.3-70b (fast failures only — AbortError, TCP rejection, 429)
 // Non-429 non-2xx throws immediately — no fallback, fail the row.
-async function callLLM(isTweet: boolean, content: string): Promise<LLMResult> {
+async function callLLM(isTweet: boolean, content: string, sourceType: string): Promise<LLMResult> {
   const controller = new AbortController()
   const timerId = setTimeout(() => controller.abort(), 120000)
 
-  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('LLM_MODEL')!)
+  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('LLM_MODEL')!, sourceType)
 
   let trRes: Response
   try {
@@ -405,10 +541,10 @@ async function callLLM(isTweet: boolean, content: string): Promise<LLMResult> {
     clearTimeout(timerId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
       console.log('[TokenRouter] 120s timeout — no headers received, falling back to OpenRouter')
-      return await callOpenRouterFallback(isTweet, content)
+      return await callOpenRouterFallback(isTweet, content, sourceType)
     }
     console.log('[TokenRouter] unreachable, falling back to OpenRouter:', (fetchErr as Error).message)
-    return await callOpenRouterFallback(isTweet, content)
+    return await callOpenRouterFallback(isTweet, content, sourceType)
   }
 
   clearTimeout(timerId)
@@ -416,7 +552,7 @@ async function callLLM(isTweet: boolean, content: string): Promise<LLMResult> {
   if (trRes.status === 429) {
     const body429 = await trRes.text().catch(() => '')
     console.log(`[TokenRouter] 429 — falling back to OpenRouter. Body: ${body429.substring(0, 200)}`)
-    return await callOpenRouterFallback(isTweet, content)
+    return await callOpenRouterFallback(isTweet, content, sourceType)
   }
 
   if (!trRes.ok) {
@@ -434,16 +570,16 @@ async function callLLM(isTweet: boolean, content: string): Promise<LLMResult> {
     parsed = JSON.parse(extractFirstJson(textContent))
   } catch (err) {
     console.log(`[TokenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to OpenRouter.`)
-    return await callOpenRouterFallback(isTweet, content)
+    return await callOpenRouterFallback(isTweet, content, sourceType)
   }
   return normalizeGemmaResponse(parsed, Deno.env.get('LLM_MODEL')!)
 }
 
-async function callOpenRouterFallback(isTweet: boolean, content: string): Promise<LLMResult> {
+async function callOpenRouterFallback(isTweet: boolean, content: string, sourceType: string): Promise<LLMResult> {
   const controller = new AbortController()
   const connectionTimeoutId = setTimeout(() => controller.abort(), 8000)
 
-  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('OPENROUTER_MODEL')!)
+  const body = buildOpenRouterRequest(isTweet, content, Deno.env.get('OPENROUTER_MODEL')!, sourceType)
 
   let orRes: Response
   try {
@@ -463,10 +599,10 @@ async function callOpenRouterFallback(isTweet: boolean, content: string): Promis
     clearTimeout(connectionTimeoutId)
     if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
       console.log('[OpenRouter] 8s timeout — no headers received, falling back to Groq')
-      return await callGroqFallback(isTweet, content)
+      return await callGroqFallback(isTweet, content, sourceType)
     }
     console.log('[OpenRouter] unreachable, falling back to Groq:', (fetchErr as Error).message)
-    return await callGroqFallback(isTweet, content)
+    return await callGroqFallback(isTweet, content, sourceType)
   }
 
   clearTimeout(connectionTimeoutId)
@@ -477,7 +613,7 @@ async function callOpenRouterFallback(isTweet: boolean, content: string): Promis
       ? `DAILY CAP HIT — wait until midnight UTC reset. Body: ${body429.substring(0, 200)}`
       : `MODEL OVERLOADED — switch OPENROUTER_MODEL to a less-contested model. Body: ${body429.substring(0, 200)}`
     console.log(`[OpenRouter] 429 (${reason}), falling back to Groq`)
-    return await callGroqFallback(isTweet, content)
+    return await callGroqFallback(isTweet, content, sourceType)
   }
 
   if (!orRes.ok) {
@@ -494,7 +630,7 @@ async function callOpenRouterFallback(isTweet: boolean, content: string): Promis
     parsed = JSON.parse(extractFirstJson(textContent))
   } catch (err) {
     console.log(`[OpenRouter] JSON parse failed: ${(err as Error).message}. Payload: ${textContent.substring(0, 100)}. Falling back to Groq.`)
-    return await callGroqFallback(isTweet, content)
+    return await callGroqFallback(isTweet, content, sourceType)
   }
   return normalizeGemmaResponse(parsed, Deno.env.get('OPENROUTER_MODEL')!)
 }
@@ -502,8 +638,9 @@ async function callOpenRouterFallback(isTweet: boolean, content: string): Promis
 // Groq fallback — uses existing flat-text prompts and parsers.
 // Explicit 30s AbortController required: no CF wall-clock kill on Supabase Edge Functions.
 // A hung Groq socket stalls processBatch() indefinitely without this timeout.
-async function callGroqFallback(isTweet: boolean, content: string): Promise<LLMResult> {
+async function callGroqFallback(isTweet: boolean, content: string, sourceType: string): Promise<LLMResult> {
   const systemPrompt = isTweet ? TWEET_SYSTEM_PROMPT : ARTICLE_SYSTEM_PROMPT
+  const header = sourceType === 'arxiv' ? ARXIV_USER_HEADER : ''
   const controller = new AbortController()
   const timerId = setTimeout(() => controller.abort(), 30000)
   try {
@@ -519,7 +656,7 @@ async function callGroqFallback(isTweet: boolean, content: string): Promise<LLMR
         max_tokens: 2000,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
+          { role: 'user', content: `${header}Summarize this ${isTweet ? 'tweet' : 'article'}:\n\n${content}` },
         ],
       }),
       signal: controller.signal,
@@ -580,8 +717,31 @@ async function processBatch() {
     return
   }
 
-  console.log(`Processing ${articles.length} articles`)
-  await Promise.all(articles.map(a => processArticle(a)))
+  // Follow-up SELECT for source metadata. claim_pending_batch RPC stays unchanged
+  // (per architect: avoid a DB function migration); one extra fetch per batch on
+  // Edge Functions is free of subrequest pressure.
+  const sourceIds = [...new Set(articles.map(a => a.source_id))]
+  const inList = sourceIds.map(id => `"${id}"`).join(',')
+  const srcRes = await fetch(
+    `${SB_URL()}/rest/v1/sources?id=in.(${inList})&select=id,category,source_type`,
+    { headers: SB_HEADERS() },
+  )
+  if (!srcRes.ok) {
+    const errBody = await srcRes.text().catch(() => '(unreadable)')
+    throw new Error(`sources lookup failed (${srcRes.status}): ${errBody}`)
+  }
+  const sourceRows: { id: string; category: string; source_type: string }[] = await srcRes.json()
+  const sourceMap = new Map(sourceRows.map(s => [s.id, { source_type: s.source_type, source_category: s.category }]))
+
+  console.log(`Processing ${articles.length} articles across ${sourceIds.length} sources`)
+  await Promise.all(articles.map(a => {
+    const meta = sourceMap.get(a.source_id)
+    if (!meta) {
+      console.error(`[processBatch] source_id ${a.source_id} missing from sources lookup — skipping article ${a.id}`)
+      return Promise.resolve()
+    }
+    return processArticle({ ...a, source_type: meta.source_type, source_category: meta.source_category })
+  }))
   console.log('Done.')
 }
 
@@ -676,6 +836,7 @@ async function insertAndMarkDone(
   engagement: Record<string, number | string> | null,
   published_at: string | null,
   llm_model: string,
+  category: Category,
 ) {
   await fetch(`${SB_URL()}/rest/v1/daily_news`, {
     method: 'POST',
@@ -695,6 +856,7 @@ async function insertAndMarkDone(
       engagement,
       published_at,
       llm_model,
+      category,
     }),
   })
 
@@ -749,10 +911,10 @@ function parseJsonSection(text: string, tag: string): string[] | null {
 const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
 
 const ZH_AI_KEYWORDS = [
-  '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
-  '生成式','多模态','算力','芯片','英伟达',
-  '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
-  'DeepSeek','百川','商汤','科大讯飞','华为盘古',
+  '人工智能', '大模型', '语言模型', '神经网络', '深度学习', '机器学习',
+  '生成式', '多模态', '算力', '芯片', '英伟达',
+  '智谱', '文心', '通义', '混元', '月之暗面', '零一万物', '阶跃星辰',
+  'DeepSeek', '百川', '商汤', '科大讯飞', '华为盘古',
 ]
 
 function hasAISignal(text: string): boolean {
@@ -763,7 +925,7 @@ function hasAISignal(text: string): boolean {
 // ── Article pipeline ──────────────────────────────────────────────────────────
 
 async function processArticle(
-  article: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } },
+  article: { id: string; source_id: string; source_type: string; source_category: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } },
 ) {
   try {
     const rawContent = stripHtml((article.raw_content || '').trim())
@@ -780,7 +942,7 @@ async function processArticle(
 
     // Determine engagement: tweets carry likes/retweets from ingest-builders metadata;
     // RSS/other articles get HN score if the article was posted to Hacker News
-    const isTweet  = article.url.includes('x.com') && article.url.includes('/status/')
+    const isTweet = article.url.includes('x.com') && article.url.includes('/status/')
     const isGitHub = article.url.startsWith('https://github.com/')
     let engagement: Record<string, number | string> | null = null
     if (isTweet && article.metadata) {
@@ -815,7 +977,7 @@ async function processArticle(
     // Resolve published_at: prefer metadata (from ingestion), fall back to HTML meta tag
     const published_at = article.published_at || fetched.published_at || null
 
-    const result = await callLLM(isTweet, contentForLLM)
+    const result = await callLLM(isTweet, contentForLLM, article.source_type)
 
     if (result.sentinel === 'INSUFFICIENT_CONTENT') {
       await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
@@ -844,7 +1006,12 @@ async function processArticle(
     const summary = summary_en || summary_zh || ''
     const questions = (questions_en && questions_zh) ? { en: questions_en, zh: questions_zh } : null
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model)
+    // Write-time category fallback: if the LLM emitted a valid category, use it;
+    // otherwise fall back to sources.category (always populated, NOT NULL on sources).
+    // This guarantees daily_news.category is never NULL — the schema's NOT NULL CHECK holds.
+    const finalCategory: Category = isValidCategory(result.category) ? result.category : (article.source_category as Category)
+
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, finalCategory)
     console.log(`OK: ${article.url}`)
 
   } catch (err: unknown) {

@@ -1,11 +1,23 @@
+import { renderBrief, type Channel } from './render'
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
-  FEISHU_WEBHOOK_URL: string            // required
-  SLACK_WEBHOOK_URL?: string            // optional
-  DISCORD_WEBHOOK_URL?: string          // optional
-  NOTION_API_KEY?: string               // optional
-  NOTION_DATABASE_ID?: string           // optional
+  FEISHU_WEBHOOK_URL?: string            // optional — skip channel if missing
+  SLACK_WEBHOOK_URL?: string             // optional
+  DISCORD_WEBHOOK_URL?: string           // optional
+  TELEGRAM_BOT_TOKEN?: string            // optional (paired with TELEGRAM_CHAT_ID)
+  TELEGRAM_CHAT_ID?: string              // optional
+}
+
+interface TrendBriefRow {
+  synthesis_en: string | null
+  synthesis_zh: string | null
+}
+
+interface DigestSentRow {
+  id: string
+  channel: Channel
 }
 
 const SB = (env: Env) => ({
@@ -14,317 +26,223 @@ const SB = (env: Env) => ({
   'Content-Type': 'application/json',
 })
 
-interface Article {
-  id: string
-  title_en: string | null
-  title_zh: string | null
-  summary_en: string | null
-  summary_zh: string | null
-  url: string
-  source_id: string
-  created_at: string
-  engagement?: { likes?: number; retweets?: number } | null
+function channelLang(channel: Channel): 'synthesis_zh' | 'synthesis_en' {
+  return channel === 'feishu' ? 'synthesis_zh' : 'synthesis_en'
 }
 
-interface Source {
-  id: string
-  name: string
-  metadata?: { bio_map?: Record<string, string> }
+function configuredChannels(env: Env): Channel[] {
+  const out: Channel[] = []
+  if (env.FEISHU_WEBHOOK_URL) out.push('feishu')
+  if (env.SLACK_WEBHOOK_URL) out.push('slack')
+  if (env.DISCORD_WEBHOOK_URL) out.push('discord')
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) out.push('telegram')
+  return out
 }
 
-interface TrendBrief {
-  synthesis_en: string | null
-  synthesis_zh: string | null
+// ── Channel senders ──────────────────────────────────────────────────────────
+async function sendFeishu(synthesis: string, today: string, env: Env): Promise<void> {
+  const { bodies } = renderBrief('feishu', synthesis, today)
+  const res = await fetch(env.FEISHU_WEBHOOK_URL!, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bodies[0]),
+  })
+  if (!res.ok) throw new Error(`Feishu ${res.status}: ${(await res.text()).slice(0, 300)}`)
 }
 
-function extractBullets(summary: string | null, count: number): string {
-  if (!summary) return ''
-  return summary
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l.startsWith('•'))
-    .slice(0, count)
-    .join('\n')
+async function sendSlack(synthesis: string, today: string, env: Env): Promise<void> {
+  const { bodies } = renderBrief('slack', synthesis, today)
+  const res = await fetch(env.SLACK_WEBHOOK_URL!, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bodies[0]),
+  })
+  if (!res.ok) throw new Error(`Slack ${res.status}: ${(await res.text()).slice(0, 300)}`)
 }
 
-// ── Feishu (Chinese, unchanged format from send-feishu-digest) ────────────────
-function buildFeishuCard(
-  articles: Article[],
-  trendBrief: TrendBrief | null,
-  sourceMap: Record<string, string>,
-  bioMap: Record<string, string>,
-  today: string,
-) {
-  const elements: object[] = [
+async function sendDiscord(synthesis: string, today: string, env: Env): Promise<void> {
+  const { bodies } = renderBrief('discord', synthesis, today)
+  const res = await fetch(env.DISCORD_WEBHOOK_URL!, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bodies[0]),
+  })
+  if (!res.ok) throw new Error(`Discord ${res.status}: ${(await res.text()).slice(0, 300)}`)
+}
+
+// Telegram: sequential await across chunks. Architect-approved exception to
+// NFR §9 — concurrent dispatch races and reorders messages, breaking reading
+// flow.
+async function sendTelegram(synthesis: string, today: string, env: Env): Promise<void> {
+  const { bodies } = renderBrief('telegram', synthesis, today)
+  const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`
+  for (let i = 0; i < bodies.length; i++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, ...(bodies[i] as object) }),
+    })
+    if (!res.ok) throw new Error(`Telegram chunk ${i + 1}/${bodies.length} ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  }
+}
+
+async function sendOne(channel: Channel, synthesis: string, today: string, env: Env): Promise<void> {
+  switch (channel) {
+    case 'feishu': return sendFeishu(synthesis, today, env)
+    case 'slack': return sendSlack(synthesis, today, env)
+    case 'discord': return sendDiscord(synthesis, today, env)
+    case 'telegram': return sendTelegram(synthesis, today, env)
+  }
+}
+
+// ── digest_sent helpers ──────────────────────────────────────────────────────
+async function claimChannels(channels: Channel[], today: string, env: Env): Promise<DigestSentRow[]> {
+  if (channels.length === 0) return []
+  const rows = channels.map(channel => ({ channel, anchor_date: today, status: 'pending' }))
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/digest_sent?on_conflict=channel,anchor_date`,
     {
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**${articles.length} articles today · ${today}**` },
-    },
-    { tag: 'hr' },
-  ]
-
-  if (trendBrief?.synthesis_zh) {
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `**趋势简报**\n${trendBrief.synthesis_zh.substring(0, 2000)}` },
-    })
-    elements.push({ tag: 'hr' })
-  }
-
-  if (articles.length === 0) {
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: '_No articles ingested in the last 24 hours._' },
-    })
-  }
-
-  for (const article of articles) {
-    const xHandle = article.url.match(/x\.com\/([^/]+)\/status\//)?.[1]
-    const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
-    const sourceName = xHandle
-      ? `X - @${xHandle}${xBio ? ` - **${xBio}**` : ''}`
-      : (sourceMap[article.source_id] || 'Unknown')
-    const title = article.title_zh || article.title_en || 'Untitled'
-    const bullets = extractBullets(article.summary_zh, 3)
-    elements.push({
-      tag: 'div',
-      text: {
-        tag: 'lark_md',
-        content: `**[${title}](${article.url})**\n${sourceName}${article.engagement?.likes ? ` · 🔥 **${article.engagement.likes}** likes` : ''}${bullets ? '\n' + bullets : ''}`,
+      method: 'POST',
+      headers: {
+        ...SB(env),
+        'Prefer': 'return=representation,resolution=ignore-duplicates',
       },
-    })
-    elements.push({ tag: 'hr' })
-  }
-
-  return {
-    msg_type: 'interactive',
-    card: {
-      header: { title: { content: 'Daily Tech Digest', tag: 'plain_text' }, template: 'blue' },
-      elements,
+      body: JSON.stringify(rows),
     },
-  }
-}
-
-async function sendFeishu(
-  articles: Article[],
-  trendBrief: TrendBrief | null,
-  sourceMap: Record<string, string>,
-  bioMap: Record<string, string>,
-  today: string,
-  env: Env,
-): Promise<void> {
-  const card = buildFeishuCard(articles, trendBrief, sourceMap, bioMap, today)
-  const res = await fetch(env.FEISHU_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(card),
-  })
+  )
   if (!res.ok) {
-    const errText = await res.text()
-    console.error(`Feishu failed: ${res.status} — ${errText.substring(0, 300)}`)
-    return
+    console.error(`claim failed: ${res.status} — ${(await res.text()).slice(0, 300)}`)
+    return []
   }
-  console.log(`Feishu sent: ${articles.length} articles`)
+  const returned: DigestSentRow[] = await res.json()
+  return returned
 }
 
-// ── Slack (English) ───────────────────────────────────────────────────────────
-async function sendSlack(
-  articles: Article[],
-  trendBrief: TrendBrief | null,
-  today: string,
-  env: Env,
-): Promise<void> {
-  if (!env.SLACK_WEBHOOK_URL) return
-
-  const blocks: object[] = [
-    { type: 'header', text: { type: 'plain_text', text: `Daily Tech Digest — ${today}` } },
-  ]
-
-  if (trendBrief?.synthesis_en) {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*Trend Brief*\n${trendBrief.synthesis_en.substring(0, 2900)}` },
-    })
-    blocks.push({ type: 'divider' })
-  }
-
-  for (const article of articles.slice(0, 10)) {
-    const title = article.title_en || article.title_zh || 'Untitled'
-    const bullets = extractBullets(article.summary_en, 3)
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*<${article.url}|${title.substring(0, 150)}>*\n${bullets}` },
-    })
-  }
-
-  const res = await fetch(env.SLACK_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ blocks }),
-  })
-  if (!res.ok) console.error(`Slack failed: ${res.status} — ${await res.text().catch(() => '')}`)
-  else console.log('Slack sent')
-}
-
-// ── Discord (English, embed format) ──────────────────────────────────────────
-async function sendDiscord(
-  articles: Article[],
-  trendBrief: TrendBrief | null,
-  today: string,
-  env: Env,
-): Promise<void> {
-  if (!env.DISCORD_WEBHOOK_URL) return
-
-  const embeds: object[] = []
-
-  if (trendBrief?.synthesis_en) {
-    embeds.push({
-      title: `Trend Brief — ${today}`,
-      description: trendBrief.synthesis_en.substring(0, 4096),
-      color: 0x3B82F6,
-    })
-  }
-
-  for (const article of articles.slice(0, 5)) {
-    const title = article.title_en || article.title_zh || 'Untitled'
-    const bullets = extractBullets(article.summary_en, 2)
-    embeds.push({
-      title: title.substring(0, 256),
-      url: article.url,
-      description: bullets.substring(0, 4096),
-      color: 0x6B7280,
-    })
-  }
-
-  const res = await fetch(env.DISCORD_WEBHOOK_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ embeds }),
-  })
-  if (!res.ok) console.error(`Discord failed: ${res.status} — ${await res.text().catch(() => '')}`)
-  else console.log('Discord sent')
-}
-
-// ── Notion (English, new page in database) ────────────────────────────────────
-async function sendNotion(
-  articles: Article[],
-  trendBrief: TrendBrief | null,
-  today: string,
-  env: Env,
-): Promise<void> {
-  if (!env.NOTION_API_KEY || !env.NOTION_DATABASE_ID) return
-
-  const children: object[] = []
-
-  if (trendBrief?.synthesis_en) {
-    children.push({
-      object: 'block', type: 'heading_2',
-      heading_2: { rich_text: [{ type: 'text', text: { content: 'Trend Brief' } }] },
-    })
-    const syn = trendBrief.synthesis_en
-    for (let i = 0; i < syn.length; i += 2000) {
-      children.push({
-        object: 'block', type: 'paragraph',
-        paragraph: { rich_text: [{ type: 'text', text: { content: syn.slice(i, i + 2000) } }] },
-      })
-    }
-    children.push({ object: 'block', type: 'divider', divider: {} })
-  }
-
-  children.push({
-    object: 'block', type: 'heading_2',
-    heading_2: { rich_text: [{ type: 'text', text: { content: 'Articles' } }] },
-  })
-
-  for (const article of articles) {
-    const title = (article.title_en || article.title_zh || 'Untitled').substring(0, 100)
-    const bullets = extractBullets(article.summary_en, 3)
-    children.push({
-      object: 'block', type: 'bulleted_list_item',
-      bulleted_list_item: {
-        rich_text: [
-          { type: 'text', text: { content: title, link: { url: article.url } } },
-          { type: 'text', text: { content: bullets ? `\n${bullets}` : '' } },
-        ],
+async function markSkippedEmpty(channels: Channel[], today: string, env: Env): Promise<void> {
+  if (channels.length === 0) return
+  const rows = channels.map(channel => ({
+    channel, anchor_date: today, status: 'skipped_empty_brief',
+  }))
+  // ignore-duplicates: do NOT overwrite a prior 'sent'/'failed' status if brief
+  // was deleted mid-day. Only inserts new rows for channels never claimed today.
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/digest_sent?on_conflict=channel,anchor_date`,
+    {
+      method: 'POST',
+      headers: {
+        ...SB(env),
+        'Prefer': 'resolution=ignore-duplicates',
       },
-    })
-  }
-
-  const res = await fetch('https://api.notion.com/v1/pages', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.NOTION_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Notion-Version': '2022-06-28',
+      body: JSON.stringify(rows),
     },
-    body: JSON.stringify({
-      parent: { database_id: env.NOTION_DATABASE_ID },
-      properties: {
-        title: { title: [{ type: 'text', text: { content: `Tech Digest — ${today}` } }] },
-      },
-      children,
-    }),
-  })
-  if (!res.ok) console.error(`Notion failed: ${res.status} — ${await res.text().catch(() => '')}`)
-  else console.log('Notion page created')
+  )
+  if (!res.ok) console.error(`markSkippedEmpty failed: ${res.status} — ${(await res.text()).slice(0, 300)}`)
 }
 
-// ── Main handler ──────────────────────────────────────────────────────────────
+async function updateStatus(id: string, status: 'sent' | 'failed', lastError: string | null, env: Env): Promise<void> {
+  const body: Record<string, unknown> = { status, updated_at: new Date().toISOString() }
+  if (lastError !== null) body.last_error = lastError
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/digest_sent?id=eq.${id}`,
+    { method: 'PATCH', headers: SB(env), body: JSON.stringify(body) },
+  )
+  if (!res.ok) console.error(`updateStatus ${id} failed: ${res.status}`)
+}
+
+async function bulkMarkSent(ids: string[], env: Env): Promise<void> {
+  if (ids.length === 0) return
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/digest_sent?id=in.(${ids.join(',')})`,
+    {
+      method: 'PATCH',
+      headers: SB(env),
+      body: JSON.stringify({ status: 'sent', last_error: null, updated_at: new Date().toISOString() }),
+    },
+  )
+  if (!res.ok) console.error(`bulkMarkSent failed: ${res.status}`)
+}
+
+// ── Main handler ─────────────────────────────────────────────────────────────
 export default {
   async fetch() {
     return new Response('send-digest is running')
   },
 
   async scheduled(_event: ScheduledEvent, env: Env) {
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
-    const today = new Date().toISOString().split('T')[0]
+    // anchorDate = yesterday UTC. The 00:30 UTC delivery covers the UTC day that
+    // just closed (8 PM EDT yesterday → 8 PM EDT today during DST). Fires 5 min
+    // after the 00:25 UTC pg_cron pre-warm of generate-trend-brief, which writes
+    // the trend_briefs row keyed on this same anchor_date.
+    const nowUtc = new Date()
+    const todayUtcStart = `${nowUtc.toISOString().slice(0, 10)}T00:00:00Z`
+    const anchorDate = new Date(nowUtc.getTime() - 86_400_000).toISOString().slice(0, 10)
+    const channels = configuredChannels(env)
 
-    // Fetch articles, sources, and today's trend brief in parallel
-    const [articlesRes, sourcesRes, trendBriefRes] = await Promise.all([
-      fetch(
-        `${env.SUPABASE_URL}/rest/v1/daily_news?created_at=gte.${since}&order=created_at.desc&limit=10&select=id,title_en,title_zh,summary_en,summary_zh,url,source_id,created_at,engagement`,
-        { headers: SB(env) }
-      ),
-      fetch(
-        `${env.SUPABASE_URL}/rest/v1/sources?select=id,name,metadata`,
-        { headers: SB(env) }
-      ),
-      fetch(
-        `${env.SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${today}&step_days=eq.1&order=generated_at.desc&limit=1&select=synthesis_en,synthesis_zh`,
-        { headers: SB(env) }
-      ),
-    ])
-
-    if (!articlesRes.ok) {
-      console.error(`Supabase articles fetch failed: ${articlesRes.status}`)
+    if (channels.length === 0) {
+      console.log('No channels configured; nothing to send.')
       return
     }
-    if (!sourcesRes.ok) {
-      console.error(`Supabase sources fetch failed: ${sourcesRes.status}`)
+
+    // 1. Fetch the brief for yesterday's anchor with freshness gate (must be
+    // generated by tonight's pre-warm, not a stale cached row)
+    const briefRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/trend_briefs` +
+      `?anchor_date=eq.${anchorDate}` +
+      `&step_days=eq.1` +
+      `&generated_at=gte.${encodeURIComponent(todayUtcStart)}` +
+      `&order=generated_at.desc&limit=1&select=synthesis_en,synthesis_zh`,
+      { headers: SB(env) },
+    )
+    if (!briefRes.ok) {
+      console.error(`trend_briefs fetch failed: ${briefRes.status} — ${(await briefRes.text()).slice(0, 300)}`)
       return
     }
-    const articles: Article[] = await articlesRes.json()
-    const sources: Source[] = await sourcesRes.json()
-    const trendBriefs: TrendBrief[] = trendBriefRes.ok ? await trendBriefRes.json() : []
-    const trendBrief: TrendBrief | null = trendBriefs[0] ?? null
+    const briefs: TrendBriefRow[] = await briefRes.json()
+    const brief = briefs[0]
 
-    console.log(`Fetched ${articles.length} articles, trend brief: ${trendBrief ? 'present' : 'absent'}`)
-
-    const sourceMap: Record<string, string> = {}
-    const bioMap: Record<string, string> = {}
-    for (const s of sources) {
-      sourceMap[s.id] = s.name
-      if (s.metadata?.bio_map) Object.assign(bioMap, s.metadata.bio_map)
+    // 2. Empty-brief fallback — spec §2
+    if (!brief) {
+      console.log(`No brief for ${anchorDate}; marking skipped_empty_brief on ${channels.join(',')}`)
+      await markSkippedEmpty(channels, anchorDate, env)
+      return
     }
 
-    // Deliver to all channels independently — one failure does not block others
-    await Promise.all([
-      sendFeishu(articles, trendBrief, sourceMap, bioMap, today, env).catch(e => console.error('Feishu error:', e)),
-      sendSlack(articles, trendBrief, today, env).catch(e => console.error('Slack error:', e)),
-      sendDiscord(articles, trendBrief, today, env).catch(e => console.error('Discord error:', e)),
-      sendNotion(articles, trendBrief, today, env).catch(e => console.error('Notion error:', e)),
-    ])
+    // 3. Filter channels whose target language is null — spec §2 "null target rule"
+    const deliverableChannels = channels.filter(c => brief[channelLang(c)])
+    if (deliverableChannels.length === 0) {
+      console.log(`All configured channels have null target language for ${anchorDate}; skipping.`)
+      await markSkippedEmpty(channels, anchorDate, env)
+      return
+    }
 
-    console.log(`Digest complete for ${today}`)
+    // 4. Claim (idempotent insert). Only deliver to channels we actually claimed.
+    const claimed = await claimChannels(deliverableChannels, anchorDate, env)
+    if (claimed.length === 0) {
+      console.log(`All channels already claimed for ${anchorDate}; skipping.`)
+      return
+    }
+
+    // 5. Parallel sends
+    const results = await Promise.allSettled(
+      claimed.map(row => sendOne(row.channel, brief[channelLang(row.channel)]!, anchorDate, env)),
+    )
+
+    // 6. Status updates — batch sent, individual failed (to preserve last_error)
+    const sentIds: string[] = []
+    for (let i = 0; i < results.length; i++) {
+      const row = claimed[i]
+      const r = results[i]
+      if (r.status === 'fulfilled') {
+        sentIds.push(row.id)
+        console.log(`✓ ${row.channel}`)
+      } else {
+        const msg = String(r.reason?.message ?? r.reason ?? '').slice(0, 500)
+        console.error(`✗ ${row.channel}: ${msg}`)
+        await updateStatus(row.id, 'failed', msg, env)
+      }
+    }
+    await bulkMarkSent(sentIds, env)
+
+    console.log(`Digest ${anchorDate}: ${sentIds.length}/${claimed.length} sent`)
   },
 }

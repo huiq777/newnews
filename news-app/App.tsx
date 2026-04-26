@@ -108,11 +108,11 @@ export default function App() {
 
     let query = supabase
       .from('daily_news')
-      .select(cat === 'all' ? 'id' : 'id, sources!inner(category)', { count: 'exact', head: true })
+      .select('id', { count: 'exact', head: true })
       .gt('created_at', latestDate)
 
     if (cat !== 'all') {
-      query = query.eq('sources.category', cat)
+      query = query.eq('category', cat)
     }
 
     if (dr) {
@@ -163,17 +163,13 @@ export default function App() {
     setHasMore(true)
     feedOffsetRef.current = 0
 
-    const selectQuery = activeCategory === 'all'
-      ? 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement'
-      : 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement, sources!inner(category)'
-
     let query = supabase
       .from('daily_news')
-      .select(selectQuery)
+      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
       .order('created_at', { ascending: false })
 
     if (activeCategory !== 'all') {
-      query = query.eq('sources.category', activeCategory)
+      query = query.eq('category', activeCategory)
     }
 
     if (dateRange) {
@@ -215,17 +211,13 @@ export default function App() {
     setLoadingMore(true)
     const offset = feedOffsetRef.current
 
-    const selectQuery = activeCategory === 'all'
-      ? 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement'
-      : 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement, sources!inner(category)'
-
     let query = supabase
       .from('daily_news')
-      .select(selectQuery)
+      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
       .order('created_at', { ascending: false })
 
     if (activeCategory !== 'all') {
-      query = query.eq('sources.category', activeCategory)
+      query = query.eq('category', activeCategory)
     }
 
     if (dateRange) {

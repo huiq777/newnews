@@ -58,6 +58,66 @@ function extractPodcasts(data: unknown): PodcastEpisode[] {
   return []
 }
 
+// Nowcoder discuss/feed pages embed the post body in
+// <script>window.__INITIAL_STATE__ = {...}</script>. The structure is
+// __INITIAL_STATE__.prefetchData["2"].ssrCommonData.contentData.content (HTML
+// fragment). The documented JSON detail endpoint returns 404, so we scrape
+// the SSR state instead. Returns "" on any parse failure — caller falls back
+// to title-only.
+function extractNowcoderContent(html: string): string {
+  const marker = 'window.__INITIAL_STATE__'
+  const markerIdx = html.indexOf(marker)
+  if (markerIdx === -1) return ''
+  // Find the first '{' after the assignment then balance-match to its closing brace.
+  // String-aware so quoted braces inside JSON values do not break the count.
+  const braceStart = html.indexOf('{', markerIdx)
+  if (braceStart === -1) return ''
+  let depth = 0, inString = false, isEscaped = false, end = -1
+  for (let i = braceStart; i < html.length; i++) {
+    const ch = html[i]
+    if (isEscaped) { isEscaped = false; continue }
+    if (ch === '\\') { isEscaped = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (!inString) {
+      if (ch === '{') depth++
+      else if (ch === '}') { depth--; if (depth === 0) { end = i; break } }
+    }
+  }
+  if (end === -1) return ''
+  let state: unknown
+  try {
+    state = JSON.parse(html.slice(braceStart, end + 1))
+  } catch {
+    return ''
+  }
+  // Walk the known path, then fall back to a deep search for `content` if the
+  // shape shifts. Nowcoder's frontend is third-party so the path is brittle.
+  const fromKnownPath = (() => {
+    try {
+      const s = state as { prefetchData?: Record<string, { ssrCommonData?: { contentData?: { content?: string } } }> }
+      const data = s.prefetchData
+      if (!data) return ''
+      for (const key of Object.keys(data)) {
+        const c = data[key]?.ssrCommonData?.contentData?.content
+        if (typeof c === 'string' && c.length > 0) return c
+      }
+      return ''
+    } catch { return '' }
+  })()
+  const html_ = fromKnownPath
+  if (!html_) return ''
+  // Strip HTML tags, decode common entities, collapse whitespace.
+  return html_
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&#\d+;/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 // Extract @handle from tweet URL: https://x.com/karpathy/status/... → "karpathy"
 function extractAuthor(url: string): string | null {
   const match = url.match(/x\.com\/([^/]+)\/status\//)
@@ -500,7 +560,7 @@ export default {
           const url = `https://github.com${repoPath}`
           const repoName = repoPath.slice(1)
           const raw_content = `${repoName}${desc ? ': ' + desc : ''}${stars ? ' (★ ' + stars + ' stars today)' : ''}`
-          newRows.push({ source_id: githubTrendingSource.id, url, raw_content, status: 'pending', metadata: { stars: stars ? parseInt(stars) : 0 } })
+          newRows.push({ source_id: githubTrendingSource.id, url, raw_content, status: 'pending', metadata: { stars: stars ? parseInt(stars) : 0 }, published_at: null })
         }
         console.log(`GitHub Trending: ${ghRepos.length} repos queued`)
       } else {
@@ -547,7 +607,13 @@ export default {
       }
     }
 
-    // Nowcoder — undocumented public JSON API, no auth
+    // Nowcoder — undocumented public JSON API, no auth.
+    // Hot-list returns title only; the post body is server-rendered into the
+    // detail page's <script>window.__INITIAL_STATE__ = ...</script>. The
+    // documented JSON detail endpoint (/api/sparta/discuss-pc/detail) returns
+    // 404, so we scrape the SSR state instead. Top 5 only — every detail page
+    // is one extra subrequest, and the hot list is sorted; items past the top
+    // few rarely deliver the AI signal we want.
     if (nowcoderSource) {
       const ts = Date.now()
       const ncRes = await fetch(`${NOWCODER_HOT_URL}?size=20&_=${ts}&t=`, {
@@ -555,16 +621,39 @@ export default {
       })
       if (ncRes.ok) {
         const typed = await ncRes.json() as { data?: { result?: { id: string; uuid?: string; title: string; type: number }[] } }
-        const items = typed?.data?.result ?? []
+        const items = (typed?.data?.result ?? []).filter(it => it.title)
+        const topItems = items.slice(0, 5)
         const countBefore = newRows.length
-        for (const item of items) {
-          if (!item.title) continue
+
+        // Parallel detail fetch — one HTML scrape per top item. Failure on any
+        // single item falls back to title-only (matches today's behaviour, no
+        // regression).
+        const details = await Promise.all(topItems.map(async (item) => {
           const url = item.type === 74
             ? `https://www.nowcoder.com/feed/main/detail/${item.uuid}`
             : `https://www.nowcoder.com/discuss/${item.id}`
-          newRows.push({ source_id: nowcoderSource.id, url, raw_content: item.title, status: 'pending', metadata: null })
+          let body = ''
+          try {
+            const detailRes = await fetch(url, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsProject/1.0)' },
+            })
+            if (detailRes.ok) {
+              const html = await detailRes.text()
+              body = extractNowcoderContent(html)
+            } else {
+              console.error(`Nowcoder detail ${url} failed: ${detailRes.status}`)
+            }
+          } catch (err) {
+            console.error(`Nowcoder detail ${url} error:`, (err as Error).message)
+          }
+          return { item, url, body }
+        }))
+
+        for (const { item, url, body } of details) {
+          const raw_content = body ? `${item.title}\n\n${body}` : item.title
+          newRows.push({ source_id: nowcoderSource.id, url, raw_content, status: 'pending', metadata: null, published_at: null })
         }
-        console.log(`Nowcoder: ${newRows.length - countBefore} items queued`)
+        console.log(`Nowcoder: ${newRows.length - countBefore} items queued (${details.filter(d => d.body).length} with body)`)
       } else {
         console.error(`Nowcoder fetch failed: ${ncRes.status}`)
       }
@@ -604,18 +693,24 @@ export default {
     }
 
     // ── Reddit — public JSON API, one call per subreddit ─────────────────────
+    // UA must include a real user handle per Reddit's API guidelines —
+    // a generic UA gets rate-limited (429) or blocked (403). /u/huiq777 is the
+    // user's actual Reddit handle.
+    // top.json?t=day gives the day's most upvoted posts (signal-rich) instead of
+    // hot.json's recency-biased mix. selftext is the full post body for text
+    // posts; link posts (is_self=false) only carry a title.
     for (const src of redditSources) {
       const subreddit = src.name.replace('Reddit r/', '')
       const rdRes = await fetch(
-        `https://www.reddit.com/r/${subreddit}/hot.json?limit=25`,
-        { headers: { 'User-Agent': 'NewsProject/1.0' } }
+        `https://www.reddit.com/r/${subreddit}/top.json?t=day&limit=25`,
+        { headers: { 'User-Agent': 'web:NewsProject:v1.0 (by /u/huiq777)' } }
       )
       if (!rdRes.ok) {
         console.error(`Reddit r/${subreddit} fetch failed: ${rdRes.status}`)
         continue
       }
       const rdData = await rdRes.json() as {
-        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; subreddit: string; created_utc: number } }[] }
+        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; selftext?: string; subreddit: string; created_utc: number } }[] }
       }
       const posts = rdData?.data?.children ?? []
       const countBefore = newRows.length
@@ -624,10 +719,12 @@ export default {
         const url = post.is_self
           ? `https://reddit.com${post.permalink}`
           : post.url
+        const titleLine = `r/${post.subreddit}: ${post.title}`
+        const bodyLine  = post.is_self && post.selftext ? `\n\n${post.selftext}` : ''
         newRows.push({
           source_id: src.id,
           url,
-          raw_content: `r/${post.subreddit}: ${post.title}`,
+          raw_content: titleLine + bodyLine,
           status: 'pending',
           metadata: { score: post.score, num_comments: post.num_comments, subreddit: post.subreddit },
           published_at: new Date(post.created_utc * 1000).toISOString(),

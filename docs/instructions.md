@@ -106,9 +106,9 @@ curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"
 ---
 
 ## send-digest
-**Runs automatically:** Daily 00:30 UTC
+**Runs automatically:** Daily 00:30 UTC. Depends on `generate-trend-brief` pg_cron pre-warm at 00:25 UTC.
 
-Sends digest to Feishu (Chinese) and optionally Slack / Discord / Notion (English). Includes today's trend brief if available. Fetches last 24h articles, limit 10.
+**Trend-brief-only** delivery. Per-channel language routing: Feishu → `synthesis_zh`; Slack/Discord/Telegram → `synthesis_en`. Per-channel per-day idempotency via `digest_sent` table. Empty brief → logs `skipped_empty_brief`, no send.
 
 ```bash
 cd workers/send-digest
@@ -123,18 +123,38 @@ wrangler dev --remote --test-scheduled
 curl "http://localhost:8787/__scheduled?cron=30+0+*+*+*"
 ```
 
-**Verify:** Feishu group shows a blue interactive card with trend brief + articles (Chinese; 🔥 likes for tweets; 3 ZH bullets per article)
+**Verify:** Feishu ZH card, Slack/Discord/Telegram EN messages. Re-trigger same UTC day → no duplicates. Check `select * from digest_sent where anchor_date = current_date`.
 
 **Secrets required:**
 ```bash
-wrangler secret put SUPABASE_URL
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put FEISHU_WEBHOOK_URL         # required
-wrangler secret put SLACK_WEBHOOK_URL          # optional
-wrangler secret put DISCORD_WEBHOOK_URL        # optional
-wrangler secret put NOTION_API_KEY             # optional
-wrangler secret put NOTION_DATABASE_ID         # optional
+wrangler secret put SUPABASE_URL               --name send-digest
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY  --name send-digest
+wrangler secret put FEISHU_WEBHOOK_URL         --name send-digest  # optional
+wrangler secret put SLACK_WEBHOOK_URL          --name send-digest  # optional
+wrangler secret put DISCORD_WEBHOOK_URL        --name send-digest  # optional
+wrangler secret put TELEGRAM_BOT_TOKEN         --name send-digest  # optional (paired)
+wrangler secret put TELEGRAM_CHAT_ID           --name send-digest  # optional (paired)
+# Remove stale Notion secrets if previously bound:
+# wrangler secret delete NOTION_API_KEY       --name send-digest
+# wrangler secret delete NOTION_DATABASE_ID   --name send-digest
 ```
+
+**Supabase Edge Function secret (for pg_cron auth):**
+```bash
+supabase secrets set CRON_SECRET=<value>       # read by generate-trend-brief
+```
+
+**pg_cron pre-warm setup (one-time):**
+
+1. In Supabase SQL editor, put the CRON_SECRET into Vault:
+   ```sql
+   select vault.create_secret('<CRON_SECRET value>', 'cron_secret');
+   ```
+2. Open `supabase/sql/20260424_digest_sent_and_trend_brief_cron.sql`, replace
+   `<PROJECT_REF>` with your Supabase project ref, then paste-and-run in SQL editor.
+
+Supabase Cloud does not permit `alter database postgres set app.X` — use Vault for
+secrets and hardcode the (non-secret) project ref in the migration.
 
 ---
 

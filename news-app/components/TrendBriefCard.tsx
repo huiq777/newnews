@@ -70,7 +70,7 @@ export default function TrendBriefCard({
   // ── Helpers ────────────────────────────────────────────────────────────────
   function cronTimeLabel(l: 'en' | 'zh'): string {
     const d = new Date()
-    d.setUTCHours(0, 0, 0, 0)
+    d.setUTCHours(0, 30, 0, 0)
     const localTimeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase()
     return l === 'en'
       ? `auto generate daily ${localTimeStr} @ your timezone`

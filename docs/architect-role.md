@@ -59,7 +59,7 @@ Every new data source goes through `raw_ingestion`. No direct write to `daily_ne
 
 The queue gives you: retry logic, audit log, backpressure visibility, and decoupled failure domains. A direct write to `daily_news` bypasses all of these.
 
-Valid exceptions: `trend_briefs` (LLM-synthesized cache, not ingested content), `user_tokens` (accounting, not content).
+Valid exceptions: `trend_briefs` (LLM-synthesized cache, not ingested content), `user_tokens` (accounting, not content), `digest_sent` (delivery accounting, not ingested content).
 
 ### 2. Idempotency at Every Seam
 
@@ -103,6 +103,8 @@ Any Edge Function that receives POST requests from external services (Apify, etc
 ### 9. `Promise.all()` for Batch I/O, Never Sequential
 
 All batch API calls (Groq, Cohere, Supabase inserts) must use `Promise.all()`. Sequential awaits in a batch loop will hit wall-clock or throughput limits. The `process-queue` Edge Function processes 5 articles in parallel for throughput — that is also why it sits at the TPM ceiling.
+
+**Sanctioned exception:** `send-digest` Telegram chunked `sendMessage` calls await sequentially. Telegram delivers messages in send order, and a brief split across 2–3 chunks must arrive in reading order (verdict sentence first). `Promise.all()` would race the chunks and reorder them on the recipient's screen. This is the only sanctioned exception — adding new sequential-await loops requires architect approval.
 
 ---
 

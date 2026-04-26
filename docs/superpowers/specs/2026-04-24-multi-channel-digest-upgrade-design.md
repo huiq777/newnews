@@ -40,7 +40,8 @@ If `send-digest` is correctly deployed and firing, local `workers/send-feishu-di
 The digest now strictly depends on `trend_briefs` being populated.
 - **Mechanism:** Add a `pg_cron` schedule in Supabase to trigger the `generate-trend-brief` Edge Function at **00:25 UTC** (5 minutes before `send-digest`).
 - **Cron Slots:** `pg_cron` runs on Supabase, bypassing Cloudflare's 5-slot cap.
-- **Staleness Check:** `send-digest` must query `trend_briefs` with `anchor_date = today` AND `generated_at >= today_utc_start`. This prevents a stale cache-hit from yesterday satisfying the query if `generate-trend-brief` timed out.
+- **Anchor:** Both the pg_cron trigger and `send-digest` use `anchor_date = today_utc - 1` (the UTC day that just closed). At 00:25 UTC the current UTC date has effectively no content; anchoring on yesterday gives the brief a full 24h window. In US Eastern wall time, this maps to "8:30 PM EDT delivery covering ~last 24h ending at 8 PM EDT" during DST.
+- **Staleness Check:** `send-digest` must query `trend_briefs` with `anchor_date = today_utc - 1` AND `generated_at >= today_utc_start`. The freshness gate ensures the row was written by tonight's 00:25 UTC pre-warm, not a day-old cached row from a prior failed run.
 
 **Token Efficiency Budget (NFR §3 Check):**
 - Daily automatic `generate-trend-brief` consumes ~15,000 tokens per run (two-pass clustering on ~30-50 articles + fallback chain). 
@@ -51,12 +52,14 @@ The digest now strictly depends on `trend_briefs` being populated.
 ## 4. Delivery Channels Review
 
 ### Telegram: APPROVED ✅
-- **Why:** 100% free official HTTP Bot API. 
-- **Format Constraint:** Max 4096 chars. Truncate `synthesis_en` to 4000 chars.
-- **Escape Contract:** Must use `parse_mode: "MarkdownV2"` and strictly escape using this exact regex:
-  ```javascript
-  text.replace(/([_*[\]()~`>#+=|{}.!\\-])/g, '\\$1')
-  ```
+- **Why:** 100% free official HTTP Bot API.
+- **Format Constraint:** Max 4096 chars per `sendMessage`. Chunk at paragraph boundaries to ≤ 3500 chars per chunk; send sequentially (await each chunk before the next so messages arrive in reading order).
+- **Escape Contract (revised 2026-04-24, Phase 8):** Use `parse_mode: "HTML"`. The renderer:
+  1. HTML-escapes the synthesis: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`.
+  2. Converts CommonMark `**X**` (the bolded verdict sentence emitted by `generate-trend-brief`) → `<b>X</b>`.
+  3. Chunks at `\n\n` paragraph boundaries to ≤ 3500 chars.
+
+  HTML mode replaces the prior MarkdownV2 escape regex contract because MarkdownV2 escapes `*` itself, which would render `**verdict**` as literal text instead of bold. HTML mode also avoids the 18-character escape table — `.`, `-`, `(`, `!`, etc. are passed through unchanged.
 
 ### Expo Push Notifications: DEFERRED TO COMPANION SPEC 🔄
 - **Why:** Replaces iMessage as the Apple-native delivery path. However, adding token storage, user-identity registration flows (`Notifications.getExpoPushTokenAsync()`), and device unregistration pruning is too large for this single refactor.
@@ -87,7 +90,7 @@ To prevent duplicate sends on cron retries, we require strict idempotency.
 - Export `renderBrief(channel, synthesis)` which handles per-channel truncation and escaping (e.g., applying the Telegram regex).
 
 **Subrequest Recount (CF Limit: 50):**
-1 (brief fetch) + 1 (batched idempotency claim via `IN`) + 4 (sends to Feishu/Slack/Discord/Telegram) + 1 (batched status update) = **~7/50 subrequests**. Safe.
+1 (brief fetch) + 1 (batched idempotency claim) + 1 Feishu + 1 Slack + 1 Discord + up to 3 Telegram (chunks) + 1 bulk-mark-sent + up to 4 individual-mark-failed = **≤ 13/50 subrequests**. Safe.
 
 ---
 
@@ -103,7 +106,7 @@ To prevent duplicate sends on cron retries, we require strict idempotency.
    - Implement `renderBrief()` seam.
    - Implement `INSERT ... ON CONFLICT DO NOTHING RETURNING` claim semantics.
    - Update `sendFeishu`, `sendSlack`, `sendDiscord` to trend-brief-only payloads.
-   - Add `sendTelegram()` with MarkdownV2 escaping and 4000-char truncation.
+   - Add `sendTelegram()` with HTML mode (`<b>` for bold), paragraph-aware chunking to ≤ 3500 chars per `sendMessage`, sequential sends to preserve order.
    - Update `digest_sent` status table post-send.
 
 ---

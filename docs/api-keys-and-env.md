@@ -25,6 +25,11 @@ This document is the authoritative reference for every secret in the system. Bef
 | `OPENROUTER_BIO_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`ingest-builders`) | No | **Never** |
 | `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
 | `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-digest` worker) | No | **Never** |
+| `SLACK_WEBHOOK_URL` | Slack → app → Incoming Webhooks → New Webhook | Optional (`send-digest`) | No | **Never** |
+| `DISCORD_WEBHOOK_URL` | Discord channel → Edit Channel → Integrations → Webhooks | Optional (`send-digest`) | No | **Never** |
+| `TELEGRAM_BOT_TOKEN` | @BotFather on Telegram → `/newbot` → copy token | Optional (`send-digest`; paired with chat id) | No | **Never** |
+| `TELEGRAM_CHAT_ID` | Send a message to your bot, then `GET https://api.telegram.org/bot<TOKEN>/getUpdates` → `result[].message.chat.id` | Optional (`send-digest`) | No | **Never** |
+| `CRON_SECRET` | Generate a random string; used to auth pg_cron → `generate-trend-brief` | No | Yes (`generate-trend-brief`) | **Never** |
 
 ---
 
@@ -59,7 +64,11 @@ wrangler secret put OPENROUTER_BIO_MODEL    # paste: google/gemma-2-9b-it:free (
 # From workers/send-digest/:
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put FEISHU_WEBHOOK_URL
+wrangler secret put FEISHU_WEBHOOK_URL         # optional
+wrangler secret put SLACK_WEBHOOK_URL          # optional
+wrangler secret put DISCORD_WEBHOOK_URL        # optional
+wrangler secret put TELEGRAM_BOT_TOKEN         # optional (paired with TELEGRAM_CHAT_ID)
+wrangler secret put TELEGRAM_CHAT_ID           # optional
 ```
 
 To verify secrets are set (values are hidden):
@@ -81,6 +90,7 @@ Go to: Supabase Dashboard → Edge Functions → Manage Secrets
 Add:
 - `GROQ_API_KEY` (used by `answer-question` and `refresh-questions`)
 - `COHERE_API_KEY` (used by `answer-question` for query embedding)
+- `CRON_SECRET` (used by `generate-trend-brief` to auth pg_cron-triggered runs)
 
 These are accessible inside Edge Functions via `Deno.env.get('COHERE_API_KEY')`.
 

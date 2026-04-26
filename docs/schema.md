@@ -1,6 +1,6 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-04-05. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-04-24. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
@@ -225,12 +225,13 @@ CREATE TABLE trend_briefs (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   anchor_date   date        NOT NULL,
   step_days     integer     NOT NULL,
-  synthesis     text        NOT NULL,
-  sources_json  jsonb       NOT NULL,  -- [{id, title, published_at, is_historical, index}]
+  synthesis_en  text,                  -- EN trend analysis; may be null if that pass failed
+  synthesis_zh  text,                  -- ZH trend analysis; may be null if that pass failed
+  sources_json  jsonb       NOT NULL,  -- [{index, id, title, url, published_at, is_historical}]
   model         text        NOT NULL,
   tokens_used   integer,               -- null on abort; set on successful completion
   generated_at  timestamptz NOT NULL DEFAULT now(),
-  expires_at    timestamptz NOT NULL   -- generated_at + interval '6 hours'
+  expires_at    timestamptz NOT NULL   -- generated_at + 6h for today; far-future for past dates
 );
 
 CREATE INDEX ON trend_briefs (anchor_date, step_days, expires_at);
@@ -242,6 +243,29 @@ ALTER TABLE trend_briefs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "public_read_trend_briefs"
     ON trend_briefs FOR SELECT
     USING (true);
+
+-- ============================================================
+-- DELIVERY ACCOUNTING
+-- ============================================================
+
+CREATE TABLE digest_sent (
+  id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel      text        NOT NULL CHECK (channel IN ('feishu','slack','discord','telegram')),
+  anchor_date  date        NOT NULL,
+  status       text        NOT NULL CHECK (status IN ('pending','sent','failed','skipped_empty_brief')),
+  last_error   text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (channel, anchor_date)  -- enables ON CONFLICT DO NOTHING claim
+);
+
+CREATE INDEX ON digest_sent (anchor_date DESC, channel);
+
+-- Claim semantics: INSERT ... ON CONFLICT DO NOTHING RETURNING id — only
+-- senders whose row comes back should actually deliver. Retries of the same
+-- (channel, anchor_date) get an empty RETURNING and must skip.
+-- RLS: no anon policy → anon blocked. Service role bypasses RLS for worker writes.
+ALTER TABLE digest_sent ENABLE ROW LEVEL SECURITY;
 ```
 
 ---
