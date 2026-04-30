@@ -22,7 +22,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | ~~`process-queue`~~ | ❌ Deleted | — | Migrated to Supabase Edge Function (2026-04-21); CF Worker directory deleted 2026-04-23 |
 | `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
-| `send-digest` | ✅ Deployed | Daily 00:30 UTC | **Trend-brief-only** delivery. Feishu (ZH) + optional Slack/Discord/Telegram (EN). Notion removed. Anchor date = `today_utc - 1` so the brief covers the just-closed UTC day. Per-channel-per-day idempotency via `digest_sent` (`ON CONFLICT DO NOTHING RETURNING`). Freshness gate on `trend_briefs.generated_at >= today 00:00 UTC`. Empty brief → `skipped_empty_brief`, no send. **Per-channel rendering** (Phase 8): Feishu `lark_md`, Slack `mrkdwn` (`**X**` → `*X*`), Discord stdlib MD, Telegram HTML mode (`<b>X</b>`). Long briefs chunk at paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message; Telegram chunks send sequentially to preserve order). |
+| `send-digest` | ✅ Deployed | Daily 00:30 UTC | **Trend-brief-only** delivery. Feishu (ZH) + optional Slack/Discord/Telegram (EN) + optional **WeCom (ZH)** + optional **Notion (EN, archival database row per day)**. Anchor date = `today_utc - 1` so the brief covers the just-closed UTC day. Per-channel-per-day idempotency via `digest_sent` (`ON CONFLICT DO NOTHING RETURNING`). Freshness gate on `trend_briefs.generated_at >= today 00:00 UTC`. Empty brief → `skipped_empty_brief`, no send. **Per-channel rendering** (Phase 8): Feishu `lark_md`, Slack `mrkdwn` (`**X**` → `*X*`), Discord stdlib MD, Telegram HTML mode (`<b>X</b>`), WeCom plain markdown (≤4096 bytes UTF-8 per chunk; sequential await), Notion structured-blocks via `markdownToBlocks()` (≤100 children per POST). Long briefs chunk at paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message, WeCom ≤ 3500 bytes/message; Telegram + WeCom chunks send sequentially to preserve order). |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
 
 ### Supabase Edge Functions
@@ -34,6 +34,7 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required |
 | `generate-trend-brief` | ✅ Deployed | Cross-window trend synthesis (all categories); SSE streaming; `trend_briefs` 6h TTL cache; llama-3.3-70b-versatile; two-pass clustering; historical enrichment via match_articles RPC. **pg_cron pre-warm at 00:25 UTC** (`generate-trend-brief-daily`) via `pg_net.http_post`, 5 min before `send-digest`. |
 | `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate for tweets; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser; triggered by pg_cron `*/5 * * * *` |
+| `redeem-invite` | ✅ Deployed | Closed-beta auth gate (Round 1); `verify_jwt = true` (default); CORS allowlist includes `apikey, x-client-info`; atomic claim + idempotent recovery branch for network-partition retries; writes `app_metadata.is_beta_user` via service-role `auth.admin.updateUserById` |
 
 ### Supabase Tables & RPC
 
@@ -47,6 +48,8 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; NULL for RSS (HN source disabled); NULL for WeChat |
 | `trend_briefs` | ✅ Live | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL; index on (anchor_date, step_days, expires_at); columns `synthesis_en` + `synthesis_zh` |
 | `digest_sent` | ✅ Live | Per-channel per-day delivery accounting for `send-digest`. UNIQUE (channel, anchor_date) gives idempotent claim via `ON CONFLICT DO NOTHING RETURNING`. Statuses: `pending | sent | failed | skipped_empty_brief`. |
+| `beta_invites` | ✅ Live | Round 1 closed-beta invite-link redemption table. RLS enabled with **no anon/authenticated policies** — only `redeem-invite` (service role) reads/writes. Columns: `code` PK, `display_name`, `default_lang`, `email` (nullable, reserved for Round 2 magic-link), `expires_at`, `used_at`, `user_id` FK to `auth.users` (`on delete set null`). Operator mints rows via Supabase SQL Editor. |
+| `is_beta_user()` | ✅ Live | `security definer` SQL helper (returns boolean). Queries `beta_invites` for the current `auth.uid()`. One-line gate for future user-scoped table RLS: `using (is_beta_user() and user_id = auth.uid())`. |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
@@ -70,6 +73,7 @@ Working features:
 - **`dateRange` now initializes eagerly to today** — no flash of all articles on first load
 - **Auto-fallback to 3D when Today returns 0 articles** — `DrumWheelSidebar` exposes `switchTo(days)` control; App calls it automatically
 - Title bracket-stripping rule added to both prompts — prevents `[Title]` formatting artifacts
+- **Closed-beta auth gate** at app root ([news-app/lib/auth.ts](../news-app/lib/auth.ts), [news-app/components/BetaGateScreen.tsx](../news-app/components/BetaGateScreen.tsx)). Blocks every data effect in `App.tsx` until `app_metadata.is_beta_user === true`. Bilingual gate UI; default language carries over from invite metadata. Anonymous Supabase user under the hood — Round 2 will upgrade to email-bound via `updateUser({ email })` while preserving `auth.uid()`.
 
 ---
 
@@ -213,7 +217,7 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — **4/5 slots used**; ingest-x deleted to make room; process-queue migrated to Supabase Edge Function (pg_cron) freeing one slot
 - **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
-- **send-digest:** Trend-brief-only delivery. Feishu (ZH `synthesis_zh`) + optional Slack / Discord / Telegram (EN `synthesis_en`). Anchor date = `today_utc - 1`. Per-channel idempotency via `digest_sent`. CommonMark from the LLM is converted per-channel: Feishu `lark_md` passthrough, Slack `**X**`→`*X*`, Discord stdlib MD passthrough, Telegram `parse_mode: 'HTML'` with `<b>X</b>`. Long briefs chunk at `\n\n` boundaries; Telegram chunks send sequentially.
+- **send-digest:** Trend-brief-only delivery. Feishu (ZH `synthesis_zh`) + optional Slack / Discord / Telegram (EN `synthesis_en`) + optional WeCom (ZH `synthesis_zh`) + optional Notion (EN `synthesis_en`, one database row per day). Anchor date = `today_utc - 1`. Per-channel idempotency via `digest_sent`. CommonMark from the LLM is converted per-channel: Feishu `lark_md` passthrough, Slack `**X**`→`*X*`, Discord stdlib MD passthrough, Telegram `parse_mode: 'HTML'` with `<b>X</b>`, WeCom plain markdown passthrough, Notion structured-blocks via `markdownToBlocks()`. Long briefs chunk at `\n\n` boundaries; Telegram + WeCom chunks send sequentially.
 - **answer-question SSE events:** `{ type: "content", content: "..." }` chunks then `data: [DONE]`
 - **Streaming in Expo:** use `fetch` + `ReadableStream` with line buffer — do NOT use `supabase.functions.invoke()` (buffers entire response)
 - **PostgREST join staleness:** always fetch sources separately and join client-side — do not use embedded joins

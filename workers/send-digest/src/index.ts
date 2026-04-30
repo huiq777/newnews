@@ -1,4 +1,5 @@
 import { renderBrief, type Channel } from './render'
+import { markdownToBlocks } from './notion-blocks'
 
 export interface Env {
   SUPABASE_URL: string
@@ -8,11 +9,15 @@ export interface Env {
   DISCORD_WEBHOOK_URL?: string           // optional
   TELEGRAM_BOT_TOKEN?: string            // optional (paired with TELEGRAM_CHAT_ID)
   TELEGRAM_CHAT_ID?: string              // optional
+  WECOM_WEBHOOK_URL?: string             // optional — full webhook URL incl. ?key=
+  NOTION_TOKEN?: string                  // optional (paired with NOTION_DATABASE_ID)
+  NOTION_DATABASE_ID?: string            // optional
 }
 
 interface TrendBriefRow {
   synthesis_en: string | null
   synthesis_zh: string | null
+  sources_json: unknown[] | null         // used by Notion to populate Sources count
 }
 
 interface DigestSentRow {
@@ -27,7 +32,10 @@ const SB = (env: Env) => ({
 })
 
 function channelLang(channel: Channel): 'synthesis_zh' | 'synthesis_en' {
-  return channel === 'feishu' ? 'synthesis_zh' : 'synthesis_en'
+  // ZH-target channels: Feishu (existing), WeCom (new — extends WeChat reach
+  // via the official 企业微信 incoming-webhook bot). Everything else is EN.
+  if (channel === 'feishu' || channel === 'wecom') return 'synthesis_zh'
+  return 'synthesis_en'
 }
 
 function configuredChannels(env: Env): Channel[] {
@@ -36,6 +44,8 @@ function configuredChannels(env: Env): Channel[] {
   if (env.SLACK_WEBHOOK_URL) out.push('slack')
   if (env.DISCORD_WEBHOOK_URL) out.push('discord')
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) out.push('telegram')
+  if (env.WECOM_WEBHOOK_URL) out.push('wecom')
+  if (env.NOTION_TOKEN && env.NOTION_DATABASE_ID) out.push('notion')
   return out
 }
 
@@ -86,12 +96,61 @@ async function sendTelegram(synthesis: string, today: string, env: Env): Promise
   }
 }
 
-async function sendOne(channel: Channel, synthesis: string, today: string, env: Env): Promise<void> {
+// WeCom: sequential await across chunks (same reasoning as Telegram — order
+// matters). Additionally checks the body-level `errcode`, which WeCom uses
+// for application-level failures (revoked bot key, rate limit) returned with
+// HTTP 200.
+async function sendWecom(synthesis: string, today: string, env: Env): Promise<void> {
+  const { bodies } = renderBrief('wecom', synthesis, today)
+  for (let i = 0; i < bodies.length; i++) {
+    const res = await fetch(env.WECOM_WEBHOOK_URL!, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodies[i]),
+    })
+    if (!res.ok) throw new Error(`WeCom chunk ${i + 1}/${bodies.length} ${res.status}: ${(await res.text()).slice(0, 300)}`)
+    const body = await res.json() as { errcode?: number; errmsg?: string }
+    if (body.errcode !== 0) {
+      throw new Error(`WeCom chunk ${i + 1}/${bodies.length} errcode=${body.errcode}: ${body.errmsg ?? '(none)'}`)
+    }
+  }
+}
+
+// Notion: single POST creating a database row. children[] is capped at 100
+// per request — typical brief is 5–20 blocks so this is unreachable in
+// practice. If a future change pushes briefs past 100 blocks, switch to a
+// two-step pattern (POST first 100; PATCH /blocks/{page_id}/children for the rest).
+async function sendNotion(synthesis: string, today: string, sourcesCount: number | null, env: Env): Promise<void> {
+  const blocks = markdownToBlocks(synthesis)
+  const res = await fetch('https://api.notion.com/v1/pages', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.NOTION_TOKEN}`,
+      'Notion-Version': '2022-06-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      parent: { database_id: env.NOTION_DATABASE_ID },
+      properties: {
+        Title:    { title:  [{ text: { content: `TREND BRIEF · ${today}` } }] },
+        Date:     { date:   { start: today } },
+        Language: { select: { name: 'en' } },
+        Sources:  { number: sourcesCount },
+      },
+      children: blocks.slice(0, 100),
+    }),
+  })
+  if (!res.ok) throw new Error(`Notion ${res.status}: ${(await res.text()).slice(0, 300)}`)
+}
+
+async function sendOne(channel: Channel, synthesis: string, today: string, env: Env, sourcesCount: number | null): Promise<void> {
   switch (channel) {
-    case 'feishu': return sendFeishu(synthesis, today, env)
-    case 'slack': return sendSlack(synthesis, today, env)
-    case 'discord': return sendDiscord(synthesis, today, env)
+    case 'feishu':   return sendFeishu(synthesis, today, env)
+    case 'slack':    return sendSlack(synthesis, today, env)
+    case 'discord':  return sendDiscord(synthesis, today, env)
     case 'telegram': return sendTelegram(synthesis, today, env)
+    case 'wecom':    return sendWecom(synthesis, today, env)
+    case 'notion':   return sendNotion(synthesis, today, sourcesCount, env)
   }
 }
 
@@ -190,7 +249,7 @@ export default {
       `?anchor_date=eq.${anchorDate}` +
       `&step_days=eq.1` +
       `&generated_at=gte.${encodeURIComponent(todayUtcStart)}` +
-      `&order=generated_at.desc&limit=1&select=synthesis_en,synthesis_zh`,
+      `&order=generated_at.desc&limit=1&select=synthesis_en,synthesis_zh,sources_json`,
       { headers: SB(env) },
     )
     if (!briefRes.ok) {
@@ -223,8 +282,9 @@ export default {
     }
 
     // 5. Parallel sends
+    const sourcesCount = Array.isArray(brief.sources_json) ? brief.sources_json.length : null
     const results = await Promise.allSettled(
-      claimed.map(row => sendOne(row.channel, brief[channelLang(row.channel)]!, anchorDate, env)),
+      claimed.map(row => sendOne(row.channel, brief[channelLang(row.channel)]!, anchorDate, env, sourcesCount)),
     )
 
     // 6. Status updates — batch sent, individual failed (to preserve last_error)

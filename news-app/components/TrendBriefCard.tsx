@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
-import { Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { Pressable, StyleSheet, Text, TouchableOpacity, View, Platform } from 'react-native'
 import { BriefSource, BriefState, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/config'
 import WebHTML from './WebHTML'
+
+const isWeb = Platform.OS === 'web'
+const userAgent = isWeb ? navigator.userAgent : ''
+const isSafari = isWeb && /^((?!chrome|android).)*safari/i.test(userAgent)
+const isChrome = isWeb && /chrome|chromium|crios/i.test(userAgent)
+
+function getCronLabelStyle(lang: 'en' | 'zh') {
+  if (!isWeb) return {}
+  if (lang === 'en') {
+    if (isChrome) return { fontSize: 11, letterSpacing: 1 }
+    if (isSafari) return { fontSize: 10.5, letterSpacing: 0 }
+    return { fontSize: 11, letterSpacing: 0.5 }
+  } else {
+    if (isChrome) return { letterSpacing: 1.2 }
+    if (isSafari) return {}
+    return {}
+  }
+}
 
 const BRIEF_ICON_COLOR = '#6e77e3'
 const BRIEF_ICON_SVG = `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" width="15" height="15" style="display:inline-block;vertical-align:middle;flex-shrink:0"><path d="M510.073377 407.480715c-31.066792 0-60.688617-9.873942-85.253057-28.417686-10.596425-7.947319-12.763876-23.119473-4.816557-33.715898 7.947319-10.596425 23.119473-12.763876 33.715898-4.816557a93.778363 93.778363 0 0 0 150.035748-74.89746 93.92286 93.92286 0 0 0-93.682032-93.682032c-13.245532 0-24.082785-10.837253-24.082784-24.082785s10.837253-24.082785 24.082784-24.082784c78.26905 0 141.847601 63.578551 141.847601 141.847601s-63.819379 141.847601-141.847601 141.847601z" fill="$6e77e3"/><path d="M509.110066 903.345249c-177.008467 0-328.248354-124.507996-367.503293-302.720602a23.986453 23.986453 0 0 1 18.302917-28.658513 23.986453 23.986453 0 0 1 28.658513 18.302916c34.438382 156.056444 166.171214 264.91063 320.541863 264.91063 152.925682 0 284.658514-107.890875 319.819379-262.261524 2.889934-13.004704 15.894638-21.19285 28.899341-18.062088 13.004704 2.889934 21.19285 15.894638 18.062089 28.899341-40.459078 176.285983-191.21731 299.58984-366.780809 299.58984zM852.771402 446.01317c-10.355597 0-19.988711-6.74318-23.119473-17.098777-23.841957-79.954845-80.918156-161.113829-142.088429-202.054562a24.058702 24.058702 0 0 1-6.502352-33.475071c7.465663-11.078081 22.39699-13.968015 33.47507-6.502352 70.562559 47.443086 133.900282 137.031044 161.113829 228.304798 3.853246 12.763876-3.37159 26.250235-16.135466 30.103481-2.167451 0.240828-4.575729 0.722484-6.743179 0.722483zM164.967074 449.143932c-2.408278 0-4.575729-0.240828-6.984007-0.963311-12.763876-3.853246-19.988711-17.339605-16.135466-30.103481 50.33302-167.857008 208.075259-294.291627 367.021637-294.291627 13.245532 0 24.082785 10.837253 24.082785 24.082784s-10.837253 24.082785-24.082785 24.082785c-138.476011 0-276.470367 111.74412-321.023518 260.094073-2.889934 10.355597-12.523048 17.098777-22.878646 17.098777z" fill="${BRIEF_ICON_COLOR}"/><path d="M158.946378 619.650047c-62.61524 0-113.670743-49.128881-113.670743-109.335842S96.331138 400.978363 158.946378 400.978363c13.245532 0 24.082785 10.837253 24.082785 24.082785s-10.837253 24.082785-24.082785 24.082784c-36.124177 0-65.505174 27.454374-65.505174 61.170273 0 35.160865 32.993415 63.337723 70.080903 60.929445a23.986453 23.986453 0 0 1 25.527752 22.39699 23.841957 23.841957 0 0 1-22.39699 25.527751c-2.649106 0.240828-5.298213 0.481656-7.706491 0.481656zM861.682032 619.650047c-2.649106 0-5.057385 0-7.706491-0.240828a23.986453 23.986453 0 1 1 3.130762-47.924741c1.444967 0 3.130762 0.240828 4.575729 0.240828 36.124177 0 65.505174-27.454374 65.505174-61.170273 0-32.511759-36.84666-64.301035-74.415804-64.301035-13.245532 0-24.082785-10.837253-24.082785-24.082784s10.837253-24.082785 24.082785-24.082785c64.060207 0 122.581373 53.70461 122.581373 112.466604 0 59.966134-51.055503 109.095014-113.670743 109.095014zM385.083725 550.773283c-25.768579 0-46.720602-20.952023-46.720602-46.720602S359.315146 457.572907 385.083725 457.572907s46.720602 20.952023 46.720602 46.720602-21.19285 46.479774-46.720602 46.479774z m0-48.165569l-1.444967 1.444967c0 0.722484 0.722484 1.444967 1.444967 1.444967v-2.889934zM653.365945 550.773283c-25.768579 0-46.720602-20.952023-46.720602-46.720602S627.597366 457.572907 653.365945 457.572907s46.720602 20.952023 46.720603 46.720602-20.952023 46.479774-46.720603 46.479774z m0-48.165569l-1.444967 1.444967c0 0.722484 0.722484 1.444967 1.444967 1.444967v-2.889934zM505.497648 718.630292c-52.982126 0-94.886171-27.93603-115.838194-51.537159a23.817874 23.817874 0 0 1 2.167451-33.956727 24.034619 24.034619 0 0 1 33.956726 1.926623c7.465663 8.188147 74.415804 76.824083 169.783631-2.408278a24.082785 24.082785 0 1 1 30.825965 37.087488c-43.58984 35.883349-84.771402 48.888053-120.895579 48.888053z" fill="${BRIEF_ICON_COLOR}"/></svg>`
@@ -32,14 +50,17 @@ export default function TrendBriefCard({
   dateRange,
   stepDays,
   hasArticles,
+  onOpenManual,
 }: {
   lang: 'en' | 'zh'
   dateRange: { start: Date; end: Date } | null
   stepDays: number
   hasArticles: boolean
+  onOpenManual: () => void
 }) {
   const [briefState, setBriefState] = useState<BriefState>('idle')
   const [generateHovered, setGenerateHovered] = useState(false)
+  const [helpHovered, setHelpHovered] = useState(false)
   const [synthesis, setSynthesis] = useState('')
   const [sourcesJson, setSourcesJson] = useState<BriefSource[]>([])
   const [generatedAt, setGeneratedAt] = useState<string | null>(null)
@@ -52,10 +73,28 @@ export default function TrendBriefCard({
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function fmtAge(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime()
+    const diff = Math.max(0, Date.now() - new Date(iso).getTime())
     const mins = Math.floor(diff / 60000)
-    if (mins < 60) return `${mins}m ago`
-    return `${Math.floor(mins / 60)}h ago`
+    
+    if (mins < 60) {
+      return lang === 'en' ? `${mins}m ago` : `${mins}分钟前`
+    }
+    
+    const totalHours = Math.floor(mins / 60)
+    if (totalHours < 24) {
+      return lang === 'en' ? `${totalHours}h ago` : `${totalHours}小时前`
+    }
+    
+    const totalDays = Math.floor(totalHours / 24)
+    const h = totalHours % 24
+    
+    if (totalDays < 30) {
+      return lang === 'en' ? `${totalDays}d ${h}h ago` : `${totalDays}天 ${h}小时前`
+    }
+    
+    const mo = Math.floor(totalDays / 30)
+    const d = totalDays % 30
+    return lang === 'en' ? `${mo}mo ${d}d ${h}h ago` : `${mo}个月 ${d}天 ${h}小时前`
   }
 
   function fmtDateShort(iso: string | null): string {
@@ -360,18 +399,53 @@ export default function TrendBriefCard({
   const headerLabel = `${briefTitle} · ${windowLabel}`
   const isActive = briefState === 'loading' || briefState === 'streaming' || briefState === 'loaded'
 
+  // Help button — appears in every render branch so the "How to Subscribe?"
+  // affordance is always discoverable in the same place. In the active branch
+  // the parent TouchableOpacity toggles cardExpanded, so press events must
+  // stopPropagation (web only — RN native has no bubble).
+  //
+  // `origin` controls transformOrigin for the 0.833 scale: 'left' puts the
+  // visible button flush to its layout left edge (used in the active branch
+  // where it sits right of the title text), 'right' puts the visible button
+  // flush to its layout right edge (used in idle branches where the button is
+  // anchored to the cron label's right edge — without right-origin, the
+  // unscaled layout width would push the visible button slightly inward).
+  const renderHelpButton = (origin: 'left' | 'right' = 'left') => (
+    <Pressable
+      onPress={(e) => { (e as any).stopPropagation?.(); onOpenManual() }}
+      onHoverIn={() => setHelpHovered(true)}
+      onHoverOut={() => setHelpHovered(false)}
+      style={[
+        styles.helpBtn,
+        { transformOrigin: origin } as any,
+        helpHovered && styles.helpBtnHovered,
+      ]}
+    >
+      <Text style={styles.helpBtnText}>
+        {lang === 'en' ? 'How to Subscribe?' : '如何订阅?'}
+      </Text>
+    </Pressable>
+  )
+
   // ── idle_cached — cached brief exists, not yet revealed ───────────────────
+  // Layout: a content-sized column wraps the title + cron label; the column's
+  // width = its widest non-absolute child = cron label width (longer than the
+  // title). The help button is absolutely positioned at the column's right
+  // edge (right: 0), so its right edge aligns exactly with the cron label's
+  // right edge. The Show/Generate button is a sibling of the column, with its
+  // own alignSelf: flex-start sizing.
   if (briefState === 'idle_cached') {
     return (
       <View style={styles.briefCard}>
-        <View style={styles.briefHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.briefHeaderText}>{headerLabel}</Text>
-            <Text style={styles.briefCronLabel}>{cronTimeLabel(lang)}</Text>
+        <View style={styles.titleCronCol}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.briefHeaderText, styles.briefHeaderTextInline]}>{headerLabel}</Text>
+            {renderHelpButton('left')}
           </View>
+          <Text style={[styles.briefCronLabel, getCronLabelStyle(lang)]}>{cronTimeLabel(lang)}</Text>
         </View>
         <Pressable
-          style={[styles.generateBtn, generateHovered && styles.generateBtnHovered]}
+          style={[styles.generateBtn, generateHovered && styles.generateBtnHovered, styles.idleGenerateBtnSpacing]}
           onPress={() => showCached()}
           onHoverIn={() => setGenerateHovered(true)}
           onHoverOut={() => setGenerateHovered(false)}
@@ -388,17 +462,19 @@ export default function TrendBriefCard({
   }
 
   // ── idle_ready — prompt card ───────────────────────────────────────────────
+  // Same layout as idle_cached — see comment there.
   if (briefState === 'idle_ready') {
     return (
       <View style={styles.briefCard}>
-        <View style={styles.briefHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.briefHeaderText}>{headerLabel}</Text>
-            <Text style={styles.briefCronLabel}>{cronTimeLabel(lang)}</Text>
+        <View style={styles.titleCronCol}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.briefHeaderText, styles.briefHeaderTextInline]}>{headerLabel}</Text>
+            {renderHelpButton('left')}
           </View>
+          <Text style={[styles.briefCronLabel, getCronLabelStyle(lang)]}>{cronTimeLabel(lang)}</Text>
         </View>
         <Pressable
-          style={[styles.generateBtn, generateHovered && styles.generateBtnHovered]}
+          style={[styles.generateBtn, generateHovered && styles.generateBtnHovered, styles.idleGenerateBtnSpacing]}
           onPress={() => generate(false)}
           onHoverIn={() => setGenerateHovered(true)}
           onHoverOut={() => setGenerateHovered(false)}
@@ -423,7 +499,10 @@ export default function TrendBriefCard({
         style={styles.briefHeader}
         activeOpacity={0.7}
       >
-        <Text style={styles.briefHeaderText}>{headerLabel}</Text>
+        <View style={styles.titleRow}>
+          <Text style={[styles.briefHeaderText, styles.briefHeaderTextInline]}>{headerLabel}</Text>
+          {renderHelpButton('left')}
+        </View>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           {generatedAt && isActive && (
             <Text style={styles.briefAge}>{fmtAge(generatedAt)}</Text>
@@ -574,5 +653,46 @@ const styles = StyleSheet.create({
   briefCronLabel: {
     fontSize: 10, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif',
     letterSpacing: 0.5, marginTop: 2,
+  },
+  helpBtn: {
+    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 6,
+    paddingVertical: 2, paddingHorizontal: 8,
+    backgroundColor: '#ffffff',
+    // Scale the whole button (border + padding + text together) so the visual
+    // matches `briefHeaderText` (which uses the same 0.833 trick) exactly.
+    // Scaling only the text would leave dead space inside the border because
+    // the Text's layout box reserves its unscaled width.
+    transform: [{ scale: 0.833 }], transformOrigin: 'left' as any,
+  },
+  helpBtnHovered: { backgroundColor: 'rgba(228,228,231,0.5)' },
+  helpBtnText: {
+    // Same metrics as `briefHeaderText` — the parent button supplies the
+    // 0.833 scale, so the text inherits the same visual rendering as the title.
+    fontSize: 12, fontWeight: '700', color: '#71717a', letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    fontFamily: 'Space Grotesk, sans-serif',
+  },
+  titleRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    gap: 8,
+  },
+  titleCronCol: {
+    // Idle branches: a content-sized column wrapping title row + cron label.
+    alignSelf: 'flex-start',
+  },
+  helpAnchor: {
+    // Deprecated
+  },
+  idleGenerateBtnSpacing: {
+    // Replaces the spacing previously provided by `briefHeader.marginBottom`
+    // (the idle branches don't wrap the title in `briefHeader`).
+    marginTop: 10,
+  },
+  briefHeaderTextInline: {
+    // Override `briefHeaderText`'s `flex: 1` so the title sizes to its content
+    // and the help button sits immediately to its right. RN's `flex: 0` is
+    // shorthand for basis: 0 (which collapses the text to zero width and wraps
+    // word-by-word) — use longhand to keep basis: auto.
+    flexGrow: 0, flexShrink: 0, flexBasis: 'auto',
   },
 })

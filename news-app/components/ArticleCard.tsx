@@ -28,12 +28,12 @@ export default function ArticleCard({
 
   const displayTitle = (lang === 'en' ? item.title_en : item.title_zh) || item.title
   const displaySummary = (lang === 'en' ? item.summary_en : item.summary_zh) || item.summary
-  const sourceName = sourceMap[item.source_id]
+  const sourceName = sourceMap[item.source_id] || 'Unknown Source'
   const isWechat = item.url?.includes('mp.weixin.qq.com')
   const isReddit = item.url?.includes('reddit.com') || sourceName?.toLowerCase().includes('reddit')
   const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
   const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
-  const showName = item.engagement?.show_name
+  const showName = item.engagement?.show_name?.trim()
   const sourceLabel = isWechat
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
     : xHandle
@@ -284,7 +284,7 @@ const styles = StyleSheet.create({
   publishedDate: {
     fontSize: 12, fontWeight: '700', color: '#a1a1aa',
     letterSpacing: 2, fontFamily: 'Space Grotesk, sans-serif',
-    textTransform: 'uppercase', marginBottom: 10, marginTop: -2, transform: [{ scale: 0.833 }],
+    textTransform: 'uppercase', marginBottom: 0, marginTop: -2, transform: [{ scale: 0.833 }],
     transformOrigin: 'left' as any
   },
   engagementPill: { backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3 },

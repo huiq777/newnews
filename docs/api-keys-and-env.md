@@ -29,6 +29,9 @@ This document is the authoritative reference for every secret in the system. Bef
 | `DISCORD_WEBHOOK_URL` | Discord channel → Edit Channel → Integrations → Webhooks | Optional (`send-digest`) | No | **Never** |
 | `TELEGRAM_BOT_TOKEN` | @BotFather on Telegram → `/newbot` → copy token | Optional (`send-digest`; paired with chat id) | No | **Never** |
 | `TELEGRAM_CHAT_ID` | Send a message to your bot, then `GET https://api.telegram.org/bot<TOKEN>/getUpdates` → `result[].message.chat.id` | Optional (`send-digest`) | No | **Never** |
+| `WECOM_WEBHOOK_URL` | WeCom group → 群机器人 → 添加机器人 → copy full webhook URL incl. `?key=` | Optional (`send-digest`) | No | **Never** |
+| `NOTION_TOKEN` | notion.so/my-integrations → New integration (Internal) → "Insert content" + "Read content" → copy Internal Integration Secret | Optional (`send-digest`; paired with `NOTION_DATABASE_ID`) | No | **Never** |
+| `NOTION_DATABASE_ID` | Open the target Notion database → URL contains `notion.so/<workspace>/<database-id>?v=...` → copy the database-id segment. **Must connect the integration to the database** (top-right `···` → `Connections` → `Add connections` → pick the integration) or POSTs return 404. After connecting, share the database with end users and tell them to **subscribe** (database top-right `···` → `Updates` → `Subscribe`) to get push notifications when each daily row lands. | Optional (`send-digest`) | No | **Never** |
 | `CRON_SECRET` | Generate a random string; used to auth pg_cron → `generate-trend-brief` | No | Yes (`generate-trend-brief`) | **Never** |
 
 ---
@@ -69,6 +72,9 @@ wrangler secret put SLACK_WEBHOOK_URL          # optional
 wrangler secret put DISCORD_WEBHOOK_URL        # optional
 wrangler secret put TELEGRAM_BOT_TOKEN         # optional (paired with TELEGRAM_CHAT_ID)
 wrangler secret put TELEGRAM_CHAT_ID           # optional
+wrangler secret put WECOM_WEBHOOK_URL          # optional — full https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
+wrangler secret put NOTION_TOKEN               # optional (paired with NOTION_DATABASE_ID)
+wrangler secret put NOTION_DATABASE_ID         # optional
 ```
 
 To verify secrets are set (values are hidden):

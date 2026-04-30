@@ -1,8 +1,24 @@
 import { createClient } from '@supabase/supabase-js'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { Platform } from 'react-native'
+
+// Web auto-uses localStorage; native uses AsyncStorage. detectSessionInUrl
+// is OFF — Round 1 has no email magic-link flow, and we parse `?invite=`
+// ourselves in useAuthGate. Leaving it ON would risk Supabase consuming
+// the query string before our parser can read it.
+const isWeb = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
 
 export const supabase = createClient(
   process.env.EXPO_PUBLIC_SUPABASE_URL!,
-  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!,
+  {
+    auth: {
+      storage: isWeb ? undefined : AsyncStorage,
+      autoRefreshToken: true,
+      persistSession: true,
+      detectSessionInUrl: false,
+    },
+  }
 )
 
 export const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!
@@ -45,6 +61,30 @@ export function formatPublishedDate(dateStr: string | undefined | null, lang: 'e
 }
 
 export type Category = 'all' | 'industry' | 'technical_frontier' | 'career_community'
+
+export function getDeviceLang(): 'en' | 'zh' {
+  if (Platform.OS === 'web' && typeof navigator !== 'undefined') {
+    const l = navigator.language?.toLowerCase() ?? ''
+    if (l.startsWith('zh')) return 'zh'
+  }
+  return 'en'
+}
+
+export function getInitialLang(): 'en' | 'zh' {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+    const saved = window.localStorage.getItem('news_app_lang')
+    if (saved === 'en' || saved === 'zh') return saved
+  }
+  return getDeviceLang()
+}
+
+export function setSavedLang(lang: 'en' | 'zh') {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.setItem('news_app_lang', lang)
+  } else {
+    AsyncStorage.setItem('news_app_lang', lang).catch(() => {})
+  }
+}
 
 export function fmtNum(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`

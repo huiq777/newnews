@@ -265,3 +265,173 @@ The trend-brief LLM emits CommonMark (`**bold**`, `\n\n` paragraphs). Each diges
 - Discord & Feishu: pass through
 
 **Length:** A 2K-token brief is ~6–8K chars — exceeds every channel's single-message limit. Chunk at `\n\n` paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message). For Telegram, send chunks **sequentially** so messages arrive in reading order.
+
+---
+
+## Supabase — Closed-Beta Auth Gate (Round 1) Lessons
+
+These six items were all surfaced shipping the closed-beta invite-link gate ([spec](superpowers/specs/2026-04-26-beta-auth-gate-design.md), shipped 2026-04-28). Each one cost a real debugging session. Read before touching anything that uses `signInAnonymously()`, Edge Function CORS, or `app_metadata`.
+
+### 1. Anonymous sign-ins are OFF by default in newer Supabase projects
+
+**Symptom:** `signInAnonymously()` returns `{ code: 'anonymous_provider_disabled', message: 'Anonymous sign-ins are disabled' }` (HTTP 422).
+
+**Fix:** Dashboard → Authentication → Sign In / Sign Up → **Anonymous Sign-Ins → ON → Save.** Then hard-reload the calling page.
+
+**Rule:** Any feature that mints anonymous users (closed-beta gates, ephemeral guest sessions) requires this toggle as a project pre-req. Treat it like a secret you'd document in `api-keys-and-env.md` — if a project doesn't have it set, the feature is dead.
+
+### 2. CAPTCHA + anonymous sign-ins are mutually exclusive without a widget
+
+**Symptom:** `500: captcha verification process failed` — error string only visible in Auth Logs (Logs → Auth Logs in dashboard); the HTTP body just says `unexpected_failure`.
+
+**Root cause:** Supabase's CAPTCHA protection enforces a `captcha_token` on every signup, including the no-email-no-password call that backs `signInAnonymously()`. We don't ship a CAPTCHA widget on the gate.
+
+**Fix for invite-only beta:** Authentication → Attack Protection → **Captcha protection → OFF**. The invite code is already the access control — adding CAPTCHA on top buys nothing.
+
+**Rule:** When you reach for "open up to public signup," that's also when you turn CAPTCHA back ON and wire hCaptcha/Turnstile into the gate. Until then it's strictly worse than having it off.
+
+### 3. `handle_new_user` triggers must branch on `new.is_anonymous`
+
+**Symptom:** `{ code: 'unexpected_failure', message: 'Database error creating anonymous user' }` (HTTP 500). The signup endpoint reaches the database; a trigger errors out; Supabase swallows the trigger error and surfaces the generic message.
+
+**How to diagnose:**
+```sql
+select t.tgname, p.proname, pg_get_functiondef(p.oid)
+from pg_trigger t
+join pg_class c on c.oid = t.tgrelid
+join pg_namespace n on n.oid = c.relnamespace
+join pg_proc p on p.oid = t.tgfoid
+where n.nspname = 'auth' and c.relname = 'users' and not t.tgisinternal;
+```
+
+**Common shape that fails:** a function that inserts into `public.user_tokens` / `public.profiles` / similar with columns the anonymous user can't satisfy (e.g. NOT NULL `email`).
+
+**Fix:**
+```sql
+create or replace function public.handle_new_user() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.is_anonymous then return new; end if;   -- skip for beta users
+  insert into public.user_tokens (user_id, balance) values (new.id, 500);
+  return new;
+end; $$;
+```
+
+**Rule:** Any project with a row-creation trigger on `auth.users` needs `is_anonymous` branching as soon as it adopts anonymous sign-ins. Forgetting this turns every signup into a 500 with a useless error message.
+
+### 4. Edge Function CORS for `supabase-js` callers needs `apikey, x-client-info`
+
+**Symptom:** Browser console: `Failed to load resource: Request header field apikey is not allowed by Access-Control-Allow-Headers.` Function never runs; preflight fails.
+
+**Root cause:** `supabase-js` adds an `apikey` header (and on some versions `x-client-info`) automatically alongside `Authorization` when calling Edge Functions. `Access-Control-Allow-Headers: 'authorization, content-type'` is not enough.
+
+**Fix:**
+```ts
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+}
+```
+
+**Rule:** Every new Edge Function called from `supabase-js` needs all four headers in the CORS allowlist. Existing functions called from raw `fetch` (e.g. `ingest-apify-tweets` from Apify) don't need this — but anything the Expo frontend hits via `supabase.functions.invoke()` does.
+
+### 5. `getUser()` does not refresh the persisted session JWT
+
+**Symptom:** After a server-side `app_metadata` write, the user is "authed" in the live API but a page reload re-triggers the gate. `getSession()` returns a session, but `session.user.app_metadata.is_beta_user` is missing.
+
+**Root cause:** `getUser()` hits `/auth/v1/user` and returns the **live** user record. It does NOT mint a new JWT, and it does NOT update what `getSession()` returns from localStorage. The persisted session is still the one minted by `signInAnonymously()` *before* the metadata write.
+
+**Fix in two places:**
+
+1. After a successful `app_metadata` write:
+   ```ts
+   const { data: refreshed } = await supabase.auth.refreshSession()
+   // refreshed.session.user.app_metadata is now fresh
+   // and the new JWT has been written to localStorage
+   ```
+
+2. In bootstrap, recover users redeemed under older code:
+   ```ts
+   if (session && !session.user.app_metadata?.is_beta_user) {
+     const { data: { user: liveUser } } = await supabase.auth.getUser()
+     if (liveUser?.app_metadata?.is_beta_user) {
+       await supabase.auth.refreshSession()   // unbrick — write fresh JWT
+       // proceed as authed
+     }
+   }
+   ```
+
+**Rule:** Any flow that writes to `app_metadata` server-side and then expects the client's session to reflect it MUST follow up with `refreshSession()`. `getUser()` alone is not enough.
+
+### 6. Postgres has no `base64url` encoding
+
+**Symptom:** `encode(gen_random_bytes(N), 'base64url')` returns `ERROR:  unrecognized encoding: "base64url"`. Postgres `encode()` only supports `base64`, `escape`, `hex`.
+
+**Fix for URL-safe random codes:**
+```sql
+replace(replace(replace(
+  encode(gen_random_bytes(12), 'base64'),
+  '+', '-'), '/', '_'), '=', '')
+```
+
+**Rule:** Any operator runbook or generated-column default that needs URL-safe random tokens uses the explicit replace chain. `hex` is also URL-safe but doubles the character count; pick `base64` + replace if you want short codes (12 bytes → 16 chars).
+
+---
+
+## Delivery Channels — WeCom + Notion Onboarding
+
+These two channels were added 2026-04-29 ([spec](superpowers/specs/2026-04-29-delivery-channels-wecom-notion-design.md)). Both are operator-side and mirror the existing Feishu/Slack/Discord/Telegram pattern, but each has one onboarding gotcha that's easy to miss.
+
+### Hosting the WeCom QR image (frontend)
+
+WeCom group invites are **QR codes**, not click-to-join URLs. The
+`SubscriptionManualModal` renders `channel_invites.invite_url` as an inline
+`<Image>` for the wecom row — so for that one channel, `invite_url` is an
+HTTPS image URL (PNG/JPG of the QR), not a clickable link.
+
+**Recommended host:** Supabase Storage public bucket (e.g. `public-assets`).
+1. Storage → New bucket → name: `public-assets` → **Public** access.
+2. Upload the WeCom group QR image (export from WeCom mobile app: 群聊 →
+   群机器人 / 邀请二维码 → save image).
+3. Copy the public URL: `https://<ref>.supabase.co/storage/v1/object/public/public-assets/wecom-qr.png`.
+4. `update channel_invites set invite_url = '<that-url>' where channel = 'wecom';`
+
+**Alternative hosts:** any public HTTPS image URL — GitHub raw (`raw.githubusercontent.com/...`), Cloudflare R2 with public bucket, Imgur. Avoid private hosts that 403 anonymous browsers.
+
+**Re-upload triggers:** WeCom regenerates the QR if the group changes
+member-set significantly, the bot is replaced, or an external-customer-group
+invite hits its 7-day expiry. Same operational pattern as the Feishu invite
+refresh — operator monitors `digest_sent.last_error` for 93000-class WeCom
+errors and rotates both the bot key (secret) and the QR image (storage URL).
+
+### WeCom — webhook URL is the full URL, not just the key
+
+**Symptom:** `WeCom errcode=93000` ("invalid bot key") on first delivery, even though the operator just created the bot.
+
+**Cause:** the WeCom admin UI shows the bot's webhook URL in two places — a full URL and a "key" parameter at the end. `WECOM_WEBHOOK_URL` must be the **full URL including `?key=<key>`**, not just the key.
+
+**Format that works:**
+```
+https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdef-1234-...
+```
+
+**Other WeCom-specific failure modes** (all visible only in `digest_sent.last_error`):
+- `errcode 93000` — bot key invalidated (member who created the bot left the WeCom org, or admin regenerated). Re-create the bot, update the secret.
+- `errcode 45009` — rate limit (20 messages/min per bot). Won't trigger for one daily brief; if it does, the per-chunk sequential `await` in `sendWecom` naturally rate-limits.
+- 5xx from `qyapi.weixin.qq.com` — transient. The next cron tick re-attempts (the `digest_sent` row stays in `failed`, not `sent`).
+
+### Notion — the database must be shared with the integration
+
+**Symptom:** First Notion delivery returns 404 with no obvious cause. The token is right, the database ID is right, but POST `/v1/pages` 404s every time.
+
+**Cause:** Creating a Notion **integration** is one step. **Sharing each target database with that integration** is a separate step that's easy to forget. Without it, the integration has zero permissions on the database and Notion returns 404 (not 403 — they treat it as "the integration cannot see this database, therefore it doesn't exist").
+
+**Fix:** open the target database in Notion → top-right `Share` menu → `Add connections` → pick the integration. Wait a few seconds for propagation, retry.
+
+**Other Notion failure modes:**
+- `400 validation_error` — usually the database is missing one of the four properties the spec defines (`Title`, `Date`, `Language`, `Sources`) or the property name doesn't match exactly (case-sensitive). Match the spec's database schema literally.
+- `401` — token revoked / wrong. Regenerate from `notion.so/my-integrations` and update `NOTION_TOKEN`.
+- `429` — rate limit (3 req/s). Won't trigger for one daily call.
+
+**Rule for any new Notion integration** in this project: token + database ID + share-the-database is the three-step setup. All three are mandatory; missing any returns a different unhelpful error.

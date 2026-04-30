@@ -2,23 +2,29 @@ import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
   ActivityIndicator, AppState, FlatList, SafeAreaView, StyleSheet, Text, View,
 } from 'react-native'
-import { supabase, FEED_PAGE_SIZE, Article, Category } from './lib/config'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { supabase, FEED_PAGE_SIZE, Article, Category, getInitialLang, setSavedLang } from './lib/config'
+import { useAuthGate } from './lib/auth'
+import BetaGateScreen from './components/BetaGateScreen'
 import NavBar from './components/NavBar'
 import DrumWheelSidebar from './components/DrumWheelSidebar'
 import FilterTag from './components/FilterTag'
 import ArticleCard from './components/ArticleCard'
 import TrendBriefCard from './components/TrendBriefCard'
+import SubscriptionManualModal from './components/SubscriptionManualModal'
 import NewArticlesBanner from './components/NewArticlesBanner'
 import XThreadCard, { XThreadGroup } from './components/XThreadCard'
 
 export default function App() {
+  const { status: authStatus, defaultLang: authDefaultLang, redeemError, retry } = useAuthGate()
   const [articles, setArticles] = useState<Article[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [feedOffset, setFeedOffset] = useState(0)
   const [hasMore, setHasMore] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [lang, setLang] = useState<'en' | 'zh'>('en')
+  const [lang, setLang] = useState<'en' | 'zh'>(getInitialLang)
+  const [showManual, setShowManual] = useState(false)
   const [sourceMap, setSourceMap] = useState<Record<string, string>>({})
   const [bioMap, setBioMap] = useState<Record<string, string>>({})
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({})
@@ -40,8 +46,27 @@ export default function App() {
   const langRef = useRef(lang)
   const feedOffsetRef = useRef(0)
   const isInitialLoadRef = useRef(true)
-  useEffect(() => { langRef.current = lang }, [lang])
+  useEffect(() => { 
+    langRef.current = lang
+  }, [lang])
   useEffect(() => { feedOffsetRef.current = feedOffset }, [feedOffset])
+
+  // Native async-storage fallback for initial language
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      AsyncStorage.getItem('news_app_lang').then(saved => {
+        if (saved === 'en' || saved === 'zh') setLang(saved)
+      })
+    }
+  }, [])
+
+  // Default-language carry-over from invite metadata.
+  useEffect(() => {
+    if (authDefaultLang && authStatus === 'authed') {
+      const hasExplicitLang = typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('news_app_lang')
+      if (!hasExplicitLang) setLang(authDefaultLang)
+    }
+  }, [authDefaultLang, authStatus])
 
   // Font injection (web-only)
   useEffect(() => {
@@ -70,6 +95,7 @@ export default function App() {
 
   // Load sources
   useEffect(() => {
+    if (authStatus !== 'authed') return
     supabase.from('sources').select('id, name, metadata, category').then(({ data }) => {
       if (data) {
         const sMap: Record<string, string> = {}
@@ -85,18 +111,21 @@ export default function App() {
         setCategoryMap(cMap)
       }
     })
-  }, [])
+  }, [authStatus])
 
   const activeCategoryRef = useRef(activeCategory)
   const dateRangeRef = useRef(dateRange)
   const articlesRef = useRef(articles)
   const appStateRef = useRef(AppState.currentState)
+  const authStatusRef = useRef(authStatus)
 
   useEffect(() => { activeCategoryRef.current = activeCategory }, [activeCategory])
   useEffect(() => { dateRangeRef.current = dateRange }, [dateRange])
   useEffect(() => { articlesRef.current = articles }, [articles])
+  useEffect(() => { authStatusRef.current = authStatus }, [authStatus])
 
   const checkMissedArticles = useCallback(async () => {
+    if (authStatusRef.current !== 'authed') return
     let latestDate = articlesRef.current[0]?.created_at
     if (!latestDate && dateRangeRef.current) {
       latestDate = dateRangeRef.current.start.toISOString()
@@ -136,6 +165,7 @@ export default function App() {
 
   // Realtime subscription and AppState watcher for background catch-up
   useEffect(() => {
+    if (authStatus !== 'authed') return
     const channel = supabase
       .channel('public:daily_news')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'daily_news' }, () => {
@@ -154,10 +184,11 @@ export default function App() {
       supabase.removeChannel(channel)
       appStateSubscription.remove()
     }
-  }, [checkMissedArticles])
+  }, [checkMissedArticles, authStatus])
 
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {
+    if (authStatus !== 'authed') return
     setLoading(true)
     setArticles([])
     setHasMore(true)
@@ -199,7 +230,7 @@ export default function App() {
       setLoading(false)
       listRef.current?.scrollToOffset({ offset: 0, animated: false })
     })
-  }, [dateRange, activeCategory, refreshTrigger]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dateRange, activeCategory, refreshTrigger, authStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleLoadNew() {
     setNewArticlesCount(0)
@@ -290,6 +321,10 @@ export default function App() {
     return result
   }, [articles, bioMap])
 
+  if (authStatus !== 'authed') {
+    return <BetaGateScreen status={authStatus} redeemError={redeemError} onRetry={retry} />
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <NavBar
@@ -300,6 +335,7 @@ export default function App() {
           const h = contentHeightRef.current[lang]
           pendingPropRef.current = h > 0 ? scrollOffsetRef.current / h : 0
           setLang(newLang)
+          setSavedLang(newLang)
         }}
         onCategoryChange={handleCategoryChange}
       />
@@ -313,7 +349,7 @@ export default function App() {
           <NewArticlesBanner count={newArticlesCount} lang={lang} onLoad={handleLoadNew} />
           <FilterTag label={filterLabel} onClear={handleClearFilter} />
           {loading
-            ? <ActivityIndicator style={{ flex: 1 }} color="#18181b" />
+            ? <LoadingIndicator lang={lang} />
             : <FlatList
               ref={listRef}
               data={displayArticles}
@@ -326,6 +362,7 @@ export default function App() {
                     dateRange={dateRange}
                     stepDays={stepDays}
                     hasArticles={displayArticles.length > 0}
+                    onOpenManual={() => setShowManual(true)}
                   />
                 ) : null
               }
@@ -379,7 +416,32 @@ export default function App() {
           }
         </View>
       </View>
+      <SubscriptionManualModal
+        visible={showManual}
+        lang={lang}
+        onClose={() => setShowManual(false)}
+      />
     </SafeAreaView>
+  )
+}
+
+function LoadingIndicator({ lang }: { lang: 'en' | 'zh' }) {
+  const [dots, setDots] = useState('.')
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDots(d => d.length >= 3 ? '.' : d + '.')
+    }, 400)
+    return () => clearInterval(interval)
+  }, [])
+  
+  return (
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator color="#18181b" />
+      <Text style={styles.loadingText}>
+        {lang === 'en' ? 'loading ' : '加载中 '}{dots}
+      </Text>
+    </View>
   )
 }
 
@@ -393,4 +455,6 @@ const styles = StyleSheet.create({
   loadMoreSentinel: { paddingVertical: 16, alignItems: 'center' },
   loadMoreText: { fontSize: 10, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
   loadMoreTextDone: { fontSize: 10, color: '#d4d4d8', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
+  loadingText: { fontSize: 13, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', fontVariant: ['tabular-nums'], minWidth: 80, textAlign: 'center' },
 })

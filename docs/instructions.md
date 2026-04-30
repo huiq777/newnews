@@ -185,6 +185,7 @@ supabase functions deploy answer-question
 supabase functions deploy refresh-questions
 supabase functions deploy process-queue
 supabase functions deploy ingest-apify-tweets  # --no-verify-jwt required
+supabase functions deploy redeem-invite        # closed-beta auth gate (Round 1)
 
 # Test answer-question (streaming)
 curl -X POST https://<project>.supabase.co/functions/v1/answer-question \
@@ -202,6 +203,35 @@ curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
 supabase secrets set GROQ_API_KEY=... --project-ref <ref>
 supabase secrets set COHERE_API_KEY=... --project-ref <ref>
 supabase secrets list
+```
+
+---
+
+## Generate a beta invite (Round 1)
+
+Apply migration once: paste `supabase/sql/20260426_beta_invites.sql` into the
+Supabase SQL Editor (idempotent — safe to re-run). Then mint an invite:
+
+```sql
+insert into beta_invites (code, display_name, default_lang)
+values (
+  replace(replace(replace(
+    encode(gen_random_bytes(12), 'base64'),
+    '+', '-'), '/', '_'), '=', ''),
+  'Wang Lei',  -- the invitee's display name
+  'zh'         -- 'en' or 'zh' — preselects gate language
+)
+returning code;
+```
+
+Share over WeChat: `https://<host>/?invite=<code>`. First click signs the user
+in anonymously and ties them to the row; subsequent reloads skip the gate.
+
+To inspect / audit:
+
+```sql
+select code, display_name, default_lang, used_at, user_id, expires_at
+from beta_invites order by created_at desc;
 ```
 
 ---
