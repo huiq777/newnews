@@ -74,7 +74,7 @@ export default function BetaGateScreen({ status, redeemError, onRetry }: Props) 
     if (status === 'gated') {
       return (
         <>
-          <Text style={styles.headline}>{t.brand} — {t.beta}</Text>
+          <Text style={styles.headline}>{t.beta}</Text>
           <Text style={styles.bodyText}>{t.gatedBody}</Text>
         </>
       )
