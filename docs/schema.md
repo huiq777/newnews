@@ -1,14 +1,15 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-04-05. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-04-24. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
-The schema is organized into three layers:
+The schema is organized into four layers:
 
 - **Ingestion layer** (`sources`, `raw_ingestion`) — managed exclusively by Cloudflare Workers. Never written to by the frontend client.
 - **Product layer** (`daily_news`) — read by the frontend, written by Cloudflare Workers and Supabase Edge Functions via the service role.
 - **Cache layer** (`trend_briefs`) — written by the `generate-trend-brief` Edge Function; read directly by the frontend via anon key. TTL-based invalidation.
+- **Auth layer** (`beta_invites` + `is_beta_user()` helper) — service-role only. The `redeem-invite` Edge Function writes; the helper function is referenced indirectly from RLS policies of future user-scoped tables (e.g. `qa_logs`).
 
 All tables have Row Level Security enabled. Client access is granted only where explicitly needed.
 
@@ -25,8 +26,32 @@ The ingestion queue. Cloudflare Workers write raw article content here and track
 ### `daily_news`
 The clean, production-ready article store. Contains AI-generated bilingual summaries, pre-generated questions, scraped full article content, and Cohere vector embeddings. This is what the frontend reads and what the RAG chatbot searches. Linked back to `raw_ingestion` via `raw_ingestion_id` for audit traceability. The `engagement` JSONB column stores platform engagement data: `{likes, retweets}` for tweets (propagated from `raw_ingestion.metadata`), or `{hn_score, hn_comments}` for RSS articles enriched via the HN Algolia API.
 
-### `trend_briefs` *(planned — Trend Brief feature)*
+### `trend_briefs`
 Cache table for cross-window trend synthesis. One row per `(anchor_date, step_days)` time window; covers ALL content categories in a single brief. The `generate-trend-brief` Edge Function writes here on successful completion; the frontend reads via anon key and renders the Trend Brief card only when the "All" tab is active. TTL is 6 hours — no automated invalidation beyond that; a Refresh button gives the user manual control. Feishu does NOT read from this table.
+
+### `channel_invites`
+Subscription manual routing table. Feishu, Slack, and other channel invite URLs rotate or expire; this table lets the operator update invite URLs without redeploying the frontend bundle. The frontend reads this table lazily when the Subscription Manual modal opens. A channel is hidden from the UI if its `invite_url` is null.
+- `channel` (text PK, e.g. `feishu`, `wecom`)
+- `language` (text, `'en' | 'zh'`)
+- `display_label` (text, e.g. `#daily-brief`)
+- `invite_url` (text, URL to join or QR image for WeCom)
+
+### `beta_invites`
+Round 1 closed-beta invite-link redemption table. Operator mints rows via the Supabase SQL Editor and shares `https://<host>/?invite=<code>` over WeChat; the user's first click signs them in anonymously and the `redeem-invite` Edge Function ties the row to their `auth.uid()`.
+
+Columns:
+- `code` (text PK) — random URL-safe slug, admin-generated.
+- `display_name` (text NOT NULL) — operator-attributed name (e.g. "Wang Lei", "Founder Park 朋友").
+- `default_lang` (text NOT NULL, `'en' | 'zh'`) — preselects gate language.
+- `email` (text NULL) — reserved for Round 2 magic-link flow; null in Round 1.
+- `expires_at` (timestamptz NULL) — null = never expires.
+- `used_at` (timestamptz NULL) — set on redemption.
+- `user_id` (uuid FK to `auth.users`, `on delete set null`) — the redeeming user.
+- `created_at` (timestamptz NOT NULL).
+
+RLS is enabled with **no anon/authenticated policies** — only `redeem-invite` (running as service role) reads or writes. Direct PostgREST `select * from beta_invites` from any logged-in user returns zero rows. This is the access-control invariant: the table never leaks invite codes to client callers.
+
+The companion helper function `public.is_beta_user()` (`security definer`) returns `true` iff the current `auth.uid()` owns a redeemed-and-non-expired row. Future user-scoped tables (e.g. `qa_logs`) use it for one-line RLS: `using (is_beta_user() and user_id = auth.uid())`.
 
 ---
 
@@ -66,7 +91,8 @@ CREATE TABLE raw_ingestion (
     retry_count  INTEGER           NOT NULL DEFAULT 0,
     last_error   TEXT,
     processed_at TIMESTAMPTZ,
-    metadata     JSONB                              -- {likes, retweets} for github_feed tweets; NULL for RSS/WeChat
+    metadata     JSONB,                             -- {likes, retweets} for github_feed tweets; NULL for RSS/WeChat
+    published_at TIMESTAMPTZ                        -- article publish date extracted from HTML meta tags by process-queue; NULL for tweets/RSS without a date
 );
 
 
@@ -162,19 +188,75 @@ $$;
 
 
 -- ============================================================
--- CACHE LAYER (planned — Trend Brief feature)
+-- claim_pending_batch RPC (used by process-queue Edge Function)
+-- ============================================================
+
+-- Atomic batch claim: atomically marks up to batch_size pending rows as 'processing'
+-- and returns them. Uses three-tier priority ordering to surface today's content first.
+-- SECURITY DEFINER + REVOKE FROM PUBLIC — callable only by service_role via PostgREST RPC.
+CREATE OR REPLACE FUNCTION claim_pending_batch(batch_size int DEFAULT 5)
+RETURNS SETOF raw_ingestion
+LANGUAGE plpgsql SECURITY DEFINER
+AS $$
+BEGIN
+  IF auth.role() != 'service_role' THEN
+    RAISE EXCEPTION 'Unauthorized: service_role required';
+  END IF;
+  RETURN QUERY
+  UPDATE raw_ingestion SET status = 'processing'
+  WHERE id IN (
+    SELECT id FROM raw_ingestion
+    WHERE status = 'pending'
+    ORDER BY
+      -- Three-tier priority, all dates evaluated in Eastern Time.
+      -- 'America/New_York' handles DST automatically (EST in winter, EDT in summer).
+      --
+      -- Tier 0: published_at = today → explicit today content, highest priority.
+      -- Tier 1: published_at IS NULL AND fetched_at = today → fresh but undated
+      --         (typical for tweets and RSS feeds without <pubDate>).
+      -- Tier 2: everything else → backlog, processed FIFO.
+      CASE
+        WHEN published_at IS NOT NULL
+             AND (published_at AT TIME ZONE 'America/New_York')::date
+               = (now() AT TIME ZONE 'America/New_York')::date
+        THEN 0
+        WHEN published_at IS NULL
+             AND (fetched_at AT TIME ZONE 'America/New_York')::date
+               = (now() AT TIME ZONE 'America/New_York')::date
+        THEN 1
+        ELSE 2
+      END ASC,
+      -- FIFO within each tier
+      fetched_at ASC
+    LIMIT batch_size
+  )
+  -- CRITICAL MVCC guard: re-check status after acquiring the row lock.
+  -- Two concurrent Edge Function invocations can read the same pending IDs.
+  -- AND status='pending' forces Postgres to re-read live row state after locking —
+  -- if Worker A already committed 'processing', Worker B returns 0 rows cleanly.
+  -- Replaces FOR UPDATE SKIP LOCKED, which caused "Lock was stolen" errors via PostgREST.
+  AND status = 'pending'
+  RETURNING *;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION claim_pending_batch(int) FROM PUBLIC;
+
+
+-- ============================================================
+-- CACHE LAYER
 -- ============================================================
 
 CREATE TABLE trend_briefs (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   anchor_date   date        NOT NULL,
   step_days     integer     NOT NULL,
-  synthesis     text        NOT NULL,
-  sources_json  jsonb       NOT NULL,  -- [{id, title, published_at, is_historical, index}]
+  synthesis_en  text,                  -- EN trend analysis; may be null if that pass failed
+  synthesis_zh  text,                  -- ZH trend analysis; may be null if that pass failed
+  sources_json  jsonb       NOT NULL,  -- [{index, id, title, url, published_at, is_historical}]
   model         text        NOT NULL,
   tokens_used   integer,               -- null on abort; set on successful completion
   generated_at  timestamptz NOT NULL DEFAULT now(),
-  expires_at    timestamptz NOT NULL   -- generated_at + interval '6 hours'
+  expires_at    timestamptz NOT NULL   -- generated_at + 6h for today; far-future for past dates
 );
 
 CREATE INDEX ON trend_briefs (anchor_date, step_days, expires_at);
@@ -186,6 +268,89 @@ ALTER TABLE trend_briefs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "public_read_trend_briefs"
     ON trend_briefs FOR SELECT
     USING (true);
+
+-- ============================================================
+-- DELIVERY ACCOUNTING
+-- ============================================================
+
+CREATE TABLE digest_sent (
+  id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel      text        NOT NULL,  -- e.g. 'feishu', 'slack', 'discord', 'telegram', 'wecom', 'notion'
+  anchor_date  date        NOT NULL,
+  status       text        NOT NULL CHECK (status IN ('pending','sent','failed','skipped_empty_brief')),
+  last_error   text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (channel, anchor_date)  -- enables ON CONFLICT DO NOTHING claim
+);
+
+CREATE INDEX ON digest_sent (anchor_date DESC, channel);
+
+-- Claim semantics: INSERT ... ON CONFLICT DO NOTHING RETURNING id — only
+-- senders whose row comes back should actually deliver. Retries of the same
+-- (channel, anchor_date) get an empty RETURNING and must skip.
+-- RLS: no anon policy → anon blocked. Service role bypasses RLS for worker writes.
+ALTER TABLE digest_sent ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE channel_invites (
+  channel       text PRIMARY KEY CHECK (channel IN ('feishu','slack','discord','telegram','wecom','notion')),
+  language      text NOT NULL CHECK (language IN ('en','zh')),
+  display_label text,
+  invite_url    text,
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE channel_invites ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "anon_read_invites" ON channel_invites FOR SELECT USING (true);
+```
+
+### Round 1 Auth (2026-04-26)
+
+The full migration lives at [supabase/sql/20260426_beta_invites.sql](../supabase/sql/20260426_beta_invites.sql) (idempotent — safe to re-run via the SQL Editor). Headline:
+
+```sql
+CREATE TABLE IF NOT EXISTS public.beta_invites (
+  code          text PRIMARY KEY,
+  display_name  text NOT NULL,
+  default_lang  text NOT NULL DEFAULT 'zh' CHECK (default_lang IN ('en','zh')),
+  email         text,                                              -- Round 2 reserved
+  expires_at    timestamptz,
+  used_at       timestamptz,
+  user_id       uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS beta_invites_user_id_idx
+  ON public.beta_invites(user_id) WHERE user_id IS NOT NULL;
+
+-- RLS: enabled with NO policies — service role only.
+ALTER TABLE public.beta_invites ENABLE ROW LEVEL SECURITY;
+
+-- Helper for future user-scoped table RLS.
+CREATE OR REPLACE FUNCTION public.is_beta_user() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.beta_invites
+    WHERE user_id = auth.uid()
+      AND used_at IS NOT NULL
+      AND (expires_at IS NULL OR expires_at > now())
+  );
+$$;
+
+GRANT EXECUTE ON FUNCTION public.is_beta_user() TO anon, authenticated;
+```
+
+Operator workflow (mint an invite — Postgres has no `base64url` so the URL-safe replace chain is required):
+
+```sql
+INSERT INTO beta_invites (code, display_name, default_lang)
+VALUES (
+  replace(replace(replace(
+    encode(gen_random_bytes(12), 'base64'),
+    '+', '-'), '/', '_'), '=', ''),
+  'Wang Lei', 'zh'
+)
+RETURNING code;
 ```
 
 ---

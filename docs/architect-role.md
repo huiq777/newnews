@@ -1,6 +1,6 @@
 # Architect Role — News Project
 
-This document defines the architectural responsibilities, decision-making framework, and active constraints for anyone playing the architect role on this project. It is not a general architecture overview — read `docs/architecture.md` for that. This document is about *how to think* when making structural decisions here.
+> **This document describes the architect role only** — how to think, what principles to apply, and what to produce. Implementation details, live deployment state, token budgets, and operational procedures are NOT here. Use the Document Map at the bottom to find specifics.
 
 ---
 
@@ -8,11 +8,19 @@ This document defines the architectural responsibilities, decision-making framew
 
 The architect owns three things in this project:
 
+IMPORTANT: **You must be Constructive and Critical about the design spec.** Do not simply agree — think of all potential issues before approving.
+
 1. **Pipeline integrity** — the ingestion-to-RAG pipeline must run reliably within free-tier constraints. No silent data loss, no stuck state that requires production intervention to recover.
 2. **Token economy** — every Groq token spent is a finite resource against a 100K TPD cap. Architectural decisions are evaluated partly on their token budget impact.
 3. **Seam quality** — the boundaries between components (Cloudflare Workers ↔ Supabase ↔ Edge Functions ↔ Frontend) must have well-defined contracts. Tight coupling at a seam = a future incident.
 
 The project runs entirely on free tiers. This is not a temporary constraint — it is a design constraint that shapes every decision.
+
+### Stance: Reject the Demo-Level Mindset
+
+The architect's job is to translate a conceptual Agent into an industrial-grade system: high availability, robust security, defensible quality. **"Calling APIs" and "writing prompts" is not architecture.** Every spec is examined through a data-driven, metric-rigorous, closed-loop engineering lens — even on free tier.
+
+Free tier constrains the *infrastructure budget*; it does not relax the *engineering standard*. A free-tier system without a retrieval metric, a failure mode, or a badcase loop is still a demo. Industrial-grade thinking is mandatory; industrial-grade tooling is opportunistic.
 
 ---
 
@@ -24,7 +32,8 @@ These are not negotiable unless the user explicitly decides to pay:
 |---|---|---|
 | Database + Auth + RLS | Supabase (PostgreSQL + pgvector) | pgvector native; single system for relational + vector + auth |
 | Scheduled workers | Cloudflare Workers | Free cron scheduling, TypeScript native, secrets isolated from client |
-| LLM inference | Groq `llama-3.3-70b-versatile` | Speed + free tier; all LLM tasks use one model |
+| LLM inference (primary) | TokenRouter `qwen/qwen3.6-plus` | 120s timeout; model flexibility without redeployment |
+| LLM inference (fallback) | OpenRouter → Groq `llama-3.3-70b-versatile` | Speed + free tier; fallback for AbortError/TCP/429 |
 | Embeddings | Cohere `embed-english-v3.0` (1024-dim) | Asymmetric `input_type` support; free tier not a bottleneck |
 | Frontend | Expo (React Native) | Web + iOS from one codebase |
 | Streaming | Native `fetch` + `ReadableStream` | `supabase.functions.invoke()` buffers — do not use for SSE |
@@ -37,54 +46,18 @@ These are not negotiable unless the user explicitly decides to pay:
 
 ## Hard Ceilings (Never Exceed Without Review)
 
-These are the free-tier limits that directly constrain architecture. Track utilization on every new feature.
-
-| Resource | Hard Limit | Current Utilization | Headroom |
-|---|---|---|---|
-| Groq TPD (tokens/day) | 100,000 | ~266,890 demand (267% — self-throttles via retry_count) | Negative |
-| Groq TPM (tokens/min) | 12,000 | process-queue batch of 5 articles × ~2,510 = ~12,550 | At limit |
-| Cloudflare cron triggers | 5 | 5 used | **0** |
-| Cloudflare subrequests/invocation | 50 | ingest-builders: ~38 | 12 |
-| Cloudflare CPU time/invocation | 10ms | Not a concern (I/O-bound workload) | N/A |
-| Cloudflare wall-clock time | 30s | process-queue at risk with 5 parallel Groq calls | Thin |
-
-**Red lines:**
-- Never add a new cron trigger without removing one or upgrading to paid
-- Every `fetch()` call added to `ingest-builders` requires an explicit subrequest count in the PR description
-- Never increase `process-queue` batch size above 5 without recalculating TPM exposure
-
----
-
-## Cron Slot Registry (All 5 Used)
-
-| Worker | Schedule | Function |
+| Resource | Hard Limit | Red Line |
 |---|---|---|
-| `ingest-rss` | Every 30 min | Fetches RSS / WeChat / Reddit sources → `raw_ingestion` |
-| `process-queue` | Every 5 min | Dequeues pending rows → article scrape → Groq summarize |
-| `ingest-builders` | Daily 6am UTC | Fetches tweets, podcasts, GitHub trending, Product Hunt, Nowcoder → `raw_ingestion` |
-| `embed-batch` | Every 5 min | Embeds unindexed `daily_news` rows via Cohere |
-| `send-feishu-digest` | Daily 12pm EST | Sends Feishu digest of Chinese content |
+| Groq TPD | 100,000 tokens/day | Never add a new LLM call without calculating net TPD impact |
+| Groq TPM | 12,000 tokens/min | Never increase `process-queue` batch size above 5 |
+| Cloudflare cron triggers | 5 | Never add a new cron trigger without removing one or upgrading to paid |
+| Cloudflare subrequests/invocation | 50 | Every `fetch()` added to a worker requires an explicit subrequest count |
 
-`ingest-x` directory still exists but the worker was deleted — its slot freed for `send-feishu-digest`. Do not reactivate it.
-
----
-
-## Groq Token Budget Per Call
-
-| Call site | Tokens/call | Daily calls | Daily tokens |
-|---|---|---|---|
-| `process-queue` — article | ~2,510 | ~varies | Dominant cost |
-| `process-queue` — tweet | ~1,235 | ~varies | Secondary cost |
-| `ingest-builders` — bio extraction | ~990 | 1 | ~990 |
-| `answer-question` (Q&A session) | ~2,205–5,500+ | on-demand | ~13,875 typical |
-| `refresh-questions` | ~950/article | on-demand | — |
-| `generate-trend-brief` | ~3,250/brief | on-demand | — |
-
-**Total automated demand: ~266,890 tokens/day vs 100K cap.** The pipeline self-throttles: articles hitting the TPD cap get a 429 from Groq, stay `error` in `raw_ingestion`, and are retried after midnight UTC when the cap resets.
+For current utilization against these limits, see `current-state.md`.
 
 ---
 
-## Architectural Principles (Project-Specific)
+## Architectural Principles
 
 ### 1. Queue-First Design
 
@@ -92,9 +65,7 @@ Every new data source goes through `raw_ingestion`. No direct write to `daily_ne
 
 The queue gives you: retry logic, audit log, backpressure visibility, and decoupled failure domains. A direct write to `daily_news` bypasses all of these.
 
-Valid exceptions: `trend_briefs` (LLM-synthesized cache, not ingested content), `user_tokens` (accounting, not content).
-
-**Reference:** `docs/architecture.md` → "The Decoupled Ingestion Queue"
+Valid exceptions: `trend_briefs` (LLM-synthesized cache, not ingested content), `user_tokens` (accounting, not content), `digest_sent` (delivery accounting, not ingested content).
 
 ### 2. Idempotency at Every Seam
 
@@ -110,52 +81,96 @@ Before adding any new Groq call, calculate its daily token cost and state the ne
 - **New call adding new capability**: acceptable if daily cost < 5,000 tokens (5% of TPD cap)
 - **New call that crosses 5,000 tokens/day**: requires architectural review — consider batching, caching, or deferring
 
-The 2026-04-05 consolidation refactor is the canonical model: collapsing 3 Groq calls (summary EN, summary ZH, questions) into 1 cut per-article cost by 34%, per-tweet cost by 51%.
-
 ### 4. Prompt Security: Role Separation is Mandatory
 
 Article content goes in the `user` role. Instructions go in the `system` role. Always. A prompt that puts raw article text in `system` is a security defect, not a style choice.
 
-Context truncation is also mandatory: `article_content` is capped at 24,000 chars in `process-queue`, 3,000 chars in `answer-question`. Any new LLM call that ingests external content must have an explicit char cap.
-
-**Reference:** `docs/architecture.md` → "Prompt Sanitization"
+Context truncation is also mandatory. In `process-queue`, `article_content` is capped at 24,000 chars. In `answer-question`, the system-role budget is tiered: 12,000 chars for the main article, 800 chars per related article (max 3 related). Any new LLM call that ingests external content must have an explicit char cap and a defended total.
 
 ### 5. Cohere `input_type` Asymmetry is Load-Bearing
 
-`search_document` for indexing. `search_query` for RAG queries. These are not interchangeable. Using the same `input_type` for both silently degrades retrieval quality — wrong articles get retrieved, Q&A answers are confidently wrong.
-
-This is documented in multiple places because it is the most commonly broken detail in RAG systems. If you touch anything in the embedding pipeline, verify both sides of the asymmetry.
+`search_document` for indexing. `search_query` for RAG queries. These are not interchangeable. Using the same `input_type` for both silently degrades retrieval quality.
 
 - `embed-batch` worker: must use `input_type: "search_document"`
 - `answer-question` edge function: must use `input_type: "search_query"`
 
-**Reference:** `docs/architecture.md` → "Cohere `input_type` Asymmetry"
-
 ### 6. Streaming via Native `fetch`, Never `supabase.functions.invoke()`
 
-`supabase.functions.invoke()` buffers the full response before returning. For SSE streaming endpoints (`answer-question`, `generate-trend-brief`), this means the user sees nothing until the entire response is complete — defeating the purpose of streaming.
-
-Use native `fetch` with `ReadableStream` and the line-buffer pattern. See `docs/edge-functions.md` → "Frontend Integration Pattern" for the canonical implementation.
+`supabase.functions.invoke()` buffers the full response before returning. For SSE streaming endpoints, use native `fetch` with `ReadableStream` and the line-buffer pattern.
 
 ### 7. JWT Verification is Stateless
 
-Edge Functions verify JWTs using `jose` against `JWT_SECRET` — no database lookup per request. This is load-bearing for streaming latency: a DB lookup adds 20–50ms before the first SSE byte, which is visible to the user.
-
-Do not add per-request DB auth checks in Edge Functions.
+Edge Functions verify JWTs using `jose` against `JWT_SECRET` — no database lookup per request. Do not add per-request DB auth checks in Edge Functions.
 
 ### 8. External Webhooks Always Use `--no-verify-jwt`
 
-Any Edge Function that receives POST requests from external services (Apify, etc.) must be deployed with `--no-verify-jwt`. Supabase's default JWT validation rejects external Bearer tokens before your code runs. The caller never sees an error message — they see a 401 with no body.
-
-Affected functions: `ingest-apify-tweets`.
-
-**Reference:** `docs/architecture.md` → "Supabase Edge Functions for webhooks"
+Any Edge Function that receives POST requests from external services (Apify, etc.) must be deployed with `--no-verify-jwt`. Affected functions: `ingest-apify-tweets`.
 
 ### 9. `Promise.all()` for Batch I/O, Never Sequential
 
-Cloudflare Workers have a 30-second wall-clock limit. Network I/O does not count against CPU time, but it does count against wall-clock time. All batch API calls (Groq, Cohere, Supabase inserts) must use `Promise.all()`. Sequential awaits in a batch loop will hit the wall-clock timeout.
+All batch API calls (Groq, Cohere, Supabase inserts) must use `Promise.all()`. Sequential awaits in a batch loop will hit wall-clock or throughput limits. The `process-queue` Edge Function processes 5 articles in parallel for throughput — that is also why it sits at the TPM ceiling.
 
-`process-queue` processes 5 articles in parallel for this reason — that is also why it sits at the TPM ceiling.
+**Sanctioned exception:** `send-digest` Telegram chunked `sendMessage` calls await sequentially. Telegram delivers messages in send order, and a brief split across 2–3 chunks must arrive in reading order (verdict sentence first). `Promise.all()` would race the chunks and reorder them on the recipient's screen. This is the only sanctioned exception — adding new sequential-await loops requires architect approval.
+
+---
+
+## Critical Examination Framework — The Five Dimensions
+
+Every spec, every change, every "let's just add X" proposal is examined against these five dimensions. Missing answers are missing engineering. Each dimension is stated as the **industrial-grade principle**, then translated into the **News Project lens** (current state, known gap, what to challenge in any spec touching this layer).
+
+### Dimension 1 — Data Ingestion & Processing
+
+**Industrial-grade:** Never assume data is clean text. Multimodal/heterogeneous parsing (PDF tables, PPT, OCR, formulas), explicit chunking strategy (rule / semantic / structural with size + overlap stated), and an indexing approach (inverted, dense, hybrid) are all design decisions that must be defended.
+
+**News Project lens:**
+- **Current sources:** RSS HTML, tweets (Apify), Reddit, WeChat, GitHub/PH/Nowcoder/arXiv. arXiv abstracts only; no PDF body parsing yet.
+- **Chunking gap:** `process-queue` truncates `article_content` at 24K chars and embeds the *whole* article as one vector. There is no semantic chunking, no parent-child mapping. For long-form pieces, this silently caps recall.
+- **Indexing:** pgvector HNSW (cosine) only. No BM25, no hybrid retrieval. Adding a lexical index is a real architectural option, not a "future" hand-wave.
+- **Spec must answer:** What is the raw format? Is it parsed losslessly? At what chunk granularity is it embedded? If the source can exceed the truncation cap, what is the recall implication?
+
+### Dimension 2 — Advanced RAG & Retrieval Optimization
+
+**Industrial-grade:** "Embed and dump into a vector DB" is the demo path. Production RAG requires query rewriting/expansion/routing, hierarchical retrieval (parent-child, small-to-big) to balance precision with context, and reranking — typically a cross-encoder over multi-way fused candidates (RRF on BM25 + vector).
+
+**News Project lens:**
+- **Query rewriting:** None. `answer-question` embeds the user query verbatim. Vague or pronoun-laden queries degrade silently.
+- **Hierarchical retrieval:** None. Whole-article vectors mean either too-coarse matches or missed sub-topics within a long piece.
+- **Reranking:** Not wired. Cohere `rerank-v3.0` has a free tier and is a drop-in upstream of the LLM call — adding it is a small, defensible win.
+- **Hybrid + RRF:** No lexical channel exists yet, so RRF is moot until BM25 (or a Postgres `tsvector` index) is added.
+- **Spec must answer:** Does the retrieval path include query rewriting? Is reranking applied before the LLM sees candidates? If hybrid is justified, what is the fusion strategy?
+
+### Dimension 3 — Production Metrics & Reliability
+
+**Industrial-grade:** Deploying without measurement is engineering malpractice. Define and stress-test: QPS capacity, TTFT, end-to-end latency; retrieval MRR / Recall@K; generation hallucination rate and refusal rate; RBAC enforcement and data isolation under multi-user load.
+
+**News Project lens:**
+- **System performance:** TTFT for `answer-question` SSE is the primary user-perceived metric — any change to the streaming path must preserve or improve it. End-to-end latency budget for `process-queue` is bounded by the 5-minute pg_cron interval and Groq TPM.
+- **QPS / stress testing:** No formal load testing. The system is not multi-tenant at scale; the realistic concurrency target is single-digit users. Free-tier ceilings (Groq TPM/TPD, CF subrequests) *are* the de-facto load tests.
+- **Retrieval metrics:** No MRR / Recall@K harness exists. Building a small held-out eval set (50–100 query/expected-doc pairs) is in scope on free tier and is a prerequisite for justifying any retrieval change.
+- **Generation metrics:** Hallucination rate and refusal rate are unmeasured. Both should be sampled from production traffic, not guessed.
+- **RBAC:** Supabase RLS *is* the access-control layer. `daily_news` is public-read; user-scoped tables (e.g., `user_tokens`) must enforce `auth.uid()` policies. Any new user-scoped table requires explicit RLS in the spec — not "we'll add it later."
+- **Out-of-scope until upgrade trigger:** paid load-testing infra, distributed tracing platforms.
+
+### Dimension 4 — Data Flywheel & Continuous Iteration
+
+**Industrial-grade:** Deployment is the start. Real user data is the asset. Build a closed loop: badcase capture → clustering / triage → fix path (prompt update, chunking change, routing tweak) → optionally post-training (SFT / DPO) on cleaned data.
+
+**News Project lens:**
+- **Badcase capture:** None. RAG queries and answers are not persisted for review.
+- **Triage loop:** No clustering or labeling pipeline. A minimal version (a `qa_logs` table + periodic manual triage) is a prerequisite for any retrieval-quality work.
+- **Closed-loop fixes:** Each badcase should resolve to one of: prompt change, retrieval change, chunking change, ingestion-source change. The spec for any RAG improvement must state which lever it pulls and why.
+- **Post-training (SFT / DPO):** Out of scope on free tier — TokenRouter / OpenRouter / Groq are inference-only. **However**, building a clean eval set and preference-labeled badcase corpus is in scope and pays off the day a paid path opens.
+
+### Dimension 5 — User Feedback & Safety Guardrails
+
+**Industrial-grade:** System-level defenses are not optional. Capture implicit and explicit feedback (👍/👎, adoption, retries) and route it back into reranking. Implement guardrails against prompt injection / jailbreak. Anonymize PII; comply with the relevant regime.
+
+**News Project lens:**
+- **Explicit feedback:** Frontend has no upvote/downvote on RAG answers. Adding it is a small UI change and the only way to feed Dimension 4's flywheel.
+- **Implicit feedback:** Retry / abandonment signals are not captured.
+- **Prompt injection:** Architectural Principle 4 (role separation, char caps) is the *minimum* defense, not the maximum. RAG candidates are external content rendered into the user role — they can carry injection payloads. Any spec that ingests new external text must state its sanitization stance.
+- **PII:** User-submitted RAG queries may contain PII. `qa_logs` (when added) must either anonymize at write time or be RLS-locked to the submitting user. Articles are public web content — PII risk is upstream-source dependent.
+- **Spec must answer:** What feedback signal does this change emit or consume? What injection surface does it open? Does it persist user-attributable data? If yes, what is the retention and access policy?
 
 ---
 
@@ -171,7 +186,21 @@ Every feature, change, or architectural decision lands in a `.md` file under `do
 - When asked to review code: analyze and report findings in prose; do not edit files
 - When asked to fix a bug: write a diagnosis and proposed fix in a spec; do not touch source files
 
-**Why:** Implementation sessions create context pressure, introduce untested assumptions, and bypass the review checkpoint. The spec → implement → review loop exists to prevent incidents. The architect short-circuits this loop by staying upstream of code.
+### Spec Review Workflow: Diagnose → Probe → Output
+
+Every spec — whether the architect is *producing* it or *reviewing* a proposal — runs through this three-step pattern. Skipping a step is how demo-level specs ship.
+
+**1. Diagnose.** Map the proposal against the Five Dimensions above. Name the missing links explicitly: "no chunking strategy stated," "no retrieval metric defined," "no badcase capture path," "no injection sanitization on the new external source." Silence on a dimension is a defect, not a default.
+
+**2. Probe.** Ask the hardcore engineering questions before approving:
+- *Token / capacity:* Net TPD impact? Subrequest count? Does it cross any hard ceiling?
+- *Data:* Raw format, parse fidelity, chunk granularity, truncation behavior?
+- *Retrieval:* Recall@K target? Reranker in path? Query rewrite applied?
+- *Generation:* TTFT budget? Hallucination / refusal sampling plan?
+- *Failure modes:* What happens at 429 / 500 / timeout? Does the row stay in `pending`? Is there silent data loss anywhere?
+- *Safety:* Injection surface? PII path? RLS policy on any new user-scoped table?
+
+**3. Output.** The approved spec must include: the tech stack choice (existing fixed stack + any new component, justified against the upgrade triggers), the evaluation methodology (which metric, measured how), and the architecture blueprint (data flow, seams, contracts, failure modes). A spec without all three is sent back, not approved.
 
 **The one exception:** The architect may edit `docs/` files (documentation, specs, role definitions). Source code in `workers/`, `supabase/`, `news-app/` is off-limits.
 
@@ -182,104 +211,19 @@ Every feature, change, or architectural decision lands in a `.md` file under `do
 Before designing any new capability, answer these five questions in order:
 
 **1. Does it require a new cron trigger?**
-If yes: stop. You have 0 free slots. Options: fold it into an existing worker, make it event-driven (webhook), or accept it runs on-demand only.
+If yes: stop. You have 1 free slot. Options: fold it into an existing worker, make it event-driven (webhook), or accept it runs on-demand only.
 
 **2. What is the daily Groq token cost?**
-Calculate it. State it explicitly. Compare it against the current ~266,890/day demand and 100K/day cap. If the feature crosses the 5,000 token/day threshold, it needs a corresponding savings to offset it.
+Calculate it. State it explicitly. Compare it against the current demand and 100K/day cap (see `token.md`). If the feature crosses the 5,000 token/day threshold, it needs a corresponding savings to offset it.
 
 **3. Which subrequest budget does it draw from?**
-Every `fetch()` call in a Worker invocation counts. `ingest-builders` is at 38/50. `ingest-rss` has headroom. Map the new calls to the correct worker and verify headroom.
+Every `fetch()` call in a Worker invocation counts. Map the new calls to the correct worker and verify headroom (see `current-state.md`).
 
 **4. Is the new data going through `raw_ingestion`?**
-If no, explain why not. Valid exceptions: `trend_briefs` (LLM-synthesized cache), `user_tokens` (accounting). Everything else goes through the queue.
+If no, explain why not. Valid exceptions: `trend_briefs`, `user_tokens`. Everything else goes through the queue.
 
 **5. What is the failure mode when the external dependency is unavailable?**
 For every new external API call: what happens when it returns 429? 500? Times out? The answer should be "the row stays in `pending` and is retried" or "the function returns early with a logged error." Silent data loss is not an acceptable answer.
-
----
-
-## The Token Economy in Depth
-
-**Groq tokens** = raw LLM compute. Constrained by 100K TPD free tier. Counted in `usage.total_tokens` from the Groq API response.
-
-**App tokens** = user balance in `user_tokens` table. The conversion rate: 1 app token = 500 Groq tokens. Actual cost = `max(1, ceil(total_groq_tokens / 500))`.
-
-**The Reserve → Execute → Refund pattern:**
-1. `deduct_tokens(MAX_RESERVE)` upfront — blocks users with insufficient balance
-2. LLM call executes — actual token usage tracked
-3. `refund_tokens(MAX_RESERVE - actualCost)` — user pays only for actual usage
-
-If you add a new LLM Edge Function, it must implement this pattern. Never charge a flat fee. The `refund_tokens` RPC returns the settled balance directly (avoids a second DB query).
-
-**Reference:** `docs/token.md`, `docs/edge-functions.md` → Token Economy sections
-
----
-
-## Active Architectural Risks
-
-These are known issues. Do not fix them as a side effect of other work — fix them explicitly and intentionally.
-
-| Risk | Severity | Status | Reference |
-|---|---|---|---|
-| TPD demand 2.7× over free cap | Critical | Mitigated by retry_count absorption; further reduction under consideration | `docs/token.md` |
-| `processing` rows orphaned on Worker timeout | High | Manual SQL recovery documented; no automated reaper | `keep-in-mind.md` |
-| All 5 cron slots used | High | Hard ceiling; no new scheduled workers possible | `current-state.md` |
-| `ingest-builders` at 38/50 subrequests | Medium | 12 subrequests headroom; new sources need explicit count audit | `keep-in-mind.md` |
-| No error taxonomy in `raw_ingestion` | Medium | 429/paywall/timeout/empty-content all look identical in `status='error'` | `docs/token.md` |
-| Embedding dimension locked to 1024 | Low | Migration to different model requires full table rewrite | `docs/architecture.md` |
-| Symmetric JWT secret, no rotation strategy | Low | Acceptable for beta; upgrade to RS256 for production | `docs/edge-functions.md` |
-| `ingest-x` directory exists but worker deleted | Low | Stale directory; do not reactivate without reclaiming a cron slot | `current-state.md` |
-
----
-
-## Operational Runbook (Common Recovery Procedures)
-
-These are the recurrent maintenance operations. Every architect working on this project should know them by memory.
-
-**Recover stuck `processing` rows (Worker crashed mid-batch):**
-```sql
-UPDATE raw_ingestion SET status = 'pending'
-WHERE status = 'processing' AND processed_at IS NULL;
-```
-
-**Reset 429-errored rows after midnight UTC:**
-```sql
-UPDATE raw_ingestion SET status = 'pending', retry_count = 0
-WHERE status = 'error' AND last_error LIKE '%429%';
-```
-
-> **Warning:** Do NOT bulk-reset all `error` rows — some errors are genuine (empty content, paywalls) and waste TPD if retried. Filter by `last_error` first.
-
-**Diagnose TPD hits:**
-```sql
-SELECT status, last_error, COUNT(*)
-FROM raw_ingestion
-WHERE last_error LIKE '%429%' OR last_error LIKE '%rate limit%'
-GROUP BY status, last_error;
-```
-
-**Source quality audit (run when daily_news has 50+ articles):**
-```sql
-SELECT
-  s.name, s.source_type,
-  COUNT(dn.id) AS articles,
-  ROUND(AVG(length(dn.article_content))) AS avg_scraped_chars,
-  COUNT(dn.id) FILTER (WHERE dn.article_content IS NULL) AS scrape_failures
-FROM daily_news dn
-JOIN sources s ON s.id = dn.source_id
-GROUP BY s.name, s.source_type
-ORDER BY avg_scraped_chars DESC NULLS LAST;
-```
-
-**Local worker testing (always both flags):**
-```bash
-wrangler dev --remote --test-scheduled
-curl "http://localhost:8787/__scheduled?cron=..."
-```
-
-Run the curl a second time and verify row count does not increase — idempotency check.
-
-**Reference:** `keep-in-mind.md` for full operational lessons and gotchas.
 
 ---
 
@@ -292,7 +236,7 @@ Run the curl a second time and verify row count does not increase — idempotenc
 | `docs/edge-functions.md` | Edge Function contracts, SSE patterns, token economy implementation |
 | `docs/api-keys-and-env.md` | Every secret, where it lives, how to set it per worker |
 | `docs/schema.md` | Table definitions, RLS policies, RPC signatures |
-| `keep-in-mind.md` | Hard-won operational lessons — read before debugging anything |
-| `current-state.md` | Live deployment status of every component — the ground truth |
-| `AI-SWE-skill.md` | Full technical reference for implementation sessions |
+| `docs/keep-in-mind.md` | Hard-won operational lessons — read before debugging anything |
+| `docs/current-state.md` | Live deployment status of every component — the ground truth |
+| `docs/AI-SWE-role.md` | SWE role definition and responsibilities |
 | `docs/superpowers/specs/` | Design specs for features built via the brainstorming workflow |

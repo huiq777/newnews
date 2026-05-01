@@ -1,0 +1,191 @@
+[
+  {
+    "article_id": "7511521a-f36d-49b1-a9ef-d70fe5081559",
+    "title": "Okta CEO Todd McKinnon Pivots to AI Agent Identity Management, Targeting a $280B Cyber Market to Counter SaaSpocalypse",
+    "chars": 65875,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Okta 如何在 20000 家企业客户中推行 60/40 变革配额而不引发身份验证中断？"
+  },
+  {
+    "article_id": "7511521a-f36d-49b1-a9ef-d70fe5081559",
+    "title": "Okta CEO Todd McKinnon Pivots to AI Agent Identity Management, Targeting a $280B Cyber Market to Counter SaaSpocalypse",
+    "chars": 65875,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "2800 亿美元的网络安全市场能否在不蚕食传统 SaaS 订阅收入的前提下消化 Agent 身份层？"
+  },
+  {
+    "article_id": "7511521a-f36d-49b1-a9ef-d70fe5081559",
+    "title": "Okta CEO Todd McKinnon Pivots to AI Agent Identity Management, Targeting a $280B Cyber Market to Counter SaaSpocalypse",
+    "chars": 65875,
+    "cohort": "long",
+    "stress_test": true,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "1cb0c4ef-a859-4508-918e-4268787408eb",
+    "title": "FedRAMP Authorizes Microsoft GCC High Despite Missing Encryption Docs, Exposing $10B Government Cloud to Risk",
+    "chars": 38179,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "司法部在未验证加密文档的情况下部署GCC High，将如何防范核心数据泄露风险？"
+  },
+  {
+    "article_id": "1cb0c4ef-a859-4508-918e-4268787408eb",
+    "title": "FedRAMP Authorizes Microsoft GCC High Despite Missing Encryption Docs, Exposing $10B Government Cloud to Risk",
+    "chars": 38179,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "FedRAMP仅靠1000万美元预算能否支撑AI基础设施的合规审查？"
+  },
+  {
+    "article_id": "1cb0c4ef-a859-4508-918e-4268787408eb",
+    "title": "FedRAMP Authorizes Microsoft GCC High Despite Missing Encryption Docs, Exposing $10B Government Cloud to Risk",
+    "chars": 38179,
+    "cohort": "long",
+    "stress_test": true,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "91cfbde5-3830-491a-9a13-7edf06999631",
+    "title": "MuleRun Launches 24/7 Dedicated VM AI Agents, Targeting $10M GMV E-commerce Workflows",
+    "chars": 23057,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "MuleRun的专属VM能否稳定支撑$10M GMV团队处理海量并发上架？"
+  },
+  {
+    "article_id": "91cfbde5-3830-491a-9a13-7edf06999631",
+    "title": "MuleRun Launches 24/7 Dedicated VM AI Agents, Targeting $10M GMV E-commerce Workflows",
+    "chars": 23057,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "开放共享的Knowledge Network真能杜绝企业核心工作流的数据泄露风险吗？"
+  },
+  {
+    "article_id": "91cfbde5-3830-491a-9a13-7edf06999631",
+    "title": "MuleRun Launches 24/7 Dedicated VM AI Agents, Targeting $10M GMV E-commerce Workflows",
+    "chars": 23057,
+    "cohort": "long",
+    "stress_test": true,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "418f85ee-e9fa-481c-b2b4-a99c46293536",
+    "title": "TechCrunch Updates AI Glossary Covering 20 Terms, Highlights RAM Shortage and Token Pricing Models",
+    "chars": 19964,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "RAM短缺是否会倒逼Google DeepMind全面转向轻量架构？"
+  },
+  {
+    "article_id": "418f85ee-e9fa-481c-b2b4-a99c46293536",
+    "title": "TechCrunch Updates AI Glossary Covering 20 Terms, Highlights RAM Shortage and Token Pricing Models",
+    "chars": 19964,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "AGI的模糊定义究竟是技术指标还是融资包装话术？"
+  },
+  {
+    "article_id": "418f85ee-e9fa-481c-b2b4-a99c46293536",
+    "title": "TechCrunch Updates AI Glossary Covering 20 Terms, Highlights RAM Shortage and Token Pricing Models",
+    "chars": 19964,
+    "cohort": "long",
+    "stress_test": true,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
+    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
+    "chars": 17768,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
+    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
+    "chars": 17768,
+    "cohort": "long",
+    "stress_test": false,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
+    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
+    "chars": 17768,
+    "cohort": "long",
+    "stress_test": true,
+    "lang": "zh",
+    "question": ""
+  },
+  {
+    "article_id": "9994fd23-77fd-4f1f-9fb4-f8d88d70c9c5",
+    "title": "Elon Musk Sues OpenAI Ahead of April 27 Trial, Demanding Executive Removal and Structural Overhaul",
+    "chars": 11893,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "4月27日开庭的裁决将如何影响OpenAI在IPO前的机构估值？"
+  },
+  {
+    "article_id": "9994fd23-77fd-4f1f-9fb4-f8d88d70c9c5",
+    "title": "Elon Musk Sues OpenAI Ahead of April 27 Trial, Demanding Executive Removal and Structural Overhaul",
+    "chars": 11893,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Musk的诉讼究竟是为了公司治理还是单纯为xAI的6月上市争取缓冲期？"
+  },
+  {
+    "article_id": "d5b0cc8b-5419-4d4e-85da-72d1a096c917",
+    "title": "Pinterest Terminates Engineer Teddy Martin Over ldapsearch Command, Triggering NLRB Review and a 15-Minute Firing Meeting",
+    "chars": 11884,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Pinterest声称删除脚本最后一行即可获取姓名，这能否支撑15分钟解雇会议的合法性？"
+  },
+  {
+    "article_id": "d5b0cc8b-5419-4d4e-85da-72d1a096c917",
+    "title": "Pinterest Terminates Engineer Teddy Martin Over ldapsearch Command, Triggering NLRB Review and a 15-Minute Firing Meeting",
+    "chars": 11884,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "公司是否借AI裁员的名义打压内部透明度，还是ldapsearch命令确实构成了隐私威胁？"
+  },
+  {
+    "article_id": "8e04a242-5452-48a5-b775-583002cbea5a",
+    "title": "Palantir Employees Revolt Over ICE Contracts and Iran Strike Killing 120 Children, Forcing CEO Alex Karp to Defend 22-Point Manifesto",
+    "chars": 11262,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "22点宣言引发内部反弹后，Palantir是否制定了挽回海外客户采购的具体方案？"
+  },
+  {
+    "article_id": "8e04a242-5452-48a5-b775-583002cbea5a",
+    "title": "Palantir Employees Revolt Over ICE Contracts and Iran Strike Killing 120 Children, Forcing CEO Alex Karp to Defend 22-Point Manifesto",
+    "chars": 11262,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Alex Karp关于AI削弱人文选民影响力的论断，究竟是数据推演还是政治叙事?"
+  }
+]

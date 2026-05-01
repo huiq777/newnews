@@ -8,26 +8,29 @@
 
 ## Current Setup
 
-**Single model for everything:** `llama-3.3-70b-versatile` via Groq free tier
+**Three-tier routing:** TokenRouter (`qwen/qwen3.6-plus`) → OpenRouter (configurable model) → Groq (`llama-3.3-70b-versatile`) as tertiary fallback
+
+`process-queue` (Supabase Edge Function) routes through all three. All other functions (`answer-question`, `refresh-questions`, `ingest-builders`) call Groq directly.
 
 | Property | Value |
 |---|---|
-| Provider | Groq (GroqCloud) |
-| Model | llama-3.3-70b-versatile |
-| Context window | 128K tokens |
-| Arena score | ~1,250 (estimated; not on Arena top-100) |
-| Pricing (free tier) | $0 — but hard-capped at **100K tokens/day (TPD)** |
-| Pricing (paid tier) | $0.59 input / $0.79 output per 1M tokens |
-| TPM limit | 12,000 tokens/minute |
+| Primary provider | TokenRouter — `qwen/qwen3.6-plus`; 120s timeout |
+| Secondary provider | OpenRouter — model set via `OPENROUTER_MODEL` secret |
+| Tertiary fallback | Groq (GroqCloud) — `llama-3.3-70b-versatile` |
+| Groq context window | 128K tokens |
+| Groq Arena score | ~1,250 (estimated; not on Arena top-100) |
+| Groq pricing (free tier) | $0 — hard-capped at **100K tokens/day (TPD)** |
+| Groq pricing (paid tier) | $0.59 input / $0.79 output per 1M tokens |
+| Groq TPM limit | 12,000 tokens/minute |
 
 ### What it does today
 
 | Task | Worker / Function | Calls/item | max_tokens |
 |---|---|---|---|
-| Bilingual article summary (EN + ZH) | `process-queue` | 1 | 900 |
-| Bilingual tweet summary (EN + ZH) | `process-queue` | 1 | 900 |
-| EN analytical questions (3×) | `process-queue` | 1 | 300 |
-| ZH analytical questions (3×) | `process-queue` | 1 | 300 |
+| Bilingual article summary (EN + ZH) | `process-queue` (Edge Function) | 1 | 900 |
+| Bilingual tweet summary (EN + ZH) | `process-queue` (Edge Function) | 1 | 900 |
+| EN analytical questions (3×) | `process-queue` (Edge Function) | 1 | 300 |
+| ZH analytical questions (3×) | `process-queue` (Edge Function) | 1 | 300 |
 | Twitter bio extraction (batch) | `ingest-builders` | 1/day | 600 |
 | RAG streaming Q&A answer | `answer-question` | 1 | 1024 |
 | EN question regeneration | `refresh-questions` | 1 | 300 |
@@ -35,9 +38,11 @@
 
 ### Problems with the current setup
 
-**1. The TPD ceiling throttles the pipeline daily**
+**1. The TPD ceiling throttles the pipeline when Groq is used**
 
-Daily content demand vs the 100K TPD cap:
+TokenRouter as primary significantly reduces direct Groq hits — Groq 429s now only occur when TokenRouter + OpenRouter both fail. However, `answer-question`, `refresh-questions`, and `ingest-builders` still call Groq directly, and the structural argument for removing the Groq dependency entirely still holds.
+
+Daily content demand vs the 100K TPD cap (worst case — all traffic on Groq):
 
 | Source | Items/day | Tokens/item | Daily demand |
 |---|---|---|---|
@@ -235,7 +240,7 @@ Instead of a two-model split, use grok-4.1-thinking for all tasks with thinking 
 
 | File | Change |
 |---|---|
-| `workers/process-queue/src/index.ts` | Article + tweet summary calls → grok-4.1 (xAI endpoint, thinking off); EN+ZH question calls → MiMo (Xiaomi endpoint) |
+| `supabase/functions/process-queue/index.ts` | Article + tweet summary calls → grok-4.1 (xAI endpoint, thinking off); EN+ZH question calls → MiMo (Xiaomi endpoint) |
 | `workers/ingest-builders/src/index.ts` | Bio extraction call → MiMo |
 | `supabase/functions/answer-question/index.ts` | RAG answer → grok-4.1 (thinking on); Cohere embed unchanged |
 | `supabase/functions/refresh-questions/index.ts` | Question regen calls → MiMo |
@@ -244,16 +249,14 @@ Instead of a two-model split, use grok-4.1-thinking for all tasks with thinking 
 ### New secrets required
 
 ```bash
-# Cloudflare Workers (process-queue, ingest-builders)
-wrangler secret put XAI_API_KEY --name process-queue
-wrangler secret put MIMO_API_KEY --name process-queue
+# Cloudflare Worker (ingest-builders)
 wrangler secret put MIMO_API_KEY --name ingest-builders
 
-# Supabase Edge Functions
+# Supabase Edge Functions (process-queue, answer-question, refresh-questions)
 supabase secrets set XAI_API_KEY=xai_xxxx --project-ref <ref>
 supabase secrets set MIMO_API_KEY=xxxx --project-ref <ref>
 
-# GROQ_API_KEY can be removed from all workers after migration
+# GROQ_API_KEY can be removed from all functions after migration
 ```
 
 ### API endpoint changes

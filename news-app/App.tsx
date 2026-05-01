@@ -1,21 +1,30 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
-  ActivityIndicator, FlatList, SafeAreaView, StyleSheet, Text, View,
+  ActivityIndicator, AppState, FlatList, SafeAreaView, StyleSheet, Text, View,
 } from 'react-native'
-import { supabase, FEED_PAGE_SIZE, Article, Category } from './lib/config'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { supabase, FEED_PAGE_SIZE, Article, Category, getInitialLang, setSavedLang } from './lib/config'
+import { useAuthGate } from './lib/auth'
+import BetaGateScreen from './components/BetaGateScreen'
 import NavBar from './components/NavBar'
 import DrumWheelSidebar from './components/DrumWheelSidebar'
 import FilterTag from './components/FilterTag'
 import ArticleCard from './components/ArticleCard'
 import TrendBriefCard from './components/TrendBriefCard'
+import SubscriptionManualModal from './components/SubscriptionManualModal'
+import NewArticlesBanner from './components/NewArticlesBanner'
+import XThreadCard, { XThreadGroup } from './components/XThreadCard'
 
 export default function App() {
+  const { status: authStatus, defaultLang: authDefaultLang, redeemError, retry } = useAuthGate()
   const [articles, setArticles] = useState<Article[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [feedOffset, setFeedOffset] = useState(0)
   const [hasMore, setHasMore] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
-  const [lang, setLang] = useState<'en' | 'zh'>('en')
+  const [lang, setLang] = useState<'en' | 'zh'>(getInitialLang)
+  const [showManual, setShowManual] = useState(false)
   const [sourceMap, setSourceMap] = useState<Record<string, string>>({})
   const [bioMap, setBioMap] = useState<Record<string, string>>({})
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({})
@@ -27,6 +36,8 @@ export default function App() {
   })
   const [filterLabel, setFilterLabel] = useState('Today')
   const [stepDays, setStepDays] = useState(1)
+  const [newArticlesCount, setNewArticlesCount] = useState(0)
+  const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({})
   const wheelControlsRef = useRef<{ resetToToday: () => void; switchTo: (days: 1 | 3 | 7 | 30) => void } | null>(null)
   const listRef = useRef<FlatList>(null)
   const scrollOffsetRef = useRef(0)
@@ -34,8 +45,28 @@ export default function App() {
   const pendingPropRef = useRef<number | null>(null)
   const langRef = useRef(lang)
   const feedOffsetRef = useRef(0)
-  useEffect(() => { langRef.current = lang }, [lang])
+  const isInitialLoadRef = useRef(true)
+  useEffect(() => { 
+    langRef.current = lang
+  }, [lang])
   useEffect(() => { feedOffsetRef.current = feedOffset }, [feedOffset])
+
+  // Native async-storage fallback for initial language
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      AsyncStorage.getItem('news_app_lang').then(saved => {
+        if (saved === 'en' || saved === 'zh') setLang(saved)
+      })
+    }
+  }, [])
+
+  // Default-language carry-over from invite metadata.
+  useEffect(() => {
+    if (authDefaultLang && authStatus === 'authed') {
+      const hasExplicitLang = typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('news_app_lang')
+      if (!hasExplicitLang) setLang(authDefaultLang)
+    }
+  }, [authDefaultLang, authStatus])
 
   // Font injection (web-only)
   useEffect(() => {
@@ -64,6 +95,7 @@ export default function App() {
 
   // Load sources
   useEffect(() => {
+    if (authStatus !== 'authed') return
     supabase.from('sources').select('id, name, metadata, category').then(({ data }) => {
       if (data) {
         const sMap: Record<string, string> = {}
@@ -79,26 +111,96 @@ export default function App() {
         setCategoryMap(cMap)
       }
     })
+  }, [authStatus])
+
+  const activeCategoryRef = useRef(activeCategory)
+  const dateRangeRef = useRef(dateRange)
+  const articlesRef = useRef(articles)
+  const appStateRef = useRef(AppState.currentState)
+  const authStatusRef = useRef(authStatus)
+
+  useEffect(() => { activeCategoryRef.current = activeCategory }, [activeCategory])
+  useEffect(() => { dateRangeRef.current = dateRange }, [dateRange])
+  useEffect(() => { articlesRef.current = articles }, [articles])
+  useEffect(() => { authStatusRef.current = authStatus }, [authStatus])
+
+  const checkMissedArticles = useCallback(async () => {
+    if (authStatusRef.current !== 'authed') return
+    let latestDate = articlesRef.current[0]?.created_at
+    if (!latestDate && dateRangeRef.current) {
+      latestDate = dateRangeRef.current.start.toISOString()
+    }
+    if (!latestDate) return
+
+    const cat = activeCategoryRef.current
+    const dr = dateRangeRef.current
+
+    let query = supabase
+      .from('daily_news')
+      .select('id', { count: 'exact', head: true })
+      .gt('created_at', latestDate)
+
+    if (cat !== 'all') {
+      query = query.eq('category', cat)
+    }
+
+    if (dr) {
+      const s = dr.start.toISOString()
+      const e = dr.end.toISOString()
+      query = query.or(
+        `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
+      )
+    }
+
+    const { count, error } = await query
+    if (error) {
+      console.error('Error checking missed articles:', error)
+      return
+    }
+
+    if (count != null && count > 0) {
+      setNewArticlesCount(count)
+    }
   }, [])
+
+  // Realtime subscription and AppState watcher for background catch-up
+  useEffect(() => {
+    if (authStatus !== 'authed') return
+    const channel = supabase
+      .channel('public:daily_news')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'daily_news' }, () => {
+        checkMissedArticles()
+      })
+      .subscribe()
+
+    const appStateSubscription = AppState.addEventListener('change', nextAppState => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        checkMissedArticles()
+      }
+      appStateRef.current = nextAppState
+    })
+
+    return () => {
+      supabase.removeChannel(channel)
+      appStateSubscription.remove()
+    }
+  }, [checkMissedArticles, authStatus])
 
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {
+    if (authStatus !== 'authed') return
     setLoading(true)
     setArticles([])
     setHasMore(true)
     feedOffsetRef.current = 0
 
-    const selectQuery = activeCategory === 'all'
-      ? 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement'
-      : 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement, sources!inner(category)'
-
     let query = supabase
       .from('daily_news')
-      .select(selectQuery)
+      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
       .order('created_at', { ascending: false })
 
     if (activeCategory !== 'all') {
-      query = query.eq('sources.category', activeCategory)
+      query = query.eq('category', activeCategory)
     }
 
     if (dateRange) {
@@ -112,11 +214,13 @@ export default function App() {
     query.range(0, FEED_PAGE_SIZE - 1).then(({ data, error }) => {
       if (error) console.error(error)
       else {
-        // Auto-fallback: if Today returns nothing, widen to 3D
-        if ((!data || data.length === 0) && stepDays === 1 && wheelControlsRef.current) {
+        // Auto-fallback: if Today returns nothing on INITIAL LOAD, widen to 3D
+        if ((!data || data.length === 0) && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
+          isInitialLoadRef.current = false
           wheelControlsRef.current.switchTo(3)
           return
         }
+        isInitialLoadRef.current = false
         setArticles(data as unknown as Article[])
         const loaded = data?.length ?? 0
         setHasMore(loaded === FEED_PAGE_SIZE)
@@ -126,24 +230,25 @@ export default function App() {
       setLoading(false)
       listRef.current?.scrollToOffset({ offset: 0, animated: false })
     })
-  }, [dateRange, activeCategory]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dateRange, activeCategory, refreshTrigger, authStatus]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleLoadNew() {
+    setNewArticlesCount(0)
+    setRefreshTrigger(v => v + 1)
+  }
 
   async function loadMoreArticles() {
     if (loading || loadingMore || !hasMore) return
     setLoadingMore(true)
     const offset = feedOffsetRef.current
 
-    const selectQuery = activeCategory === 'all'
-      ? 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement'
-      : 'id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement, sources!inner(category)'
-
     let query = supabase
       .from('daily_news')
-      .select(selectQuery)
+      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
       .order('created_at', { ascending: false })
 
     if (activeCategory !== 'all') {
-      query = query.eq('sources.category', activeCategory)
+      query = query.eq('category', activeCategory)
     }
 
     if (dateRange) {
@@ -166,7 +271,12 @@ export default function App() {
   }
 
   const handleFilterChange = useCallback((start: Date, end: Date, label: string, days: number) => {
-    setDateRange({ start, end })
+    setDateRange(prev => {
+      if (prev && prev.start.getTime() === start.getTime() && prev.end.getTime() === end.getTime()) {
+        return prev
+      }
+      return { start, end }
+    })
     setFilterLabel(label)
     setStepDays(days)
   }, [])
@@ -179,7 +289,41 @@ export default function App() {
     setActiveCategory(cat)
   }
 
-  const displayArticles = articles
+  const displayArticles = useMemo(() => {
+    const result: (Article | XThreadGroup)[] = []
+    const authorGroupMap = new Map<string, XThreadGroup>()
+
+    for (const item of articles) {
+      const match = item.url?.match(/x\.com\/([^/]+)\/status\//)
+      if (match && match[1]) {
+        const handle = match[1].toLowerCase()
+        if (authorGroupMap.has(handle)) {
+          authorGroupMap.get(handle)!.tweets.push(item)
+        } else {
+          const newGroup: XThreadGroup = {
+            handle: match[1],
+            bio: bioMap[handle],
+            tweets: [item],
+          }
+          authorGroupMap.set(handle, newGroup)
+          result.push(newGroup)
+        }
+      } else {
+        result.push(item)
+      }
+    }
+
+    // Sort tweets within groups by likes desc
+    for (const group of authorGroupMap.values()) {
+      group.tweets.sort((a, b) => (b.engagement?.likes ?? 0) - (a.engagement?.likes ?? 0))
+    }
+
+    return result
+  }, [articles, bioMap])
+
+  if (authStatus !== 'authed') {
+    return <BetaGateScreen status={authStatus} redeemError={redeemError} onRetry={retry} />
+  }
 
   return (
     <SafeAreaView style={styles.container}>
@@ -191,6 +335,7 @@ export default function App() {
           const h = contentHeightRef.current[lang]
           pendingPropRef.current = h > 0 ? scrollOffsetRef.current / h : 0
           setLang(newLang)
+          setSavedLang(newLang)
         }}
         onCategoryChange={handleCategoryChange}
       />
@@ -201,9 +346,10 @@ export default function App() {
           onMountedControls={controls => { wheelControlsRef.current = controls }}
         />
         <View style={styles.mainFeed}>
+          <NewArticlesBanner count={newArticlesCount} lang={lang} onLoad={handleLoadNew} />
           <FilterTag label={filterLabel} onClear={handleClearFilter} />
           {loading
-            ? <ActivityIndicator style={{ flex: 1 }} color="#18181b" />
+            ? <LoadingIndicator lang={lang} />
             : <FlatList
               ref={listRef}
               data={displayArticles}
@@ -216,10 +362,11 @@ export default function App() {
                     dateRange={dateRange}
                     stepDays={stepDays}
                     hasArticles={displayArticles.length > 0}
+                    onOpenManual={() => setShowManual(true)}
                   />
                 ) : null
               }
-              keyExtractor={item => item.id}
+              keyExtractor={item => 'tweets' in item ? `thread-${item.handle}` : item.id}
               onScroll={({ nativeEvent }) => { scrollOffsetRef.current = nativeEvent.contentOffset.y }}
               scrollEventThrottle={16}
               onContentSizeChange={(_, h) => {
@@ -230,9 +377,21 @@ export default function App() {
                   listRef.current?.scrollToOffset({ offset: target, animated: false })
                 }
               }}
-              renderItem={({ item }) => (
-                <ArticleCard item={item} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
-              )}
+              renderItem={({ item }) => {
+                if ('tweets' in item) {
+                  const handleLower = item.handle.toLowerCase()
+                  const isExpanded = !!expandedThreads[handleLower]
+                  return (
+                    <XThreadCard
+                      group={item}
+                      lang={lang}
+                      isExpanded={isExpanded}
+                      onExpandedChange={(v) => setExpandedThreads(prev => ({ ...prev, [handleLower]: v }))}
+                    />
+                  )
+                }
+                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
+              }}
               onEndReached={loadMoreArticles}
               onEndReachedThreshold={0.2}
               ListEmptyComponent={
@@ -257,7 +416,32 @@ export default function App() {
           }
         </View>
       </View>
+      <SubscriptionManualModal
+        visible={showManual}
+        lang={lang}
+        onClose={() => setShowManual(false)}
+      />
     </SafeAreaView>
+  )
+}
+
+function LoadingIndicator({ lang }: { lang: 'en' | 'zh' }) {
+  const [dots, setDots] = useState('.')
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDots(d => d.length >= 3 ? '.' : d + '.')
+    }, 400)
+    return () => clearInterval(interval)
+  }, [])
+  
+  return (
+    <View style={styles.loadingContainer}>
+      <ActivityIndicator color="#18181b" />
+      <Text style={styles.loadingText}>
+        {lang === 'en' ? 'loading ' : '加载中 '}{dots}
+      </Text>
+    </View>
   )
 }
 
@@ -271,4 +455,6 @@ const styles = StyleSheet.create({
   loadMoreSentinel: { paddingVertical: 16, alignItems: 'center' },
   loadMoreText: { fontSize: 10, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
   loadMoreTextDone: { fontSize: 10, color: '#d4d4d8', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
+  loadingText: { fontSize: 13, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', fontVariant: ['tabular-nums'], minWidth: 80, textAlign: 'center' },
 })

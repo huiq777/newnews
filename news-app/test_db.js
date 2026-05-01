@@ -4,7 +4,7 @@ if (!process.env.EXPO_PUBLIC_SUPABASE_URL) require('dotenv').config({ path: '.en
 
 const supabase = createClient(process.env.EXPO_PUBLIC_SUPABASE_URL, process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
 async function run() {
-  const { data, error } = await supabase.from('daily_news').select('title, engagement').limit(10);
+  const { data, error } = await supabase.from('sources').select('*').limit(5);
   console.log(error || JSON.stringify(data, null, 2));
 }
 run();

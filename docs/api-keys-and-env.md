@@ -20,8 +20,19 @@ This document is the authoritative reference for every secret in the system. Bef
 | `SUPABASE_ANON_KEY` | Supabase → Settings → API | No | No | Yes (`EXPO_PUBLIC_SUPABASE_ANON_KEY`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API | **Yes — all workers. ONLY HERE.** | No | **Never** |
 | `GROQ_API_KEY` | console.groq.com | Yes (`process-queue`, `ingest-builders`) | Yes (`answer-question`, `refresh-questions`) | **Never** |
+| `OPENROUTER_API_KEY` | openrouter.ai → Keys | Yes (`process-queue`, `ingest-builders`) | No | **Never** |
+| `OPENROUTER_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`process-queue`) | No | **Never** |
+| `OPENROUTER_BIO_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`ingest-builders`) | No | **Never** |
 | `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
-| `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-feishu-digest` worker) | No | **Never** |
+| `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-digest` worker) | No | **Never** |
+| `SLACK_WEBHOOK_URL` | Slack → app → Incoming Webhooks → New Webhook | Optional (`send-digest`) | No | **Never** |
+| `DISCORD_WEBHOOK_URL` | Discord channel → Edit Channel → Integrations → Webhooks | Optional (`send-digest`) | No | **Never** |
+| `TELEGRAM_BOT_TOKEN` | @BotFather on Telegram → `/newbot` → copy token | Optional (`send-digest`; paired with chat id) | No | **Never** |
+| `TELEGRAM_CHAT_ID` | Send a message to your bot, then `GET https://api.telegram.org/bot<TOKEN>/getUpdates` → `result[].message.chat.id` | Optional (`send-digest`) | No | **Never** |
+| `WECOM_WEBHOOK_URL` | WeCom group → 群机器人 → 添加机器人 → copy full webhook URL incl. `?key=` | Optional (`send-digest`) | No | **Never** |
+| `NOTION_TOKEN` | notion.so/my-integrations → New integration (Internal) → "Insert content" + "Read content" → copy Internal Integration Secret | Optional (`send-digest`; paired with `NOTION_DATABASE_ID`) | No | **Never** |
+| `NOTION_DATABASE_ID` | Open the target Notion database → URL contains `notion.so/<workspace>/<database-id>?v=...` → copy the database-id segment. **Must connect the integration to the database** (top-right `···` → `Connections` → `Add connections` → pick the integration) or POSTs return 404. After connecting, share the database with end users and tell them to **subscribe** (database top-right `···` → `Updates` → `Subscribe`) to get push notifications when each daily row lands. | Optional (`send-digest`) | No | **Never** |
+| `CRON_SECRET` | Generate a random string; used to auth pg_cron → `generate-trend-brief` | No | Yes (`generate-trend-brief`) | **Never** |
 
 ---
 
@@ -38,6 +49,8 @@ wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put GROQ_API_KEY
+wrangler secret put OPENROUTER_API_KEY
+wrangler secret put OPENROUTER_MODEL        # paste: google/gemma-2-9b-it:free (or any free model)
 
 # From workers/embed-batch/:
 wrangler secret put SUPABASE_URL
@@ -48,11 +61,20 @@ wrangler secret put COHERE_API_KEY
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 wrangler secret put GROQ_API_KEY
+wrangler secret put OPENROUTER_API_KEY
+wrangler secret put OPENROUTER_BIO_MODEL    # paste: google/gemma-2-9b-it:free (or smaller)
 
-# From workers/send-feishu-digest/:
+# From workers/send-digest/:
 wrangler secret put SUPABASE_URL
 wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-wrangler secret put FEISHU_WEBHOOK_URL
+wrangler secret put FEISHU_WEBHOOK_URL         # optional
+wrangler secret put SLACK_WEBHOOK_URL          # optional
+wrangler secret put DISCORD_WEBHOOK_URL        # optional
+wrangler secret put TELEGRAM_BOT_TOKEN         # optional (paired with TELEGRAM_CHAT_ID)
+wrangler secret put TELEGRAM_CHAT_ID           # optional
+wrangler secret put WECOM_WEBHOOK_URL          # optional — full https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...
+wrangler secret put NOTION_TOKEN               # optional (paired with NOTION_DATABASE_ID)
+wrangler secret put NOTION_DATABASE_ID         # optional
 ```
 
 To verify secrets are set (values are hidden):
@@ -74,6 +96,7 @@ Go to: Supabase Dashboard → Edge Functions → Manage Secrets
 Add:
 - `GROQ_API_KEY` (used by `answer-question` and `refresh-questions`)
 - `COHERE_API_KEY` (used by `answer-question` for query embedding)
+- `CRON_SECRET` (used by `generate-trend-brief` to auth pg_cron-triggered runs)
 
 These are accessible inside Edge Functions via `Deno.env.get('COHERE_API_KEY')`.
 
@@ -113,7 +136,8 @@ For Cloudflare Pages deployment, add these same two variables in: Pages → Sett
 |---|---|---|
 | Supabase | 500MB DB, 2M Edge Function calls/mo | <50MB, <10K calls |
 | Cloudflare Workers | 100,000 requests/day | ~300/day |
-| Groq | Free (rate-limited) | ~50–100 API calls/day |
+| Groq | Free (rate-limited) | ~50–100 API calls/day (fallback only after OpenRouter migration) |
+| OpenRouter | Free (free-tier models only — subject to rate limits) | Primary LLM for process-queue + ingest-builders |
 | Cohere | 1,000 API calls/month | ~30 batch calls/month |
 | Cloudflare Pages | Unlimited bandwidth | Static site hosting |
 
