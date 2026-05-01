@@ -17,6 +17,8 @@ type Strings = {
   redeemFailedTitle: string
   reasons: Record<Exclude<RedeemError, null>, string>
   tryAgain: string
+  mobileGatedNoInvite: string
+  mobileGatedWithInvite: string
 }
 
 const STRINGS: Record<Lang, Strings> = {
@@ -34,6 +36,8 @@ const STRINGS: Record<Lang, Strings> = {
       network: "Network error. Your spot is held — tap retry.",
     },
     tryAgain: 'Try again',
+    mobileGatedNoInvite: 'This is an invite-only beta. Please open this on a computer to get started.',
+    mobileGatedWithInvite: 'Please open this invite link on a computer to redeem it and access the beta.',
   },
   zh: {
     brand: 'Newnews',
@@ -49,6 +53,8 @@ const STRINGS: Record<Lang, Strings> = {
       network: '网络异常。你的进度已保留，请点击重试。',
     },
     tryAgain: '重试',
+    mobileGatedNoInvite: '本应用处于受邀内测中，请在电脑上打开。',
+    mobileGatedWithInvite: '请在电脑上打开此邀请链接以兑换内测资格。',
   },
 }
 
@@ -76,6 +82,16 @@ export default function BetaGateScreen({ status, redeemError, onRetry }: Props) 
         <>
           <Text style={styles.headline}>{t.beta}</Text>
           <Text style={styles.bodyText}>{t.gatedBody}</Text>
+        </>
+      )
+    }
+    if (status === 'desktop_required_no_invite' || status === 'desktop_required_with_invite') {
+      return (
+        <>
+          <Text style={styles.headline}>{t.beta}</Text>
+          <Text style={styles.bodyText}>
+            {status === 'desktop_required_with_invite' ? t.mobileGatedWithInvite : t.mobileGatedNoInvite}
+          </Text>
         </>
       )
     }
