@@ -6,7 +6,7 @@ Dimension-4 audit: **the project has no badcase capture.** RAG queries and answe
 
 Spec A's quality eval gives us a 21-pair seed corpus; that is a one-time artifact. Spec C builds the production data flywheel: every RAG query persists a structured row capturing question, retrieval context, response, timing, model, token cost, the Spec-A cap usage, and (later, async) the user's 👍/👎 signal.
 
-This spec **depends on Spec B** (auth gate) — the `is_beta_user()` helper and `auth.uid()` are the access-control primitives every qa_logs RLS policy uses. It cannot land before Spec B.
+This spec **depends on Spec B** (auth gate) — `auth.uid()` is the access-control primitive every qa_logs RLS policy uses. It cannot land before Spec B.
 
 There are no per-user token quotas. qa_logs captures token counts purely for observability (cost attribution, badcase correlation), not enforcement.
 
@@ -97,20 +97,20 @@ alter table public.qa_logs enable row level security;
 
 create policy "users_read_own_logs" on public.qa_logs
   for select to authenticated
-  using (is_beta_user() and user_id = auth.uid());
+  using (user_id = auth.uid());
 
 -- The Edge Function uses service role and bypasses RLS for INSERT, but this
 -- policy governs any future direct-from-client insert path.
 create policy "users_insert_own_logs" on public.qa_logs
   for insert to authenticated
-  with check (is_beta_user() and user_id = auth.uid());
+  with check (user_id = auth.uid());
 
 -- Row-level scope: each user can update only their own row.
 -- Column-level scope is enforced separately via GRANT below — this is critical.
 create policy "users_update_own_feedback" on public.qa_logs
   for update to authenticated
-  using (is_beta_user() and user_id = auth.uid())
-  with check (is_beta_user() and user_id = auth.uid());
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
 
 -- ── Column-level GRANTs (telemetry integrity) ───────────────────────────────
 -- CRITICAL: Postgres RLS controls which ROWS a role can act on, but NOT which
@@ -417,7 +417,7 @@ order by asked_at desc limit 20;
 ### B. RLS / privacy / telemetry-integrity audit (architect, blocking)
 
 1. **Cross-user read attempt.** Sign in as user A, ask a question (qa_logs row written). Sign in as user B (different invite). From dev console: `await supabase.from('qa_logs').select('*')`. Expected: **only B's rows**, not A's. If A's rows leak, the RLS SELECT policy is wrong.
-2. **Anonymous (un-redeemed) read attempt.** `signInAnonymously()` without redeeming an invite. Same query. Expected: zero rows (`is_beta_user()` returns false).
+2. **Anonymous (un-redeemed) read attempt.** `signInAnonymously()` without redeeming an invite. Same query. Expected: zero rows (they have no rows since the edge function prevents un-redeemed users from inserting, and `user_id = auth.uid()` scopes reads to their own empty set).
 3. **Anon-key read attempt.** From a curl with only the anon key (no user JWT): `curl -H "apikey: $ANON" $SUPABASE_URL/rest/v1/qa_logs`. Expected: empty array (RLS denies + GRANT removed).
 4. **Cross-user feedback patch attempt.** As B, attempt to PATCH one of A's rows: `await supabase.from('qa_logs').update({ feedback: -1 }).eq('id', '<A-row-id>')`. Expected: zero rows updated, no error (RLS row-scope blocks).
 5. **Service-role read (operator path).** From the Supabase dashboard SQL editor: `select count(*) from qa_logs;`. Expected: full count across all users. Confirms operator triage works.
@@ -475,6 +475,6 @@ If coverage < 95%, investigate null-userId paths (the `userId === null` skip in 
 
 ## Sequencing
 
-- **Hard depends on Spec B** (auth gate). The RLS policies reference `is_beta_user()` and `auth.uid()`; without Spec B, no `is_beta_user()` exists and there is no JWT-bound user to attribute rows to.
+- **Hard depends on Spec B** (auth gate). The RLS policies reference `auth.uid()`; without Spec B, there is no JWT-bound user to attribute rows to.
 - **Independent of Spec A** in mechanism (different files, different concerns), but Spec C *replaces* Spec A's `console.log` instrumentation. Ordering: Spec A ships first (P0), Spec C ships when Spec B is live, then the `console.log` is removed as part of Spec C's `answer-question` patch.
 - **Required by Spec D** in spirit: chunking changes must be evaluated. The acceptance criteria for Spec D will reference baseline metrics computed from `qa_logs` data collected over Spec C's first 1–2 weeks live.

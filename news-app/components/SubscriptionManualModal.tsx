@@ -3,7 +3,7 @@ import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
 import { supabase } from '../lib/config'
 import WebHTML from './WebHTML'
 
-type Channel = 'feishu' | 'slack' | 'discord' | 'telegram' | 'wecom' | 'notion'
+type Channel = 'feishu' | 'slack' | 'discord' | 'telegram' | 'notion'
 
 type ChannelInvite = {
   channel: Channel
@@ -17,7 +17,6 @@ const CHANNEL_LABELS: Record<Channel, string> = {
   slack: 'Slack',
   discord: 'Discord',
   telegram: 'Telegram',
-  wecom: 'WeCom',
   notion: 'Notion',
 }
 
@@ -26,8 +25,6 @@ const CHANNEL_ICONS: Record<Channel, (color: string) => string> = {
   slack: () => `<svg viewBox="0 0 127 127" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M27.2 80c0 7.3-5.9 13.2-13.2 13.2C6.7 93.2.8 87.3.8 80c0-7.3 5.9-13.2 13.2-13.2h13.2V80zm6.6 0c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2v33c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V80z" fill="#E01E5A"/><path d="M47 27c-7.3 0-13.2-5.9-13.2-13.2C33.8 6.5 39.7.6 47 .6c7.3 0 13.2 5.9 13.2 13.2V27H47zm0 6.7c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H13.9C6.6 60.1.7 54.2.7 46.9c0-7.3 5.9-13.2 13.2-13.2H47z" fill="#36C5F0"/><path d="M99.9 46.9c0-7.3 5.9-13.2 13.2-13.2 7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H99.9V46.9zm-6.6 0c0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V13.8C66.9 6.5 72.8.6 80.1.6c7.3 0 13.2 5.9 13.2 13.2v33.1z" fill="#2EB67D"/><path d="M80.1 99.8c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2-7.3 0-13.2-5.9-13.2-13.2V99.8h13.2zm0-6.6c-7.3 0-13.2-5.9-13.2-13.2 0-7.3 5.9-13.2 13.2-13.2h33.1c7.3 0 13.2 5.9 13.2 13.2 0 7.3-5.9 13.2-13.2 13.2H80.1z" fill="#ECB22E"/></svg>`,
   discord: () => `<svg viewBox="0 0 24 24" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><path fill="#5865F2" d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg>`,
   telegram: () => `<svg viewBox="0 0 24 24" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><path fill="#2AABEE" d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>`,
-  // WeCom (企业微信) — official-style icon: blue chat bubble + multicolor dots.
-  wecom: () => `<svg viewBox="0 0 1024 1024" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><path d="M558.72 692.266667a344.149333 344.149333 0 0 1-105.642667 16.426666 341.76 341.76 0 0 1-117.162666-20.309333 58.496 58.496 0 0 0-20.224-3.498667c-14.464 0-31.232 4.650667-52.522667 14.421334 0.512-29.653333-4.309333-50.602667-21.290667-64.896-58.538667-49.365333-90.794667-115.285333-90.794666-185.6 0-143.317333 135.466667-259.84 301.994666-259.84 166.485333 0 301.952 116.522667 301.952 259.84 0 2.816-0.085333 5.632-0.170666 8.448a84.48 84.48 0 0 1 89.813333 15.701333c0.597333-7.978667 0.938667-16.042667 0.938667-24.149333 0-193.578667-176.085333-351.061333-392.533334-351.061334-216.490667 0-392.533333 157.482667-392.533333 351.061334 0 91.733333 40.618667 180.48 112.042667 245.76 0.042667 14.506667-2.56 43.306667-8.106667 77.056-3.072 18.517333 5.034667 37.12 20.693333 47.445333a46.805333 46.805333 0 0 0 51.456 0c36.736-24.106667 64.810667-38.058667 76.8-42.026667 44.501333 15.146667 91.477333 22.826667 139.648 22.826667 61.269333 0 119.338667-12.629333 171.093334-35.114667a85.504 85.504 0 0 1-65.450667-72.533333" fill="#2A8CF4"/><path d="M939.306667 624.896c-25.088 0-46.037333 17.749333-50.986667 41.386667a120.32 120.32 0 0 1-50.218667 93.141333 13.354667 13.354667 0 0 0 19.2 18.474667c0.682667-1.024 1.408-1.962667 2.133334-2.901334v-0.085333a120.32 120.32 0 0 1 89.472-46.72 52.138667 52.138667 0 0 0-9.6-103.296" fill="#31A8FF"/><path d="M836.778667 521.6a52.138667 52.138667 0 1 0-61.952 60.586667 120.32 120.32 0 0 1 93.141333 50.218666 13.354667 13.354667 0 0 0 18.474667-19.2 240.469333 240.469333 0 0 1-2.986667-2.133333 120.32 120.32 0 0 1-46.677333-89.472" fill="#53E000"/><path d="M691.84 683.648a120.32 120.32 0 0 1 45.525333-78.421333l3.584-2.645334a13.354667 13.354667 0 0 0-19.2-18.474666l-2.090666 2.858666h-0.042667a120.32 120.32 0 0 1-89.472 46.762667 52.138667 52.138667 0 1 0 60.586667 61.952c0.170667-4.053333 0.512-8.106667 1.109333-12.032" fill="#FCE117"/><path d="M804.266667 779.776a120.32 120.32 0 0 1-93.141334-50.218667 13.354667 13.354667 0 0 0-18.602666 19.072l0.128 0.085334a232.32 232.32 0 0 1 2.901333 2.176 120.277333 120.277333 0 0 1 46.762667 89.429333 52.138667 52.138667 0 1 0 61.952-60.586667" fill="#F96600"/></svg>`,
   // Notion — black square with the "N" wordmark stylized as two strokes.
   notion: () => `<svg viewBox="0 0 24 24" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><rect width="22" height="22" x="1" y="1" rx="3" fill="#000"/><path fill="#fff" d="M7 6.5h2.6l5.4 7.4V6.5h2v11h-2.4l-5.6-7.6v7.6H7v-11Z"/></svg>`,
 }
@@ -44,7 +41,6 @@ const STRINGS = {
       slack: 'Join Slack workspace →',
       discord: 'Join Discord server →',
       telegram: 'Open Telegram channel →',
-      wecom: 'Open WeCom group →',
       notion: 'Open Notion archive →',
     } as Record<Channel, string>,
     steps: {
@@ -68,11 +64,6 @@ const STRINGS = {
         'Tap Join.',
         `The ${briefLang === 'en' ? 'English' : 'Chinese'} brief arrives automatically daily.`,
       ],
-      wecom: (briefLang: 'en' | 'zh') => [
-        'Open WeCom on your phone, tap + → 扫一扫, and scan the QR code.',
-        `The ${briefLang === 'en' ? 'English' : 'Chinese'} brief arrives automatically in the group every day.`,
-        'Mute group notifications if you prefer no real-time alerts.',
-      ],
       notion: (briefLang: 'en' | 'zh') => [
         'Open the AI-Daily-Trend-Brief Notion database.',
         'In the database, click ··· (top-right) → Updates → Subscribe. Notion will push a notification on your devices each day a new row lands.',
@@ -91,7 +82,6 @@ const STRINGS = {
       slack: '加入 Slack 工作区 →',
       discord: '加入 Discord 服务器 →',
       telegram: '打开 Telegram 频道 →',
-      wecom: '打开企业微信群 →',
       notion: '打开 Notion 档案 →',
     } as Record<Channel, string>,
     steps: {
@@ -114,11 +104,6 @@ const STRINGS = {
         '打开 Telegram 频道。',
         '点击加入。',
         `${briefLang === 'en' ? '英文' : '中文'}简报每天自动推送。`,
-      ],
-      wecom: (briefLang: 'en' | 'zh') => [
-        '在手机上打开企业微信，点击 + → 扫一扫，扫描下方二维码。',
-        `群里每天会自动收到${briefLang === 'en' ? '英文' : '中文'}简报。`,
-        '不再需要手动获取，关闭群通知免打扰即可。',
       ],
       notion: (briefLang: 'en' | 'zh') => [
         '打开 AI-Daily-Trend-Brief Notion 数据库。',
@@ -298,12 +283,6 @@ function ChannelSteps({
   const ctaKey = `cta-${invite.channel}`
   const ctaHovered = hovered === ctaKey
 
-  // WeCom group invites are shared as QR images, not click-to-join URLs.
-  // For wecom: invite_url is an HTTPS image URL → render inline as <Image>.
-  // For all other channels: invite_url is a click-to-join URL → render the
-  // existing Pressable + Linking pattern unchanged.
-  const isQrChannel = invite.channel === 'wecom'
-
   return (
     <View style={{ gap: 14 }}>
       {steps.map((step, idx) => (
@@ -312,14 +291,6 @@ function ChannelSteps({
           <View style={{ flex: 1 }}>
             <Text style={styles.stepText}>{step}</Text>
             {idx === 0 && (
-              isQrChannel ? (
-                <Image
-                  source={{ uri: invite.invite_url }}
-                  style={styles.qrImage}
-                  resizeMode="contain"
-                  accessibilityLabel={lang === 'en' ? 'WeCom group QR code' : '企业微信群二维码'}
-                />
-              ) : (
                 <Pressable
                   onPress={() => Linking.openURL(invite.invite_url)}
                   onHoverIn={() => setHovered(ctaKey)}
@@ -328,7 +299,6 @@ function ChannelSteps({
                 >
                   <Text style={styles.ctaText}>{t.cta[invite.channel]}</Text>
                 </Pressable>
-              )
             )}
           </View>
         </View>

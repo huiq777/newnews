@@ -21,7 +21,7 @@ type Strings = {
 
 const STRINGS: Record<Lang, Strings> = {
   en: {
-    brand: 'News Project',
+    brand: 'Newnews',
     beta: 'Closed Beta',
     loading: 'Loading…',
     redeeming: 'Redeeming invite…',
@@ -36,7 +36,7 @@ const STRINGS: Record<Lang, Strings> = {
     tryAgain: 'Try again',
   },
   zh: {
-    brand: 'News Project',
+    brand: 'Newnews',
     beta: '内测',
     loading: '加载中…',
     redeeming: '正在验证邀请…',

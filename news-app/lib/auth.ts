@@ -112,13 +112,15 @@ export function useAuthGate(): AuthGate {
       const { data: { user: liveUser } } = await supabase.auth.getUser()
       if (myTick !== tickRef.current) return
       if (liveUser?.app_metadata?.is_beta_user) {
-        const { data: refreshed } = await supabase.auth.refreshSession()
+        const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
         if (myTick !== tickRef.current) return
-        const meta = readMeta(refreshed.user ?? liveUser)
-        setDisplayName(meta.displayName)
-        setDefaultLang(meta.defaultLang)
-        setStatus('authed')
-        return
+        if (!refreshErr && refreshed.session) {
+          const meta = readMeta(refreshed.user)
+          setDisplayName(meta.displayName)
+          setDefaultLang(meta.defaultLang)
+          setStatus('authed')
+          return
+        }
       }
     }
 
@@ -200,18 +202,15 @@ export function useAuthGate(): AuthGate {
       return
     }
 
-    // Success — refresh the session so the new JWT (with the just-written
-    // app_metadata.is_beta_user claim) replaces the stale anonymous-signin
-    // JWT in localStorage. Without this, getSession() on reload returns the
-    // pre-redemption JWT and the gate would re-trigger.
-    const { data: refreshed } = await supabase.auth.refreshSession()
-    if (myTick !== tickRef.current) return
-    const refreshedUser = refreshed.user
-    const meta = refreshedUser
-      ? readMeta(refreshedUser)
-      : { displayName: null, defaultLang: null }
-    setDisplayName(meta.displayName ?? payload.display_name)
-    setDefaultLang(meta.defaultLang ?? payload.default_lang)
+    // Success! We DO NOT call refreshSession() here because the anonymous token
+    // was minted milliseconds ago and Supabase will reject the refresh, causing
+    // a silent sign-out and a zombie "authed" UI state (which breaks qa_logs).
+    // The anonymous JWT is perfectly fine for this session because Postgres RLS
+    // checks the DB-backed is_beta_user() function, not the JWT claim.
+    // On the user's next reload, the stale-JWT recovery block at the top will
+    // safely refresh the token since enough time will have passed.
+    setDisplayName(payload.display_name)
+    setDefaultLang(payload.default_lang)
     stripInviteFromWebUrl()
     setStatus('authed')
   }, [])

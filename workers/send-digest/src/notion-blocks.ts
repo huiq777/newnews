@@ -21,6 +21,15 @@ export type Block =
   | { type: 'heading_2'; heading_2: { rich_text: RichText[] } }
   | { type: 'bulleted_list_item'; bulleted_list_item: { rich_text: RichText[] } }
 
+function chunkText(text: string, maxLen: number = 2000): string[] {
+  if (!text) return []
+  const chunks: string[] = []
+  for (let i = 0; i < text.length; i += maxLen) {
+    chunks.push(text.slice(i, i + maxLen))
+  }
+  return chunks
+}
+
 function parseInline(text: string): RichText[] {
   const out: RichText[] = []
   // Split on **bold** segments; preserve order. Non-greedy match, no nested.
@@ -28,13 +37,18 @@ function parseInline(text: string): RichText[] {
   for (const part of parts) {
     if (!part) continue
     if (part.startsWith('**') && part.endsWith('**')) {
-      out.push({
-        type: 'text',
-        text: { content: part.slice(2, -2) },
-        annotations: { bold: true },
-      })
+      const content = part.slice(2, -2)
+      for (const chunk of chunkText(content)) {
+        out.push({
+          type: 'text',
+          text: { content: chunk },
+          annotations: { bold: true },
+        })
+      }
     } else {
-      out.push({ type: 'text', text: { content: part } })
+      for (const chunk of chunkText(part)) {
+        out.push({ type: 'text', text: { content: chunk } })
+      }
     }
   }
   return out

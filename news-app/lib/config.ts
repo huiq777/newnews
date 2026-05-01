@@ -31,6 +31,7 @@ export type AnswerState = {
   content: string
   thinkingDone: boolean
   streaming: boolean
+  qaLogId: string | null
 }
 
 export type Article = {

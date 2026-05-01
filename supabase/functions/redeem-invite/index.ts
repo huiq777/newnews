@@ -30,6 +30,32 @@ const json = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   })
 
+// Basic in-memory rate limiter to prevent brute-forcing within a single Deno isolate
+const rateLimitMap = new Map<string, { count: number; expiresAt: number }>()
+const RATE_LIMIT_MAX_ATTEMPTS = 5
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000 // 1 hour
+
+function checkRateLimit(userId: string): boolean {
+  const now = Date.now()
+  const record = rateLimitMap.get(userId)
+  
+  if (record && now < record.expiresAt) {
+    if (record.count >= RATE_LIMIT_MAX_ATTEMPTS) return false
+    record.count++
+  } else {
+    rateLimitMap.set(userId, { count: 1, expiresAt: now + RATE_LIMIT_WINDOW_MS })
+  }
+  
+  // Occasional cleanup of expired records
+  if (Math.random() < 0.05) {
+    for (const [key, value] of rateLimitMap.entries()) {
+      if (now > value.expiresAt) rateLimitMap.delete(key)
+    }
+  }
+  
+  return true
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (req.method !== 'POST') return json({ ok: false, error: 'invalid' }, 405)
@@ -59,6 +85,12 @@ serve(async (req) => {
   const { data: { user }, error: userErr } = await sbAsUser.auth.getUser()
   if (userErr || !user) return json({ ok: false, error: 'invalid' }, 401)
   const userId = user.id
+
+  // Rate limit check to prevent brute-forcing codes
+  if (!checkRateLimit(userId)) {
+    return json({ ok: false, error: 'too_many_attempts' }, 429)
+  }
+
 
   // 2. Service-role client for the privileged writes.
   const sb = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {

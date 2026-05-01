@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Linking, Pressable, StyleSheet, Text, TouchableOpacity, View,
+  Linking, Pressable, StyleSheet, Text, TouchableOpacity, View, Animated, Easing
 } from 'react-native'
-import { Article, AnswerState, SUPABASE_URL, SUPABASE_ANON_KEY, FIRE_SVG, fmtNum, formatPublishedDate } from '../lib/config'
+import { Article, AnswerState, SUPABASE_URL, SUPABASE_ANON_KEY, FIRE_SVG, fmtNum, formatPublishedDate, supabase } from '../lib/config'
+import AnswerFeedback from './AnswerFeedback'
 import WebHTML from './WebHTML'
 import MarkdownText from './MarkdownText'
+import ThinkingIndicator from './ThinkingIndicator'
 
 export interface XThreadGroup {
   handle: string
@@ -37,6 +39,32 @@ function TweetRow({
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
   const [localQuestions, setLocalQuestions] = useState(tweet.questions)
   const [thinkingExpanded, setThinkingExpanded] = useState<Record<number, boolean>>({})
+  const [deepThink, setDeepThink] = useState(false)
+  const [hoverRefreshQuestions, setHoverRefreshQuestions] = useState(false)
+  const spinAnim = useRef(new Animated.Value(0)).current
+
+  useEffect(() => {
+    if (refreshing) {
+      spinAnim.setValue(0)
+      Animated.loop(
+        Animated.timing(spinAnim, {
+          toValue: 1,
+          duration: 500,
+          easing: Easing.linear,
+          useNativeDriver: false,
+        })
+      ).start()
+    } else {
+      spinAnim.stopAnimation()
+      spinAnim.setValue(0)
+    }
+  }, [refreshing, spinAnim])
+
+  const spin = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg']
+  })
+  const [hoverDeepThink, setHoverDeepThink] = useState(false)
 
   const title = (lang === 'en' ? tweet.title_en : tweet.title_zh) || tweet.title || ''
   const summary = (lang === 'en' ? tweet.summary_en : tweet.summary_zh) || tweet.summary || ''
@@ -46,17 +74,24 @@ function TweetRow({
   useEffect(() => { setAnswers({}) }, [lang])
   useEffect(() => { if (!isCardExpanded) setQuestionsOpen(false) }, [isCardExpanded])
 
-  async function handleAsk(index: number, question: string) {
-    if (answers[index]?.content && !answers[index]?.streaming) {
+  async function handleAsk(index: number, question: string, forceRefresh = false) {
+    if (!forceRefresh && answers[index]?.content && !answers[index]?.streaming) {
       setAnswers(prev => { const next = { ...prev }; delete next[index]; return next })
       return
     }
-    setAnswers(prev => ({ ...prev, [index]: { thinking: '', content: '', thinkingDone: false, streaming: true } }))
+    setAnswers(prev => ({ ...prev, [index]: { thinking: '', content: '', thinkingDone: false, streaming: true, qaLogId: null } }))
     try {
+      // Spec C: pass user JWT so the Edge Function can attribute the qa_log row.
+      const { data: { session } } = await supabase.auth.getSession()
+      const accessToken = session?.access_token ?? SUPABASE_ANON_KEY
       const res = await fetch(`${SUPABASE_URL}/functions/v1/answer-question`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-        body: JSON.stringify({ article_id: tweet.id, question, lang }),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ article_id: tweet.id, question, lang, deep_think: deepThink }),
       })
       if (!res.ok) {
         console.error('answer-question error:', await res.text())
@@ -85,6 +120,8 @@ function TweetRow({
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], thinking: prev[index].thinking + parsed.content } }))
             } else if (parsed.type === 'content') {
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], content: prev[index].content + parsed.content, thinkingDone: true } }))
+            } else if (parsed.type === 'meta' && parsed.qa_log_id) {
+              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id } }))
             }
           } catch { }
         }
@@ -183,9 +220,33 @@ function TweetRow({
           <View style={styles.questionsDivider}>
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>{lang === 'en' ? 'Questions' : '问题'}</Text>
-            <TouchableOpacity onPress={() => { innerPressed.current = true; handleRefresh() }} disabled={refreshing}>
-              <Text style={[styles.refreshIcon, refreshing && styles.refreshDisabled]}>↻</Text>
-            </TouchableOpacity>
+            <Pressable 
+              onPress={() => { innerPressed.current = true; handleRefresh() }} 
+              disabled={refreshing}
+              onHoverIn={() => setHoverRefreshQuestions(true)}
+              onHoverOut={() => setHoverRefreshQuestions(false)}
+            >
+              <Animated.Text style={[
+                styles.refreshIcon, 
+                hoverRefreshQuestions && styles.refreshIconHovered,
+                refreshing && styles.refreshDisabled,
+                { transform: [{ rotate: spin }] }
+              ]}>↻</Animated.Text>
+            </Pressable>
+            <Pressable
+              onPress={() => { innerPressed.current = true; setDeepThink(prev => !prev) }}
+              onHoverIn={() => setHoverDeepThink(true)}
+              onHoverOut={() => setHoverDeepThink(false)}
+              style={[
+                styles.deepThinkToggle, 
+                hoverDeepThink && styles.deepThinkToggleHovered,
+                deepThink && styles.deepThinkToggleActive
+              ]}
+            >
+              <Text style={[styles.deepThinkText, deepThink && styles.deepThinkTextActive]}>
+                {lang === 'en' ? 'Deep Think' : '深度思考'}
+              </Text>
+            </Pressable>
             <View style={styles.dividerLine} />
           </View>
 
@@ -199,11 +260,7 @@ function TweetRow({
                 {ans && (
                   <View style={styles.answerBlock}>
                     {ans.streaming && !ans.content && (
-                      <View style={styles.thinkingBlock}>
-                        <Text style={styles.thinkingText}>
-                          {ans.thinking.length > 0 ? ans.thinking : (lang === 'en' ? 'Thinking...' : '思考中...')}
-                        </Text>
-                      </View>
+                      <ThinkingIndicator lang={lang} thinkingContent={ans.thinking} />
                     )}
                     {ans.thinking.length > 0 && ans.thinkingDone && (
                       <TouchableOpacity
@@ -228,6 +285,9 @@ function TweetRow({
                             <MarkdownText key={j} text={line} style={styles.contentText} />
                           ))}
                       </View>
+                    )}
+                    {!ans.streaming && ans.qaLogId && (
+                      <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
                     )}
                   </View>
                 )}
@@ -403,8 +463,37 @@ const styles = StyleSheet.create({
   questionsDivider: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 8 },
   dividerLine: { flex: 1, height: 1, backgroundColor: '#E0DDD6' },
   dividerText: { fontSize: 12, color: '#9E9690', fontWeight: '600', letterSpacing: 0.5, transform: [{ scale: 0.916 }] },
-  refreshIcon: { fontSize: 16, color: '#1A1A1A' },
-  refreshDisabled: { fontSize: 16, color: '#C8C4BE' },
+  refreshIcon: { fontSize: 16, color: '#1A1A1A', transition: 'color 0.2s ease' },
+  refreshIconHovered: { color: '#6B6B6B' },
+  refreshDisabled: {
+    opacity: 0.3,
+  },
+  deepThinkToggle: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#E0DDD6',
+    marginLeft: 8,
+    backgroundColor: 'transparent',
+  },
+  deepThinkToggleHovered: {
+    backgroundColor: '#FAF9F7',
+    borderColor: '#C8C4BE',
+  },
+  deepThinkToggleActive: {
+    backgroundColor: '#1A1A1A',
+    borderColor: '#1A1A1A',
+  },
+  deepThinkText: {
+    fontSize: 11,
+    color: '#6B6B6B',
+    fontFamily: 'Manrope, sans-serif',
+  },
+  deepThinkTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
   questionRow: { paddingVertical: 8 },
   questionText: { fontSize: 14, color: '#3D3935', lineHeight: 20 },
   answerBlock: { marginBottom: 8 },

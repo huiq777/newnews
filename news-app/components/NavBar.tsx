@@ -42,7 +42,7 @@ export default function NavBar({
   return (
     <View style={styles.nav} onLayout={onNavLayout}>
       <View style={styles.navLogoCol}>
-        <Text style={styles.navLogoText}>newnews</Text>
+        <Text style={styles.navLogoText}>Newnews</Text>
       </View>
       <View style={styles.navTabsCol}>
         {([

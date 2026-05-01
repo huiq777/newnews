@@ -149,7 +149,7 @@ serve(async (req) => {
 
   const { article_id } = await req.json()
   const TOKENROUTER_API_KEY = Deno.env.get('TOKENROUTER_API_KEY') ?? ''
-  const LLM_MODEL           = Deno.env.get('LLM_MODEL') ?? 'qwen/qwen3.6-plus'
+  const LLM_MODEL           = Deno.env.get('QA_LLM_MODEL') ?? 'qwen/qwen3.5-flash'
   const OPENROUTER_API_KEY  = Deno.env.get('OPENROUTER_API_KEY') ?? ''
   const OPENROUTER_MODEL    = Deno.env.get('OPENROUTER_MODEL') ?? ''
   const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY')!

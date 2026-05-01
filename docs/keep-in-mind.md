@@ -336,35 +336,23 @@ const corsHeaders = {
 
 **Rule:** Every new Edge Function called from `supabase-js` needs all four headers in the CORS allowlist. Existing functions called from raw `fetch` (e.g. `ingest-apify-tweets` from Apify) don't need this — but anything the Expo frontend hits via `supabase.functions.invoke()` does.
 
-### 5. `getUser()` does not refresh the persisted session JWT
+### 5. `refreshSession()` race conditions with fresh anonymous JWTs
 
-**Symptom:** After a server-side `app_metadata` write, the user is "authed" in the live API but a page reload re-triggers the gate. `getSession()` returns a session, but `session.user.app_metadata.is_beta_user` is missing.
+**Symptom:** Immediately after calling `signInAnonymously()` and redeeming an invite, the UI calls `refreshSession()` to update the JWT's `app_metadata`. The user is silently signed out and stuck at the gate.
 
-**Root cause:** `getUser()` hits `/auth/v1/user` and returns the **live** user record. It does NOT mint a new JWT, and it does NOT update what `getSession()` returns from localStorage. The persisted session is still the one minted by `signInAnonymously()` *before* the metadata write.
+**Root cause:** If `refreshSession()` is called on a JWT that was minted only milliseconds ago, Supabase's auth service may reject the refresh attempt (likely due to internal clock skew or rate-limiting guards on token reuse). When `refreshSession()` fails with these specific errors, the Supabase JS client automatically calls `_removeSession()`, wiping the session from localStorage and firing a `SIGNED_OUT` event.
 
-**Fix in two places:**
+**Fix:** Never call `refreshSession()` immediately after a sign-in or within the same UI bootstrap loop. Rely on `getUser()` to check live metadata, and let the background token refresh (or the next organic app reload) naturally mint the new JWT.
 
-1. After a successful `app_metadata` write:
-   ```ts
-   const { data: refreshed } = await supabase.auth.refreshSession()
-   // refreshed.session.user.app_metadata is now fresh
-   // and the new JWT has been written to localStorage
-   ```
+### 6. RLS `UPDATE` policies and the `RETURNING` clause trap
 
-2. In bootstrap, recover users redeemed under older code:
-   ```ts
-   if (session && !session.user.app_metadata?.is_beta_user) {
-     const { data: { user: liveUser } } = await supabase.auth.getUser()
-     if (liveUser?.app_metadata?.is_beta_user) {
-       await supabase.auth.refreshSession()   // unbrick — write fresh JWT
-       // proceed as authed
-     }
-   }
-   ```
+**Symptom:** A `supabase.from('qa_logs').update().eq('id', id).select('id')` call returns `[]` (0 rows updated), but no permission error is thrown, and examining the database shows the row *was* actually updated!
 
-**Rule:** Any flow that writes to `app_metadata` server-side and then expects the client's session to reflect it MUST follow up with `refreshSession()`. `getUser()` alone is not enough.
+**Root cause:** PostgREST translates `.update().select('id')` into `UPDATE ... RETURNING id`. Crucially, **the `RETURNING` clause is subject to the `SELECT` RLS policy, not just the `UPDATE` policy.** If your `UPDATE` policy passes but your `SELECT` policy fails (e.g., due to a `security definer` function returning false in the updated context), Postgres will update the row but return an empty result set. Supabase JS interprets this as "0 rows matched".
 
-### 6. Postgres has no `base64url` encoding
+**Rule:** Keep `SELECT` and `UPDATE` policies as simple as possible. Avoid using complex `security definer` functions (like `is_beta_user()`) inside `UPDATE` or `SELECT` policies where `user_id = auth.uid()` alone provides mathematical security.
+
+### 7. Postgres has no `base64url` encoding
 
 **Symptom:** `encode(gen_random_bytes(N), 'base64url')` returns `ERROR:  unrecognized encoding: "base64url"`. Postgres `encode()` only supports `base64`, `escape`, `hex`.
 
@@ -435,3 +423,97 @@ https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdef-1234-...
 - `429` — rate limit (3 req/s). Won't trigger for one daily call.
 
 **Rule for any new Notion integration** in this project: token + database ID + share-the-database is the three-step setup. All three are mandatory; missing any returns a different unhelpful error.
+
+---
+
+## qa_logs — Operator Triage
+
+`qa_logs` is the production data flywheel for the RAG path: every `answer-question` invocation persists a row with question, retrieval truth-set, response, model, tokens, timing, abort flag, error, and the user's later 👍/👎 ([spec](superpowers/specs/2026-04-26-qa-logs-and-feedback-design.md), shipped 2026-04-30). Triage is SQL-via-dashboard until volume justifies a UI.
+
+### Daily question volume (last 14 days)
+
+```sql
+select date_trunc('day', asked_at)::date as day, count(*) as questions
+from qa_logs
+group by 1 order by 1 desc limit 14;
+```
+
+### Negative feedback in last 7 days (badcase triage queue)
+
+```sql
+select id, asked_at, lang, question, response_text, related_article_ids
+from qa_logs
+where feedback = -1 and asked_at > now() - interval '7 days'
+order by asked_at desc;
+```
+
+### Aborted-stream rate (proxy for "user gave up")
+
+```sql
+select date_trunc('day', asked_at)::date as day,
+       count(*) filter (where aborted) * 100.0 / count(*) as abort_pct
+from qa_logs group by 1 order by 1 desc limit 14;
+```
+
+### Long-context badcase correlation (Spec-A → Spec-D justification)
+
+```sql
+-- Rows where the Spec-A 12K cap fired hard AND the user said the answer was bad.
+-- This is the queryable evidence for "we need chunking" (Spec D).
+select id, asked_at, question, context_main_chars, total_tokens
+from qa_logs
+where context_main_chars >= 12000 and feedback = -1
+order by asked_at desc;
+```
+
+### Token cost per user (last 30 days)
+
+```sql
+select user_id, sum(total_tokens) as tokens, count(*) as questions
+from qa_logs where asked_at > now() - interval '30 days'
+group by user_id order by tokens desc;
+```
+
+### Hallucination-suspect triage seed
+
+```sql
+select id, question, response_text, related_article_ids
+from qa_logs
+where feedback = -1 and error_message is null
+order by asked_at desc limit 50;
+```
+
+### Token-leak canary (CRITICAL — re-run after any answer-question change)
+
+```sql
+-- Aborted streams should have total_tokens << max_tokens (1024). If aborted
+-- rows show total_tokens near 1024, the cancel() handler in answer-question
+-- is NOT propagating to the upstream LLM fetch — every closed-tab event
+-- silently burns a full generation budget.
+select id, asked_at, total_tokens, total_ms,
+       case when total_tokens > 800 then 'LEAK SUSPECT'
+            when total_tokens > 400 then 'review'
+            else 'ok'
+       end as canary
+from qa_logs
+where aborted = true
+order by asked_at desc limit 20;
+```
+
+If the canary shows `LEAK SUSPECT` rows, re-deploy `answer-question` and verify §A9 in [the spec](superpowers/specs/2026-04-26-qa-logs-and-feedback-design.md) — the abort ordering (`downstreamAbort.abort()` BEFORE `persistQaLog`) is the load-bearing invariant.
+
+### Latency baseline (post-deploy quality check)
+
+```sql
+-- Run 24h after ship, then again whenever Spec D (chunking) or Spec E
+-- (rerank) lands — these p50/p95s are the regression baseline.
+select
+  percentile_cont(0.5)  within group (order by ttft_ms)  as p50_ttft,
+  percentile_cont(0.95) within group (order by ttft_ms)  as p95_ttft,
+  percentile_cont(0.5)  within group (order by total_ms) as p50_total,
+  percentile_cont(0.95) within group (order by total_ms) as p95_total
+from qa_logs
+where asked_at >= now() - interval '1 day'
+  and not aborted and error_message is null;
+-- Expected p50 ttft <2s; p95 total <15s.
+```

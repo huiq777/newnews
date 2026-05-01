@@ -50,13 +50,39 @@ serve(async (req) => {
   const APIFY_API_KEY = Deno.env.get('APIFY_API_KEY')!
   const APIFY_WEBHOOK_SECRET = Deno.env.get('APIFY_WEBHOOK_SECRET')!
 
-  // Validate webhook secret
-  const authHeader = req.headers.get('Authorization') || ''
-  if (authHeader !== `Bearer ${APIFY_WEBHOOK_SECRET}`) {
-    return new Response('Unauthorized', { status: 401 })
+  const signature = req.headers.get('x-apify-signature')
+  if (!signature) {
+    return new Response('Missing signature', { status: 401 })
   }
 
-  const body = await req.json()
+  const rawBody = await req.text()
+  
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(APIFY_WEBHOOK_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify']
+    )
+    
+    const sigBytes = Uint8Array.from(atob(signature), c => c.charCodeAt(0))
+    const isValid = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      sigBytes,
+      new TextEncoder().encode(rawBody)
+    )
+    
+    if (!isValid) {
+      return new Response('Invalid signature', { status: 401 })
+    }
+  } catch (err) {
+    console.error('HMAC verification failed:', err)
+    return new Response('Signature verification failed', { status: 401 })
+  }
+
+  const body = JSON.parse(rawBody)
   console.log('Apify payload:', JSON.stringify(body))
   const datasetId = body?.resource?.defaultDatasetId ?? body?.eventData?.datasetId
   if (!datasetId) {

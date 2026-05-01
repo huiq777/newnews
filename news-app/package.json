@@ -11,6 +11,8 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "@supabase/supabase-js": "^2.99.2",
+    "@types/dompurify": "^3.0.5",
+    "dompurify": "^3.4.2",
     "expo": "~55.0.7",
     "expo-status-bar": "~55.0.4",
     "react": "19.2.0",

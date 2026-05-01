@@ -9,7 +9,6 @@ export interface Env {
   DISCORD_WEBHOOK_URL?: string           // optional
   TELEGRAM_BOT_TOKEN?: string            // optional (paired with TELEGRAM_CHAT_ID)
   TELEGRAM_CHAT_ID?: string              // optional
-  WECOM_WEBHOOK_URL?: string             // optional — full webhook URL incl. ?key=
   NOTION_TOKEN?: string                  // optional (paired with NOTION_DATABASE_ID)
   NOTION_DATABASE_ID?: string            // optional
 }
@@ -32,9 +31,8 @@ const SB = (env: Env) => ({
 })
 
 function channelLang(channel: Channel): 'synthesis_zh' | 'synthesis_en' {
-  // ZH-target channels: Feishu (existing), WeCom (new — extends WeChat reach
-  // via the official 企业微信 incoming-webhook bot). Everything else is EN.
-  if (channel === 'feishu' || channel === 'wecom') return 'synthesis_zh'
+  // ZH-target channels: Feishu (existing)
+  if (channel === 'feishu') return 'synthesis_zh'
   return 'synthesis_en'
 }
 
@@ -44,7 +42,6 @@ function configuredChannels(env: Env): Channel[] {
   if (env.SLACK_WEBHOOK_URL) out.push('slack')
   if (env.DISCORD_WEBHOOK_URL) out.push('discord')
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) out.push('telegram')
-  if (env.WECOM_WEBHOOK_URL) out.push('wecom')
   if (env.NOTION_TOKEN && env.NOTION_DATABASE_ID) out.push('notion')
   return out
 }
@@ -96,25 +93,7 @@ async function sendTelegram(synthesis: string, today: string, env: Env): Promise
   }
 }
 
-// WeCom: sequential await across chunks (same reasoning as Telegram — order
-// matters). Additionally checks the body-level `errcode`, which WeCom uses
-// for application-level failures (revoked bot key, rate limit) returned with
-// HTTP 200.
-async function sendWecom(synthesis: string, today: string, env: Env): Promise<void> {
-  const { bodies } = renderBrief('wecom', synthesis, today)
-  for (let i = 0; i < bodies.length; i++) {
-    const res = await fetch(env.WECOM_WEBHOOK_URL!, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bodies[i]),
-    })
-    if (!res.ok) throw new Error(`WeCom chunk ${i + 1}/${bodies.length} ${res.status}: ${(await res.text()).slice(0, 300)}`)
-    const body = await res.json() as { errcode?: number; errmsg?: string }
-    if (body.errcode !== 0) {
-      throw new Error(`WeCom chunk ${i + 1}/${bodies.length} errcode=${body.errcode}: ${body.errmsg ?? '(none)'}`)
-    }
-  }
-}
+
 
 // Notion: single POST creating a database row. children[] is capped at 100
 // per request — typical brief is 5–20 blocks so this is unreachable in
@@ -149,7 +128,6 @@ async function sendOne(channel: Channel, synthesis: string, today: string, env: 
     case 'slack':    return sendSlack(synthesis, today, env)
     case 'discord':  return sendDiscord(synthesis, today, env)
     case 'telegram': return sendTelegram(synthesis, today, env)
-    case 'wecom':    return sendWecom(synthesis, today, env)
     case 'notion':   return sendNotion(synthesis, today, sourcesCount, env)
   }
 }
