@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import {
-  ActivityIndicator, AppState, FlatList, SafeAreaView, StyleSheet, Text, View,
+  ActivityIndicator, AppState, FlatList, Platform, SafeAreaView, StyleSheet, Text, View,
 } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { supabase, FEED_PAGE_SIZE, Article, Category, getInitialLang, setSavedLang } from './lib/config'
@@ -57,6 +57,13 @@ export default function App() {
       AsyncStorage.getItem('news_app_lang').then(saved => {
         if (saved === 'en' || saved === 'zh') setLang(saved)
       })
+    }
+  }, [])
+
+  // Auto set screen size to 90% on web when first loading
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.documentElement.style.setProperty('zoom', '0.9')
     }
   }, [])
 

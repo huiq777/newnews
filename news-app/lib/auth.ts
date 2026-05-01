@@ -22,7 +22,7 @@ import { Linking, Platform } from 'react-native'
 import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from './config'
 
-export type GateStatus = 'checking' | 'gated' | 'authed' | 'redeeming' | 'redeem_failed'
+export type GateStatus = 'checking' | 'gated' | 'authed' | 'redeeming' | 'redeem_failed' | 'desktop_required_no_invite' | 'desktop_required_with_invite'
 export type RedeemError = 'invalid' | 'used' | 'expired' | 'network' | null
 
 export type AuthGate = {
@@ -34,6 +34,7 @@ export type AuthGate = {
 }
 
 const isWeb = Platform.OS === 'web'
+const isMobileBrowser = isWeb && typeof navigator !== 'undefined' && /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
 
 function readInviteFromQuery(query: string): string | null {
   try {
@@ -126,6 +127,11 @@ export function useAuthGate(): AuthGate {
 
     const code = await readInviteFromAnyUrl()
     if (myTick !== tickRef.current) return
+
+    if (isMobileBrowser) {
+      setStatus(code ? 'desktop_required_with_invite' : 'desktop_required_no_invite')
+      return
+    }
 
     if (!code) {
       setStatus('gated')
