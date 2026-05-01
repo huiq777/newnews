@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Linking, Pressable, StyleSheet, Text, TouchableOpacity, View,
+  Linking, Pressable, StyleSheet, Text, TouchableOpacity, View, Animated, Easing
 } from 'react-native'
 import {
   Article, AnswerState, SUPABASE_URL, SUPABASE_ANON_KEY,
-  FIRE_SVG, formatPublishedDate, fmtNum,
+  FIRE_SVG, formatPublishedDate, fmtNum, supabase,
 } from '../lib/config'
 import MarkdownText from './MarkdownText'
 import WebHTML from './WebHTML'
+import AnswerFeedback from './AnswerFeedback'
+import ThinkingIndicator from './ThinkingIndicator'
 
 export default function ArticleCard({
   item, lang, sourceMap, bioMap,
@@ -25,35 +27,72 @@ export default function ArticleCard({
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
   const [localQuestions, setLocalQuestions] = useState(item.questions)
   const [thinkingExpanded, setThinkingExpanded] = useState<Record<number, boolean>>({})
+  const [deepThink, setDeepThink] = useState(false)
+  const [hoverRefreshQuestions, setHoverRefreshQuestions] = useState(false)
+  const spinAnim = useRef(new Animated.Value(0)).current
+
+  useEffect(() => {
+    if (refreshing) {
+      spinAnim.setValue(0)
+      Animated.loop(
+        Animated.timing(spinAnim, {
+          toValue: 1,
+          duration: 500,
+          easing: Easing.linear,
+          useNativeDriver: false,
+        })
+      ).start()
+    } else {
+      spinAnim.stopAnimation()
+      spinAnim.setValue(0)
+    }
+  }, [refreshing, spinAnim])
+
+  const spin = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg']
+  })
+  const [hoverDeepThink, setHoverDeepThink] = useState(false)
 
   const displayTitle = (lang === 'en' ? item.title_en : item.title_zh) || item.title
   const displaySummary = (lang === 'en' ? item.summary_en : item.summary_zh) || item.summary
-  const sourceName = sourceMap[item.source_id]
+  const sourceName = sourceMap[item.source_id] || 'Unknown Source'
   const isWechat = item.url?.includes('mp.weixin.qq.com')
   const isReddit = item.url?.includes('reddit.com') || sourceName?.toLowerCase().includes('reddit')
   const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
   const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
+  const showName = item.engagement?.show_name?.trim()
   const sourceLabel = isWechat
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
     : xHandle
       ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}`
-      : sourceName
+      : showName || sourceName
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
   useEffect(() => { setAnswers({}) }, [lang])
   useEffect(() => { if (!isExpanded) setQuestionsOpen(false) }, [isExpanded])
 
-  async function handleAsk(index: number, question: string) {
-    if (answers[index]?.content && !answers[index]?.streaming) {
+  async function handleAsk(index: number, question: string, forceRefresh = false) {
+    if (!forceRefresh && answers[index]?.content && !answers[index]?.streaming) {
       setAnswers(prev => { const next = { ...prev }; delete next[index]; return next })
       return
     }
-    setAnswers(prev => ({ ...prev, [index]: { thinking: '', content: '', thinkingDone: false, streaming: true } }))
+    setAnswers(prev => ({ ...prev, [index]: { thinking: '', content: '', thinkingDone: false, streaming: true, qaLogId: null } }))
     try {
+      // Spec C: pass the user's session JWT (not the anon key) so the
+      // Edge Function's auth.getUser() resolves to a real user and can
+      // attribute the qa_log row. Falls back to anon key for the dev path
+      // where no session exists (qa_log insert is skipped server-side).
+      const { data: { session } } = await supabase.auth.getSession()
+      const accessToken = session?.access_token ?? SUPABASE_ANON_KEY
       const res = await fetch(`${SUPABASE_URL}/functions/v1/answer-question`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-        body: JSON.stringify({ article_id: item.id, question, lang }),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ article_id: item.id, question, lang, deep_think: deepThink }),
       })
       if (!res.ok) {
         console.error('answer-question error:', await res.text())
@@ -82,6 +121,8 @@ export default function ArticleCard({
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], thinking: prev[index].thinking + parsed.content } }))
             } else if (parsed.type === 'content') {
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], content: prev[index].content + parsed.content, thinkingDone: true } }))
+            } else if (parsed.type === 'meta' && parsed.qa_log_id) {
+              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id } }))
             }
           } catch { }
         }
@@ -202,9 +243,33 @@ export default function ArticleCard({
               <View style={styles.questionsDivider}>
                 <View style={styles.dividerLine} />
                 <Text style={styles.dividerText}>{lang === 'en' ? 'Questions' : '问题'}</Text>
-                <TouchableOpacity onPress={() => { innerPressed.current = true; handleRefresh() }} disabled={refreshing}>
-                  <Text style={[styles.refreshIcon, refreshing && styles.refreshDisabled]}>↻</Text>
-                </TouchableOpacity>
+                <Pressable 
+                  onPress={() => { innerPressed.current = true; handleRefresh() }} 
+                  disabled={refreshing}
+                  onHoverIn={() => setHoverRefreshQuestions(true)}
+                  onHoverOut={() => setHoverRefreshQuestions(false)}
+                >
+                  <Animated.Text style={[
+                    styles.refreshIcon, 
+                    hoverRefreshQuestions && styles.refreshIconHovered,
+                    refreshing && styles.refreshDisabled,
+                    { transform: [{ rotate: spin }] }
+                  ]}>↻</Animated.Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { innerPressed.current = true; setDeepThink(prev => !prev) }}
+                  onHoverIn={() => setHoverDeepThink(true)}
+                  onHoverOut={() => setHoverDeepThink(false)}
+                  style={[
+                    styles.deepThinkToggle, 
+                    hoverDeepThink && styles.deepThinkToggleHovered,
+                    deepThink && styles.deepThinkToggleActive
+                  ]}
+                >
+                  <Text style={[styles.deepThinkText, deepThink && styles.deepThinkTextActive]}>
+                    {lang === 'en' ? 'Deep Think' : '深度思考'}
+                  </Text>
+                </Pressable>
                 <View style={styles.dividerLine} />
               </View>
 
@@ -218,11 +283,7 @@ export default function ArticleCard({
                     {ans && (
                       <View style={styles.answerBlock}>
                         {ans.streaming && !ans.content && (
-                          <View style={styles.thinkingBlock}>
-                            <Text style={styles.thinkingText}>
-                              {ans.thinking.length > 0 ? ans.thinking : (lang === 'en' ? 'Thinking...' : '思考中...')}
-                            </Text>
-                          </View>
+                          <ThinkingIndicator lang={lang} thinkingContent={ans.thinking} />
                         )}
                         {ans.thinking.length > 0 && ans.thinkingDone && (
                           <TouchableOpacity
@@ -247,6 +308,9 @@ export default function ArticleCard({
                                 <MarkdownText key={j} text={line} style={styles.contentText} />
                               ))}
                           </View>
+                        )}
+                        {!ans.streaming && ans.qaLogId && (
+                          <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
                         )}
                       </View>
                     )}
@@ -283,7 +347,7 @@ const styles = StyleSheet.create({
   publishedDate: {
     fontSize: 12, fontWeight: '700', color: '#a1a1aa',
     letterSpacing: 2, fontFamily: 'Space Grotesk, sans-serif',
-    textTransform: 'uppercase', marginBottom: 10, marginTop: -2, transform: [{ scale: 0.833 }],
+    textTransform: 'uppercase', marginBottom: 0, marginTop: -2, transform: [{ scale: 0.833 }],
     transformOrigin: 'left' as any
   },
   engagementPill: { backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3 },
@@ -307,8 +371,37 @@ const styles = StyleSheet.create({
   questionsDivider: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 8 },
   dividerLine: { flex: 1, height: 1, backgroundColor: '#E0DDD6' },
   dividerText: { fontSize: 12, color: '#9E9690', fontWeight: '600', letterSpacing: 0.5, transform: [{ scale: 0.916 }] },
-  refreshIcon: { fontSize: 16, color: '#1A1A1A' },
-  refreshDisabled: { fontSize: 16, color: '#C8C4BE' },
+  refreshIcon: { fontSize: 16, color: '#1A1A1A', transition: 'color 0.2s ease' },
+  refreshIconHovered: { color: '#6B6B6B' },
+  refreshDisabled: {
+    opacity: 0.3,
+  },
+  deepThinkToggle: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#E0DDD6',
+    marginLeft: 8,
+    backgroundColor: 'transparent',
+  },
+  deepThinkToggleHovered: {
+    backgroundColor: '#FAF9F7',
+    borderColor: '#C8C4BE',
+  },
+  deepThinkToggleActive: {
+    backgroundColor: '#1A1A1A',
+    borderColor: '#1A1A1A',
+  },
+  deepThinkText: {
+    fontSize: 11,
+    color: '#6B6B6B',
+    fontFamily: 'Manrope, sans-serif',
+  },
+  deepThinkTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
   questionRow: { paddingVertical: 8 },
   questionText: { fontSize: 14, color: '#3D3935', lineHeight: 20 },
   answerBlock: { marginBottom: 8 },

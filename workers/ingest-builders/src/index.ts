@@ -1,6 +1,10 @@
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
+  TOKENROUTER_API_KEY: string        // new primary
+  LLM_MODEL: string                  // used on TokenRouter for bio extraction
+  OPENROUTER_API_KEY: string
+  OPENROUTER_BIO_MODEL: string       // used on OpenRouter fallback (cheaper bio model)
   GROQ_API_KEY: string
   PRODUCTHUNT_API_TOKEN?: string   // optional — skip PH if not set
 }
@@ -54,6 +58,66 @@ function extractPodcasts(data: unknown): PodcastEpisode[] {
   return []
 }
 
+// Nowcoder discuss/feed pages embed the post body in
+// <script>window.__INITIAL_STATE__ = {...}</script>. The structure is
+// __INITIAL_STATE__.prefetchData["2"].ssrCommonData.contentData.content (HTML
+// fragment). The documented JSON detail endpoint returns 404, so we scrape
+// the SSR state instead. Returns "" on any parse failure — caller falls back
+// to title-only.
+function extractNowcoderContent(html: string): string {
+  const marker = 'window.__INITIAL_STATE__'
+  const markerIdx = html.indexOf(marker)
+  if (markerIdx === -1) return ''
+  // Find the first '{' after the assignment then balance-match to its closing brace.
+  // String-aware so quoted braces inside JSON values do not break the count.
+  const braceStart = html.indexOf('{', markerIdx)
+  if (braceStart === -1) return ''
+  let depth = 0, inString = false, isEscaped = false, end = -1
+  for (let i = braceStart; i < html.length; i++) {
+    const ch = html[i]
+    if (isEscaped) { isEscaped = false; continue }
+    if (ch === '\\') { isEscaped = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (!inString) {
+      if (ch === '{') depth++
+      else if (ch === '}') { depth--; if (depth === 0) { end = i; break } }
+    }
+  }
+  if (end === -1) return ''
+  let state: unknown
+  try {
+    state = JSON.parse(html.slice(braceStart, end + 1))
+  } catch {
+    return ''
+  }
+  // Walk the known path, then fall back to a deep search for `content` if the
+  // shape shifts. Nowcoder's frontend is third-party so the path is brittle.
+  const fromKnownPath = (() => {
+    try {
+      const s = state as { prefetchData?: Record<string, { ssrCommonData?: { contentData?: { content?: string } } }> }
+      const data = s.prefetchData
+      if (!data) return ''
+      for (const key of Object.keys(data)) {
+        const c = data[key]?.ssrCommonData?.contentData?.content
+        if (typeof c === 'string' && c.length > 0) return c
+      }
+      return ''
+    } catch { return '' }
+  })()
+  const html_ = fromKnownPath
+  if (!html_) return ''
+  // Strip HTML tags, decode common entities, collapse whitespace.
+  return html_
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&#\d+;/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 // Extract @handle from tweet URL: https://x.com/karpathy/status/... → "karpathy"
 function extractAuthor(url: string): string | null {
   const match = url.match(/x\.com\/([^/]+)\/status\//)
@@ -69,57 +133,264 @@ function extractAccounts(data: unknown): BuilderAccount[] {
   return []
 }
 
-// One batch Groq call → {handle: "current position"} for all accounts with bios
-async function extractBioMap(accounts: BuilderAccount[], groqApiKey: string): Promise<Record<string, string>> {
-  const withBio = accounts.filter(a => a.handle && a.bio)
-  if (withBio.length === 0) return {}
+const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
+const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
 
-  const prompt = withBio.map(a => `@${a.handle}: ${a.bio}`).join('\n')
+// Pre-LLM keyword gate — same as process-queue. Must be kept in sync manually.
+const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
 
-  const res = await fetch(GROQ_API, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${groqApiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        {
-          role: 'system',
-          content: 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.',
-        },
-        { role: 'user', content: prompt },
-      ],
-      max_tokens: 600,
-      temperature: 0,
-    }),
-  })
+const ZH_AI_KEYWORDS = [
+  '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
+  '生成式','多模态','算力','英伟达',
+  '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
+  'DeepSeek','百川','商汤','科大讯飞','华为盘古',
+]
+const BIO_SYSTEM_PROMPT = 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.'
 
-  if (!res.ok) {
-    console.error(`Groq bio extraction failed: ${res.status}`)
-    return {}
+// Extracts the first complete JSON object from a string, ignoring surrounding prose/markdown.
+// Required because response_format: json_object is best-effort — models wrap in ```json fences.
+function extractFirstJson(text: string): string {
+  const start = text.indexOf('{')
+  if (start === -1) throw new Error('No JSON object found in response')
+  let depth = 0, inString = false, isEscaped = false
+  for (let i = start; i < text.length; i++) {
+    const char = text[i]
+    if (isEscaped) { isEscaped = false; continue }
+    if (char === '\\') { isEscaped = true; continue }
+    if (char === '"') { inString = !inString; continue }
+    if (!inString) {
+      if (char === '{') depth++
+      else if (char === '}') { depth--; if (depth === 0) return text.slice(start, i + 1) }
+    }
+  }
+  throw new Error('Unterminated JSON object in response')
+}
+
+async function fetchKnownUrls(
+  urls: string[],
+  supabaseUrl: string,
+  headers: Record<string, string>,
+): Promise<Set<string>> {
+  const known = new Set<string>()
+  if (urls.length === 0) return known
+  const chunks: string[][] = []
+  for (let i = 0; i < urls.length; i += 100) {
+    chunks.push(urls.slice(i, i + 100))
+  }
+  await Promise.all(chunks.map(async chunk => {
+    const filterValue = `(${chunk.map(u => `"${u.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(',')})`
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/raw_ingestion?url=in.${encodeURIComponent(filterValue)}&select=url&limit=100`,
+      { headers },
+    )
+    if (!res.ok) return
+    const rows: { url: string }[] = await res.json()
+    for (const r of rows) known.add(r.url)
+  }))
+  return known
+}
+
+type BuilderTweetRow = {
+  source_id: string
+  url: string
+  raw_content: string
+  status: string
+  metadata: { likes?: number; retweets?: number }
+  published_at: string | null
+}
+
+function gradeTweets(allTweets: BuilderTweetRow[], knownUrls: Set<string>): BuilderTweetRow[] {
+  // Group by author handle extracted from x.com URL
+  const byAuthor = new Map<string, BuilderTweetRow[]>()
+  for (const tweet of allTweets) {
+    const handle = tweet.url.match(/x\.com\/([^/]+)\/status\//)?.[1]?.toLowerCase() ?? 'unknown'
+    if (!byAuthor.has(handle)) byAuthor.set(handle, [])
+    byAuthor.get(handle)!.push(tweet)
   }
 
-  const data = await res.json() as { choices: [{ message: { content: string } }] }
-  const content = data.choices[0].message.content.trim()
-
-  // Try flat object first: {"karpathy": "Director of AI"}
-  try {
-    return JSON.parse(content) as Record<string, string>
-  } catch { /* fall through */ }
-
-  // Fallback: Groq returned JSONL — one {"handle": x, "role": y} per line
-  try {
-    const result: Record<string, string> = {}
-    content.split('\n').forEach(line => {
-      const trimmed = line.trim()
-      if (!trimmed) return
-      const obj = JSON.parse(trimmed) as { handle?: string; role?: string }
-      if (obj.handle && obj.role) result[obj.handle.toLowerCase()] = obj.role
+  const survivors: BuilderTweetRow[] = []
+  for (const [, tweets] of byAuthor) {
+    // 1. Filter net-new (not already in raw_ingestion)
+    const netNew = tweets.filter(t => !knownUrls.has(t.url))
+    // 2. Keyword gate
+    const relevant = netNew.filter(t => {
+      const text = t.raw_content
+      return EN_AI_KEYWORDS.test(text) || ZH_AI_KEYWORDS.some(kw => text.includes(kw))
     })
-    if (Object.keys(result).length > 0) return result
-  } catch { /* fall through */ }
+    // 3. Sort by likes + retweets descending
+    const sorted = relevant.sort((a, b) => {
+      const scoreA = (a.metadata.likes ?? 0) + (a.metadata.retweets ?? 0)
+      const scoreB = (b.metadata.likes ?? 0) + (b.metadata.retweets ?? 0)
+      return scoreB - scoreA
+    })
+    // 4. Keep top 3
+    survivors.push(...sorted.slice(0, 3))
+  }
+  return survivors
+}
 
-  console.error('Failed to parse bio map JSON from Groq:', content.slice(0, 200))
-  return {}
+async function extractBioMap(biosText: string, env: Env): Promise<Record<string, string>> {
+  const messages = [
+    {
+      role: 'system',
+      content: 'Respond with valid JSON only. No prose. ' + BIO_SYSTEM_PROMPT,
+    },
+    { role: 'user', content: biosText },
+  ]
+
+  // Helper: parse bio map from flat JSON or JSONL
+  function parseBioJson(text: string): Record<string, string> | null {
+    try {
+      const rawParsed = JSON.parse(extractFirstJson(text))
+      const flat = (rawParsed.bios && typeof rawParsed.bios === 'object') ? rawParsed.bios : rawParsed
+      const result: Record<string, string> = {}
+      for (const [k, v] of Object.entries(flat)) {
+        if (typeof v === 'string') result[k.replace(/^@/, '').toLowerCase()] = v
+      }
+      return Object.keys(result).length > 0 ? result : null
+    } catch {
+      return null
+    }
+  }
+
+  // ── Tier 1: TokenRouter ─────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][TokenRouter] calling...')
+      const trRes = await fetch(TOKENROUTER_API, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.TOKENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://news-app.internal',
+          'X-Title': 'NewsApp',
+        },
+        body: JSON.stringify({
+          model: env.LLM_MODEL,
+          messages,
+          response_format: { type: 'json_object' },
+          max_tokens: 600,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timerId)
+      if (trRes.ok) {
+        const json = await trRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+        const text = json.choices?.[0]?.message?.content ?? ''
+        const result = parseBioJson(text)
+        if (result) return result
+        console.log('[extractBioMap][TokenRouter] parse failed, trying OpenRouter')
+      } else if (trRes.status === 429) {
+        console.log('[extractBioMap][TokenRouter] 429, trying OpenRouter')
+      } else {
+        console.log(`[extractBioMap][TokenRouter] ${trRes.status}, trying OpenRouter`)
+      }
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][TokenRouter] failed, trying OpenRouter:', (e as Error).message)
+    }
+  }
+
+  // ── Tier 2: OpenRouter ──────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][OpenRouter] calling...')
+      const orRes = await fetch(OPENROUTER_API, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://news-app.internal',
+          'X-Title': 'NewsApp',
+        },
+        body: JSON.stringify({
+          model: env.OPENROUTER_BIO_MODEL,
+          messages,
+          response_format: { type: 'json_object' },
+          max_tokens: 600,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timerId)
+      if (orRes.ok) {
+        const json = await orRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+        const text = json.choices?.[0]?.message?.content ?? ''
+        const result = parseBioJson(text)
+        if (result) return result
+        console.log('[extractBioMap][OpenRouter] parse failed, trying Groq')
+      } else if (orRes.status === 429) {
+        console.log('[extractBioMap][OpenRouter] 429, trying Groq')
+      } else {
+        console.log(`[extractBioMap][OpenRouter] ${orRes.status}, trying Groq`)
+      }
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][OpenRouter] failed, trying Groq:', (e as Error).message)
+    }
+  }
+
+  // ── Tier 3: Groq ───────────────────────────────────────────────────────────
+  {
+    const controller = new AbortController()
+    const timerId = setTimeout(() => controller.abort(), 8000)
+    try {
+      console.log('[extractBioMap][Groq] calling...')
+      const groqRes = await fetch(GROQ_API, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            { role: 'system', content: BIO_SYSTEM_PROMPT },
+            { role: 'user', content: biosText },
+          ],
+          max_tokens: 600,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timerId)
+      if (!groqRes.ok) {
+        console.log(`[extractBioMap][Groq] ${groqRes.status}, returning empty bio map`)
+        return {}
+      }
+      const data = await groqRes.json() as { choices?: Array<{ message?: { content?: string } }> }
+      const responseText = (data.choices?.[0]?.message?.content || '').trim()
+      if (!responseText) return {}
+
+      // Try flat JSON first, then JSONL fallback
+      const result = parseBioJson(responseText)
+      if (result) return result
+
+      // JSONL fallback: {"handle": "karpathy", "role": "Director"}
+      const jsonlResult: Record<string, string> = {}
+      for (const line of responseText.split('\n').filter(l => l.trim())) {
+        try {
+          const obj = JSON.parse(line) as { handle?: string; role?: string }
+          if (obj.handle && obj.role) {
+            jsonlResult[obj.handle.replace(/^@/, '').toLowerCase()] = obj.role
+          }
+        } catch { /* skip malformed line */ }
+      }
+      if (Object.keys(jsonlResult).length > 0) return jsonlResult
+
+      console.log('[extractBioMap][Groq] all parse attempts failed, returning empty bio map')
+      return {}
+    } catch (e: unknown) {
+      clearTimeout(timerId)
+      console.log('[extractBioMap][Groq] failed, returning empty bio map:', (e as Error).message)
+      return {}
+    }
+  }
 }
 
 export default {
@@ -164,7 +435,9 @@ export default {
         console.log(`Fetched ${tweets.length} builder tweets from feed-x.json`)
 
         // 3. Extract AI-interpreted positions from bios → cache in sources.metadata
-        const bioMap = await extractBioMap(accounts, env.GROQ_API_KEY)
+        const withBio = accounts.filter((a: { handle?: string; bio?: string }) => a.handle && a.bio)
+        const biosText = withBio.map((a: { handle: string; bio: string }) => `@${a.handle}: ${a.bio}`).join('\n')
+        const bioMap = biosText ? await extractBioMap(biosText, env) : {}
         if (Object.keys(bioMap).length > 0) {
           await fetch(`${env.SUPABASE_URL}/rest/v1/sources?id=eq.${builderSource.id}`, {
             method: 'PATCH',
@@ -178,8 +451,8 @@ export default {
         const validTweets = tweets.filter(t => t.id && t.text && t.url)
         console.log(`Inserting ${validTweets.length} valid tweets`)
 
-        // 5. Batch insert all tweets in ONE subrequest — duplicates silently skipped via ON CONFLICT (url)
-        const tweetRows = validTweets.map(tweet => {
+        // 5. Batch insert surviving tweets — bulk dedup + per-author grading applied first
+        const tweetRows: BuilderTweetRow[] = validTweets.map(tweet => {
           const author = extractAuthor(tweet.url)
           return {
             source_id: builderSource.id,
@@ -190,16 +463,25 @@ export default {
             published_at: tweet.createdAt ?? null,
           }
         })
-        const tweetInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
-          method: 'POST',
-          headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
-          body: JSON.stringify(tweetRows),
-        })
-        if (!tweetInsertRes.ok) {
-          const err = await tweetInsertRes.text()
-          console.error(`Tweet batch insert failed: ${tweetInsertRes.status} — ${err.substring(0, 300)}`)
-        } else {
-          console.log(`Attempted ${validTweets.length} tweet inserts in 1 batch (duplicates silently skipped)`)
+
+        // Bulk dedup + per-author grading
+        const allTweetUrls = tweetRows.map(r => r.url)
+        const knownUrls = await fetchKnownUrls(allTweetUrls, env.SUPABASE_URL, SB(env))
+        const survivingTweets = gradeTweets(tweetRows, knownUrls)
+        console.log(`Tweet grading: ${tweetRows.length} total → ${survivingTweets.length} survivors`)
+
+        if (survivingTweets.length > 0) {
+          const tweetInsertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/raw_ingestion?on_conflict=url`, {
+            method: 'POST',
+            headers: { ...SB(env), 'Prefer': 'resolution=ignore-duplicates' },
+            body: JSON.stringify(survivingTweets),
+          })
+          if (!tweetInsertRes.ok) {
+            const err = await tweetInsertRes.text()
+            console.error(`Tweet batch insert failed: ${tweetInsertRes.status} — ${err.substring(0, 300)}`)
+          } else {
+            console.log(`Inserted ${survivingTweets.length} surviving tweets (duplicates silently skipped)`)
+          }
         }
       }
     }
@@ -232,7 +514,7 @@ export default {
       url: ep.url,
       raw_content: `${ep.name}: ${ep.title}\n\n${ep.transcript}`,
       status: 'pending',
-      metadata: null,
+      metadata: { show_name: ep.name },
       published_at: ep.publishedAt ?? null,
     }))
 
@@ -278,7 +560,7 @@ export default {
           const url = `https://github.com${repoPath}`
           const repoName = repoPath.slice(1)
           const raw_content = `${repoName}${desc ? ': ' + desc : ''}${stars ? ' (★ ' + stars + ' stars today)' : ''}`
-          newRows.push({ source_id: githubTrendingSource.id, url, raw_content, status: 'pending', metadata: { stars: stars ? parseInt(stars) : 0 } })
+          newRows.push({ source_id: githubTrendingSource.id, url, raw_content, status: 'pending', metadata: { stars: stars ? parseInt(stars) : 0 }, published_at: null })
         }
         console.log(`GitHub Trending: ${ghRepos.length} repos queued`)
       } else {
@@ -325,7 +607,13 @@ export default {
       }
     }
 
-    // Nowcoder — undocumented public JSON API, no auth
+    // Nowcoder — undocumented public JSON API, no auth.
+    // Hot-list returns title only; the post body is server-rendered into the
+    // detail page's <script>window.__INITIAL_STATE__ = ...</script>. The
+    // documented JSON detail endpoint (/api/sparta/discuss-pc/detail) returns
+    // 404, so we scrape the SSR state instead. Top 5 only — every detail page
+    // is one extra subrequest, and the hot list is sorted; items past the top
+    // few rarely deliver the AI signal we want.
     if (nowcoderSource) {
       const ts = Date.now()
       const ncRes = await fetch(`${NOWCODER_HOT_URL}?size=20&_=${ts}&t=`, {
@@ -333,16 +621,39 @@ export default {
       })
       if (ncRes.ok) {
         const typed = await ncRes.json() as { data?: { result?: { id: string; uuid?: string; title: string; type: number }[] } }
-        const items = typed?.data?.result ?? []
+        const items = (typed?.data?.result ?? []).filter(it => it.title)
+        const topItems = items.slice(0, 5)
         const countBefore = newRows.length
-        for (const item of items) {
-          if (!item.title) continue
+
+        // Parallel detail fetch — one HTML scrape per top item. Failure on any
+        // single item falls back to title-only (matches today's behaviour, no
+        // regression).
+        const details = await Promise.all(topItems.map(async (item) => {
           const url = item.type === 74
             ? `https://www.nowcoder.com/feed/main/detail/${item.uuid}`
             : `https://www.nowcoder.com/discuss/${item.id}`
-          newRows.push({ source_id: nowcoderSource.id, url, raw_content: item.title, status: 'pending', metadata: null })
+          let body = ''
+          try {
+            const detailRes = await fetch(url, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (compatible; NewsProject/1.0)' },
+            })
+            if (detailRes.ok) {
+              const html = await detailRes.text()
+              body = extractNowcoderContent(html)
+            } else {
+              console.error(`Nowcoder detail ${url} failed: ${detailRes.status}`)
+            }
+          } catch (err) {
+            console.error(`Nowcoder detail ${url} error:`, (err as Error).message)
+          }
+          return { item, url, body }
+        }))
+
+        for (const { item, url, body } of details) {
+          const raw_content = body ? `${item.title}\n\n${body}` : item.title
+          newRows.push({ source_id: nowcoderSource.id, url, raw_content, status: 'pending', metadata: null, published_at: null })
         }
-        console.log(`Nowcoder: ${newRows.length - countBefore} items queued`)
+        console.log(`Nowcoder: ${newRows.length - countBefore} items queued (${details.filter(d => d.body).length} with body)`)
       } else {
         console.error(`Nowcoder fetch failed: ${ncRes.status}`)
       }
@@ -382,18 +693,24 @@ export default {
     }
 
     // ── Reddit — public JSON API, one call per subreddit ─────────────────────
+    // UA must include a real user handle per Reddit's API guidelines —
+    // a generic UA gets rate-limited (429) or blocked (403). /u/huiq777 is the
+    // user's actual Reddit handle.
+    // top.json?t=day gives the day's most upvoted posts (signal-rich) instead of
+    // hot.json's recency-biased mix. selftext is the full post body for text
+    // posts; link posts (is_self=false) only carry a title.
     for (const src of redditSources) {
       const subreddit = src.name.replace('Reddit r/', '')
       const rdRes = await fetch(
-        `https://www.reddit.com/r/${subreddit}/hot.json?limit=25`,
-        { headers: { 'User-Agent': 'NewsProject/1.0' } }
+        `https://www.reddit.com/r/${subreddit}/top.json?t=day&limit=25`,
+        { headers: { 'User-Agent': 'web:NewsProject:v1.0 (by /u/huiq777)' } }
       )
       if (!rdRes.ok) {
         console.error(`Reddit r/${subreddit} fetch failed: ${rdRes.status}`)
         continue
       }
       const rdData = await rdRes.json() as {
-        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; subreddit: string; created_utc: number } }[] }
+        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; selftext?: string; subreddit: string; created_utc: number } }[] }
       }
       const posts = rdData?.data?.children ?? []
       const countBefore = newRows.length
@@ -402,10 +719,12 @@ export default {
         const url = post.is_self
           ? `https://reddit.com${post.permalink}`
           : post.url
+        const titleLine = `r/${post.subreddit}: ${post.title}`
+        const bodyLine  = post.is_self && post.selftext ? `\n\n${post.selftext}` : ''
         newRows.push({
           source_id: src.id,
           url,
-          raw_content: `r/${post.subreddit}: ${post.title}`,
+          raw_content: titleLine + bodyLine,
           status: 'pending',
           metadata: { score: post.score, num_comments: post.num_comments, subreddit: post.subreddit },
           published_at: new Date(post.created_utc * 1000).toISOString(),
