@@ -6,7 +6,7 @@ This document is the authoritative reference for every secret in the system. Bef
 
 ## Security Rules
 
-1. **The Supabase service role key bypasses all RLS policies.** Any system that holds this key has full read/write access to the entire database. It must only ever exist in Cloudflare Workers secrets.
+1. **The Supabase service role key bypasses all RLS policies.** Any system that holds this key has full read/write access to the entire database. It must only ever exist in Cloudflare Workers secrets or Supabase Vault (for use in pg_cron SQL — see `service_role_key` row below).
 2. **The Supabase anon key is safe for the frontend.** It respects RLS policies — users can only read/write what the policies allow.
 3. **No AI provider keys (Groq, Cohere) should ever reach the client.** They live in Cloudflare Workers secrets or Supabase Edge Function secrets only.
 
@@ -33,6 +33,7 @@ This document is the authoritative reference for every secret in the system. Bef
 | `NOTION_TOKEN` | notion.so/my-integrations → New integration (Internal) → "Insert content" + "Read content" → copy Internal Integration Secret | Optional (`send-digest`; paired with `NOTION_DATABASE_ID`) | No | **Never** |
 | `NOTION_DATABASE_ID` | Open the target Notion database → URL contains `notion.so/<workspace>/<database-id>?v=...` → copy the database-id segment. **Must connect the integration to the database** (top-right `···` → `Connections` → `Add connections` → pick the integration) or POSTs return 404. After connecting, share the database with end users and tell them to **subscribe** (database top-right `···` → `Updates` → `Subscribe`) to get push notifications when each daily row lands. | Optional (`send-digest`) | No | **Never** |
 | `CRON_SECRET` | Generate a random string; used to auth pg_cron → `generate-trend-brief` | No | Yes (`generate-trend-brief`) | **Never** |
+| `service_role_key` (Vault) | Same value as `SUPABASE_SERVICE_ROLE_KEY`; stored via `select vault.create_secret('<jwt>', 'service_role_key', '...')` | No | No — lives in **Supabase Vault** only | **Never** |
 
 ---
 

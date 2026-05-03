@@ -174,6 +174,52 @@ Every spec, every change, every "let's just add X" proposal is examined against 
 
 ---
 
+## Architectural Evaluation Rubric: Multi-Agent Systems
+
+Every spec that introduces or modifies agents, orchestration, tool calls, or client-server boundaries is evaluated against all five rules below. Missing answers are missing engineering.
+
+### Rule 1 — Client-Server Boundary (UI Decoupling)
+
+**Instruction:** The client application must function strictly as a dumb rendering engine. All business logic, orchestration, state management, and UI structural decisions must be executed on the server. For complex, high-iteration interactive components, embed web technologies within native shells to bypass native ecosystem friction and ensure instant cross-platform feature parity.
+
+**Good:** The backend sends a structured JSON payload defining exactly which components to render, what text to display, and what actions are available. The client parses this and renders the UI blindly.
+
+**Bad:** The client contains if/else logic to determine user permissions, parses raw LLM text directly to figure out what to display, or duplicates business rules that already exist on the server.
+
+### Rule 2 — Domain Boundaries & Orchestration
+
+**Instruction:** Enforce strict domain-driven design (DDD). Micro-agents and backend services must have isolated business rules and separate database schemas (High Cohesion, Zero Coupling). Cross-domain coordination must never happen laterally; it must be managed exclusively by a top-level orchestrator.
+
+**Good:** A primary orchestrator agent parses the user's intent, splits the request, and delegates discrete tasks to Domain A and Domain B. The domains process their tasks independently without knowing the other exists. The orchestrator synthesizes the final result.
+
+**Bad:** Domain A makes direct database queries to Domain B's tables to resolve a dependency, or a single monolithic "God Agent" contains the system prompts and business logic for every feature in the application.
+
+### Rule 3 — AI Workflow Patterns (Execution Efficiency)
+
+**Instruction:** Separate probabilistic reasoning (slow, expensive) from deterministic execution (fast, cheap). Do not use continuous reasoning loops (like ReAct) for sequential or batch operations. Force the LLM to generate a complete, upfront execution plan, then hand that plan off to traditional code for execution.
+
+**Good:** The LLM reasons about a user's complex request and outputs a structured JSON array containing five specific database mutations. The system validates the array and executes all five operations in a single, rapid database transaction (Plan-and-Execute).
+
+**Bad:** The LLM processes item 1, calls a tool, waits for the response, reasons about item 2, calls a tool, waits for the response, etc. This creates massive latency, token bloat, and a high risk of context degradation midway through the task.
+
+### Rule 4 — Tool Design (Stateless Execution)
+
+**Instruction:** Design LLM-callable tools as pure, stateless executors. Centralize decision-making within the agent's prompt context. Strip internal validation, complex routing, and hidden decision trees out of the tools to prevent them from becoming opaque debugging black boxes.
+
+**Good:** A tool accepts a rigid, strongly typed payload and performs exactly one database operation (INSERT or UPDATE), returning a simple success or failure state. The agent was provided enough context upfront to know exactly what payload to send.
+
+**Bad:** A tool receives a vague text string, performs its own NLP extraction, checks database state to decide what to do, and conditionally triggers side effects. The agent has no visibility into why the tool failed.
+
+### Rule 5 — Observability & Regression Mechanisms
+
+**Instruction:** Embed end-to-end tracing across all agent nodes and tool calls from the beginning. Never rely on manually pasting application code into an LLM to hunt for bugs. Production errors must be traceable via unique IDs and automatically translatable into localized regression tests that verify both data structures and UI rendering.
+
+**Good:** Every user interaction generates a correlation ID. If the pipeline fails at step 4 of 7, the logging system isolates the exact inputs and outputs of step 4. That failure state is captured and added to an automated CI/CD test suite to prevent regressions on future deployments.
+
+**Bad:** When a failure occurs, the developer has to guess which agent dropped the context, leading to pasting hundreds of lines of code into an LLM for analysis, blowing up the context window, and ultimately failing to create a permanent test for the fix.
+
+---
+
 ## Output Contract: Design Specs Only
 
 The architect role produces **design specifications** — never implementation code.

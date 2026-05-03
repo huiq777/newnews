@@ -42,12 +42,14 @@ export default function AnswerFeedback({
   qaLogId,
   lang,
   onRefresh,
+  initialFeedback = null,
 }: {
   qaLogId: string
   lang: 'en' | 'zh'
   onRefresh?: () => void
+  initialFeedback?: Feedback
 }) {
-  const [feedback, setFeedback] = useState<Feedback>(null)
+  const [feedback, setFeedback] = useState<Feedback>(initialFeedback)
   const [error, setError] = useState(false)
   const [hoverUp, setHoverUp] = useState(false)
   const [hoverDown, setHoverDown] = useState(false)

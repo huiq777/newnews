@@ -1,4 +1,4 @@
-# Current State — 2026-04-18
+# Current State — 2026-05-03
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -31,9 +31,9 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 |---|---|---|
 | `answer-question` | ✅ Deployed | RAG active — Cohere query embed → match_articles RPC → top 3 related → Groq SSE streaming |
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
-| `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required |
+| `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required; per-author grading: top-3 net-new AI-relevant tweets per author (sorted by likes+retweets); bulk dedup via `raw_ingestion` URL check |
 | `generate-trend-brief` | ✅ Deployed | Cross-window trend synthesis (all categories); SSE streaming; `trend_briefs` 6h TTL cache; llama-3.3-70b-versatile; two-pass clustering; historical enrichment via match_articles RPC. **pg_cron pre-warm at 00:25 UTC** (`generate-trend-brief-daily`) via `pg_net.http_post`, 5 min before `send-digest`. |
-| `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate for tweets; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser; triggered by pg_cron `*/5 * * * *` |
+| `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate for tweets; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser; triggered by pg_cron `*/5 * * * *` passing service_role key via Vault (`vault.decrypted_secrets where name='service_role_key'`); no manual auth check inside function — gateway validates JWT |
 | `redeem-invite` | ✅ Deployed | Closed-beta auth gate (Round 1); `verify_jwt = true` (default); CORS allowlist includes `apikey, x-client-info`; atomic claim + idempotent recovery branch for network-partition retries; writes `app_metadata.is_beta_user` via service-role `auth.admin.updateUserById` |
 
 ### Supabase Tables & RPC
