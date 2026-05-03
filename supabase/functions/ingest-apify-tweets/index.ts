@@ -50,37 +50,31 @@ serve(async (req) => {
   const APIFY_API_KEY = Deno.env.get('APIFY_API_KEY')!
   const APIFY_WEBHOOK_SECRET = Deno.env.get('APIFY_WEBHOOK_SECRET')!
 
-  const signature = req.headers.get('x-apify-signature')
-  if (!signature) {
-    return new Response('Missing signature', { status: 401 })
+  // Bearer-token webhook auth. Apify sends the secret in the Authorization header
+  // configured under the webhook's "HTTP Headers" section. This function verifies
+  // the value matches APIFY_WEBHOOK_SECRET in Supabase Edge Function secrets.
+  //
+  // Why Bearer (not HMAC): Apify's standard webhook UI does not expose a "Secret
+  // token" / signing-secret field, so HMAC verification would be unreachable from
+  // any normal Apify config. Bearer is the only auth mechanism Apify natively
+  // supports for outbound webhooks.
+  const authHeader = req.headers.get('Authorization') ?? ''
+  const expected = `Bearer ${APIFY_WEBHOOK_SECRET}`
+
+  // Constant-time comparison (cheap insurance against timing attacks on the secret).
+  if (authHeader.length !== expected.length) {
+    return new Response('Unauthorized', { status: 401 })
+  }
+  let mismatch = 0
+  for (let i = 0; i < expected.length; i++) {
+    mismatch |= authHeader.charCodeAt(i) ^ expected.charCodeAt(i)
+  }
+  if (mismatch !== 0) {
+    return new Response('Unauthorized', { status: 401 })
   }
 
   const rawBody = await req.text()
-  
-  try {
-    const key = await crypto.subtle.importKey(
-      'raw',
-      new TextEncoder().encode(APIFY_WEBHOOK_SECRET),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['verify']
-    )
-    
-    const sigBytes = Uint8Array.from(atob(signature), c => c.charCodeAt(0))
-    const isValid = await crypto.subtle.verify(
-      'HMAC',
-      key,
-      sigBytes,
-      new TextEncoder().encode(rawBody)
-    )
-    
-    if (!isValid) {
-      return new Response('Invalid signature', { status: 401 })
-    }
-  } catch (err) {
-    console.error('HMAC verification failed:', err)
-    return new Response('Signature verification failed', { status: 401 })
-  }
+
 
   const body = JSON.parse(rawBody)
   console.log('Apify payload:', JSON.stringify(body))

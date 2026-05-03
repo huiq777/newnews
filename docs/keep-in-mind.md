@@ -192,6 +192,46 @@ Then re-trigger the worker. Safe to run anytime — rows that genuinely finished
 
 ---
 
+## pg_cron → Edge Function Authentication
+
+**Never add a manual `Authorization` header check inside an Edge Function called by pg_cron.**
+
+The Supabase Edge Runtime validates the JWT at the gateway level before `Deno.serve()` runs. By the time your handler executes, the caller is already authenticated. A manual check like:
+
+```ts
+const authHeader = req.headers.get('Authorization') ?? ''
+if (authHeader !== `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!}`) {
+  return new Response('Unauthorized', { status: 401 })
+}
+```
+
+will **always fail** — the Edge Runtime processes the Authorization header before Deno sees it, so `req.headers.get('Authorization')` does not return the raw JWT string you expect. The function silently rejects every pg_cron tick with 401 and the queue stops.
+
+**How to call a JWT-verified Edge Function from pg_cron (the correct pattern):**
+
+1. Store the service role key in Vault:
+   ```sql
+   select vault.create_secret('<service_role_jwt>', 'service_role_key', 'pg_cron auth');
+   ```
+2. In the pg_cron schedule, look it up at call time:
+   ```sql
+   select cron.schedule('job-name', '*/5 * * * *', $$
+     select net.http_post(
+       url := 'https://<ref>.supabase.co/functions/v1/<function>',
+       headers := jsonb_build_object(
+         'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key'),
+         'Content-Type', 'application/json'
+       ),
+       body := '{}'::jsonb
+     );
+   $$);
+   ```
+3. Do NOT add any auth check inside the function — the gateway handles it.
+
+**Diagnostic:** If pg_cron fires but the Edge Function returns 401 with `sb_error_code: UNAUTHORIZED_NO_AUTH_HEADER`, the Vault lookup returned NULL (secret name mismatch or secret not created). Verify with: `select name from vault.decrypted_secrets;`.
+
+---
+
 ## Supabase Edge Functions — External Webhook Receivers
 
 When an external service (e.g. Apify, Stripe, GitHub) POSTs to a Supabase Edge Function, **always deploy with `--no-verify-jwt`:**

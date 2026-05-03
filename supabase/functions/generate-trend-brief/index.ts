@@ -307,7 +307,7 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
     const historicalBlock = historical.length > 0
       ? '\n\nHistorical context:\n' + historical.map((h, i) => `[${selected.length + i + 1}] ${h.title} | ${fmtDate(h.published_at)} | ${bulletLinesFor(h, targetLang)}`).join('\n')
       : ''
-306:     const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n<articles>\n${currentBlock}${historicalBlock}\n</articles>`
+    const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n<articles>\n${currentBlock}${historicalBlock}\n</articles>`
     return [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }]
   }
 
@@ -566,7 +566,7 @@ serve(async (req) => {
         ).join('\n')
       : ''
 
-565:     const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n<articles>\n${currentBlock}${historicalBlock}\n</articles>`
+    const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n<articles>\n${currentBlock}${historicalBlock}\n</articles>`
 
     return [
       { role: 'system', content: systemPrompt },

@@ -92,7 +92,7 @@ export default function ArticleCard({
           'Authorization': `Bearer ${accessToken}`,
           'apikey': SUPABASE_ANON_KEY,
         },
-        body: JSON.stringify({ article_id: item.id, question, lang, deep_think: deepThink }),
+        body: JSON.stringify({ article_id: item.id, question, lang, deep_think: deepThink, force_refresh: forceRefresh }),
       })
       if (!res.ok) {
         console.error('answer-question error:', await res.text())
@@ -122,7 +122,7 @@ export default function ArticleCard({
             } else if (parsed.type === 'content') {
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], content: prev[index].content + parsed.content, thinkingDone: true } }))
             } else if (parsed.type === 'meta' && parsed.qa_log_id) {
-              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id } }))
+              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id, feedback: parsed.feedback } }))
             }
           } catch { }
         }
@@ -310,7 +310,7 @@ export default function ArticleCard({
                           </View>
                         )}
                         {!ans.streaming && ans.qaLogId && (
-                          <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
+                          <AnswerFeedback qaLogId={ans.qaLogId} initialFeedback={ans.feedback} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
                         )}
                       </View>
                     )}
