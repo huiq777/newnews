@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TouchableOpacity, View, Platform } from 'react-native'
 import { BriefSource, BriefState, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/config'
 import WebHTML from './WebHTML'
+import TrendBriefFeedback from './TrendBriefFeedback'
 
 const isWeb = Platform.OS === 'web'
 const userAgent = isWeb ? navigator.userAgent : ''
@@ -39,6 +40,7 @@ function markdownToHtml(text: string): string {
 }
 
 type CachedBriefRow = {
+  id: string
   synthesis_en: string | null
   synthesis_zh: string | null
   sources_json: BriefSource[]
@@ -244,7 +246,7 @@ export default function TrendBriefCard({
         `?anchor_date=eq.${anchorDate}` +
         `&step_days=eq.${stepDays}` +
         `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
-        `&select=synthesis_en,synthesis_zh,sources_json,generated_at` +
+        `&select=id,synthesis_en,synthesis_zh,sources_json,generated_at` +
         `&order=generated_at.desc&limit=1`,
         { signal, headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
       )
@@ -334,7 +336,7 @@ export default function TrendBriefCard({
           `?anchor_date=eq.${anchorDate}` +
           `&step_days=eq.${stepDays}` +
           `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
-          `&select=synthesis_en,synthesis_zh,sources_json,generated_at` +
+          `&select=id,synthesis_en,synthesis_zh,sources_json,generated_at` +
           `&order=generated_at.desc&limit=1`,
           {
             signal: ctrl.signal,
@@ -348,6 +350,7 @@ export default function TrendBriefCard({
         const text = row?.[lang === 'en' ? 'synthesis_en' : 'synthesis_zh'] ?? null
 
         if (text) {
+          setCachedRow(row)
           setSynthesis(text)
           setSourcesJson(row.sources_json ?? [])
           setGeneratedAt(row.generated_at)
@@ -555,6 +558,20 @@ export default function TrendBriefCard({
                 <Text style={styles.briefRefresh}>{lang === 'en' ? 'Retry' : '重试'}</Text>
               </TouchableOpacity>
             </View>
+          )}
+
+          {/* Feedback row */}
+          {synthesis.length > 0 && briefState === 'loaded' && dateRange && (
+            <TrendBriefFeedback
+              anchorDate={(() => {
+                const d = new Date(dateRange.end)
+                d.setDate(d.getDate() - 1)
+                return d.toISOString().slice(0, 10)
+              })()}
+              stepDays={stepDays}
+              synthesis={synthesis}
+              lang={lang}
+            />
           )}
 
           {/* Sources */}

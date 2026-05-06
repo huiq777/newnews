@@ -1,6 +1,6 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-04-24. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-05-06. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
@@ -9,7 +9,10 @@ The schema is organized into four layers:
 - **Ingestion layer** (`sources`, `raw_ingestion`) — managed exclusively by Cloudflare Workers. Never written to by the frontend client.
 - **Product layer** (`daily_news`) — read by the frontend, written by Cloudflare Workers and Supabase Edge Functions via the service role.
 - **Cache layer** (`trend_briefs`) — written by the `generate-trend-brief` Edge Function; read directly by the frontend via anon key. TTL-based invalidation.
+- **Observability layer** (`pipeline_events`, `qa_logs`) — service-role only. `pipeline_events` traces every article through the pipeline; `qa_logs` traces every Q&A request.
 - **Auth layer** (`beta_invites` + `is_beta_user()` helper) — service-role only. The `redeem-invite` Edge Function writes; the helper function is referenced indirectly from RLS policies of future user-scoped tables (e.g. `qa_logs`).
+- **User feedback layer** (`trend_brief_feedback`) — per-user brief ratings.
+- **Email layer** (`email_subscribers`, `email_digest_sent`) — digest opt-in and delivery accounting.
 
 All tables have Row Level Security enabled. Client access is granted only where explicitly needed.
 
@@ -35,6 +38,32 @@ Subscription manual routing table. Feishu, Slack, and other channel invite URLs 
 - `language` (text, `'en' | 'zh'`)
 - `display_label` (text, e.g. `#daily-brief`)
 - `invite_url` (text, URL to join or QR image for WeCom)
+
+### `pipeline_events`
+Append-only observability log for the article processing pipeline. One row per pipeline step per article per run. `run_id` is stamped on `raw_ingestion` and `daily_news` rows at claim time, so a single filter on `run_id` reconstructs the full trace for any batch. No RLS policies — service-role only.
+
+Steps: `claim` | `keyword_gate` | `llm` | `insert` | `embed` | `llm_category_mismatch`
+Statuses: `ok` | `skip` | `error`
+
+### `qa_logs`
+Full Q&A trace per `answer-question` invocation. Written by `orchestrateAnswer()` on completion or abort. `request_id` UUID is generated at entry and appears in every structured log line for that request. User feedback (👍 = 1, 👎 = -1) is written back by the `AnswerFeedback` component.
+
+Key columns: `request_id UUID`, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids UUID[]`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`.
+
+### `trend_brief_feedback`
+Per-user thumbs up/down on trend briefs. Keyed on `(user_id, anchor_date, step_days)` — the time window, not the specific brief row — so a user's vote persists even after a force-refresh generates a new `trend_briefs` row. The `TrendBriefFeedback` component upserts on vote, deletes on toggle-off. RLS: authenticated users read and write only their own rows.
+
+Columns: `user_id` (uuid FK to auth.users, cascade delete), `anchor_date` (date), `step_days` (int), `feedback` (smallint, -1 or 1), `feedback_at` (timestamptz). PK: `(user_id, anchor_date, step_days)`.
+
+### `email_subscribers`
+Email digest opt-in list. Collected via the Email tab in the SubscriptionManualModal. `unsubscribed_at` null = active subscriber; set by the `unsubscribe-email` Edge Function when the user visits the unsubscribe link in their email. RLS: anon and authenticated may INSERT (subscribe); only service role can read the list.
+
+Columns: `id` (uuid PK), `email` (text unique), `lang` ('en'|'zh'), `created_at`, `unsubscribed_at`.
+
+### `email_digest_sent`
+Per-subscriber per-day delivery accounting for the email channel, mirroring the `digest_sent` pattern. UNIQUE `(subscriber_id, anchor_date, step_days)` provides idempotent claiming. The `send-digest` worker inserts a row per subscriber before sending, then updates status to `sent` or `failed`.
+
+Columns: `id` (uuid PK), `subscriber_id` (uuid FK to email_subscribers, cascade delete), `anchor_date` (date), `step_days` (int), `status` (pending|sent|failed|skipped_empty_brief), `last_error` (text), `created_at`, `updated_at`.
 
 ### `beta_invites`
 Round 1 closed-beta invite-link redemption table. Operator mints rows via the Supabase SQL Editor and shares `https://<host>/?invite=<code>` over WeChat; the user's first click signs them in anonymously and the `redeem-invite` Edge Function ties the row to their `auth.uid()`.
@@ -303,6 +332,40 @@ CREATE TABLE channel_invites (
 ALTER TABLE channel_invites ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "anon_read_invites" ON channel_invites FOR SELECT USING (true);
 ```
+
+### Observability Foundation (2026-05-03)
+
+Migration: [supabase/sql/20260503_observability_foundation.sql](../supabase/sql/20260503_observability_foundation.sql)
+
+Creates `pipeline_events` table, adds `run_id UUID` to `raw_ingestion` and `daily_news`, adds `request_id UUID` to `qa_logs`. All columns are nullable/additive — zero downtime.
+
+### AI Keyword Gate RPC (2026-05-03)
+
+Migration: [supabase/sql/20260503_is_ai_relevant.sql](../supabase/sql/20260503_is_ai_relevant.sql)
+
+```sql
+CREATE OR REPLACE FUNCTION public.is_ai_relevant(content TEXT, source_type TEXT DEFAULT 'article')
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE ...
+```
+
+EN word-boundary regex + ZH substring list. Called by `process-queue` and `ingest-apify-tweets`. Mirrored in `workers/ingest-builders/src/keywords.ts` (CF subrequest budget constraint). The SQL function is authoritative — keep `keywords.ts` in sync when keywords change.
+
+### Feed RPC (2026-05-03)
+
+Migration: [supabase/sql/20260503_fetch_grouped_feed.sql](../supabase/sql/20260503_fetch_grouped_feed.sql)
+
+```sql
+CREATE OR REPLACE FUNCTION public.fetch_grouped_feed(
+  p_date_start DATE, p_date_end DATE, p_category TEXT DEFAULT NULL,
+  p_lang TEXT DEFAULT 'en', p_limit INT DEFAULT 10, p_cursor UUID DEFAULT NULL
+) RETURNS TABLE (id UUID, title TEXT, summary TEXT, source_type TEXT, source_id UUID,
+  thread_group TEXT, url TEXT, published_at TIMESTAMPTZ, created_at TIMESTAMPTZ,
+  questions JSONB, engagement JSONB, next_cursor UUID)
+```
+
+`thread_group` = `sources.metadata->>'handle'` for `x_api`/`apify_tweet` sources, NULL otherwise. `next_cursor` = oldest row id in the current page (keyset pagination). Date range uses `>= p_date_start AND < p_date_end` (exclusive end — matches app's `dateRange.end = midnight of next day` convention).
+
+GRANT EXECUTE to `anon` and `authenticated`.
 
 ### Round 1 Auth (2026-04-26)
 

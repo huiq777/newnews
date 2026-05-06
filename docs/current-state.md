@@ -1,4 +1,4 @@
-# Current State — 2026-05-03
+# Current State — 2026-05-06
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -6,9 +6,11 @@ This document is the single source of truth for where the project stands. Read t
 
 ## What Phase We Are In
 
-**Stages 2.5, 3, and Trend Brief (generate-trend-brief Edge Function) are complete. Stage 4 (web deployment) and Stage 4.5 (Apify tweet ingestion) are in progress. Stage 2 source quality audit is still pending — run once daily_news has 50+ articles.**
+**All pipeline stages through Stage 5 (Trend Brief) are complete. Stage 4 (web deployment via Cloudflare Pages) and Stage 4.5 (Apify tweet ingestion) are live. Architecture alignment (observability, keyword gate centralization, answer-question decomposition, Plan-and-Execute for trend brief, client-side decoupling) shipped 2026-05-03.**
 
-All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix).
+All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix). Closed-beta auth gate live (Round 1 — invite codes via `/?invite=<code>`).
+
+Trend brief per-user feedback, copy-to-clipboard, email subscription modal + email digest delivery via Resend, and `unsubscribe-email` Edge Function shipped 2026-05-06. New-articles banner false-positive bug fixed.
 
 ---
 
@@ -22,44 +24,54 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 | ~~`process-queue`~~ | ❌ Deleted | — | Migrated to Supabase Edge Function (2026-04-21); CF Worker directory deleted 2026-04-23 |
 | `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch) |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
-| `send-digest` | ✅ Deployed | Daily 00:30 UTC | **Trend-brief-only** delivery. Feishu (ZH) + optional Slack/Discord/Telegram (EN) + optional **WeCom (ZH)** + optional **Notion (EN, archival database row per day)**. Anchor date = `today_utc - 1` so the brief covers the just-closed UTC day. Per-channel-per-day idempotency via `digest_sent` (`ON CONFLICT DO NOTHING RETURNING`). Freshness gate on `trend_briefs.generated_at >= today 00:00 UTC`. Empty brief → `skipped_empty_brief`, no send. **Per-channel rendering** (Phase 8): Feishu `lark_md`, Slack `mrkdwn` (`**X**` → `*X*`), Discord stdlib MD, Telegram HTML mode (`<b>X</b>`), WeCom plain markdown (≤4096 bytes UTF-8 per chunk; sequential await), Notion structured-blocks via `markdownToBlocks()` (≤100 children per POST). Long briefs chunk at paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message, WeCom ≤ 3500 bytes/message; Telegram + WeCom chunks send sequentially to preserve order). |
+| `send-digest` | ✅ Deployed | Daily 00:30 UTC | **Trend-brief-only** delivery. Feishu (ZH) + optional Slack/Discord/Telegram (EN) + optional **WeCom (ZH)** + optional **Notion (EN, archival database row per day)**. Anchor date = `today_utc - 1` so the brief covers the just-closed UTC day. Per-channel-per-day idempotency via `digest_sent` (`ON CONFLICT DO NOTHING RETURNING`). Freshness gate on `trend_briefs.generated_at >= today 00:00 UTC`. Empty brief → `skipped_empty_brief`, no send. **Per-channel rendering** (Phase 8): Feishu `lark_md`, Slack `mrkdwn` (`**X**` → `*X*`), Discord stdlib MD, Telegram HTML mode (`<b>X</b>`), WeCom plain markdown (≤4096 bytes UTF-8 per chunk; sequential await), Notion structured-blocks via `markdownToBlocks()` (≤100 children per POST). Long briefs chunk at paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message, WeCom ≤ 3500 bytes/message; Telegram + WeCom chunks send sequentially to preserve order). **Email delivery via Resend:** `sendEmailDigests()` sends to all active `email_subscribers` after channel delivery. Per-subscriber idempotency via `email_digest_sent` (`unique(subscriber_id, anchor_date, step_days)`). Secrets required: `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`. |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
 
 ### Supabase Edge Functions
 
 | Function | Status | Notes |
 |---|---|---|
-| `answer-question` | ✅ Deployed | RAG active — Cohere query embed → match_articles RPC → top 3 related → Groq SSE streaming |
+| `answer-question` | ✅ Deployed | Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Cohere query embed → `match_articles` RPC → top 3 related. LLM routing: TokenRouter `qwen/qwen3.6-plus` (deep_think) or `qwen/qwen3.5-flash` (default) → OpenRouter → Groq. SSE streaming. `request_id` UUID on every `qa_logs` row for full trace. User 👍/👎 feedback written back to `qa_logs`. |
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
-| `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required; per-author grading: top-3 net-new AI-relevant tweets per author (sorted by likes+retweets); bulk dedup via `raw_ingestion` URL check |
-| `generate-trend-brief` | ✅ Deployed | Cross-window trend synthesis (all categories); SSE streaming; `trend_briefs` 6h TTL cache; llama-3.3-70b-versatile; two-pass clustering; historical enrichment via match_articles RPC. **pg_cron pre-warm at 00:25 UTC** (`generate-trend-brief-daily`) via `pg_net.http_post`, 5 min before `send-digest`. |
-| `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate for tweets; summary + QUESTIONS_EN + QUESTIONS_ZH combined; max_tokens 2000; `parseJsonSection` parser; triggered by pg_cron `*/5 * * * *` passing service_role key via Vault (`vault.decrypted_secrets where name='service_role_key'`); no manual auth check inside function — gateway validates JWT |
+| `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required; per-author grading: top-3 net-new AI-relevant tweets per author (sorted by likes+retweets); bulk dedup via `raw_ingestion` URL check; keyword gate via `is_ai_relevant` RPC (parallel, fail-open) |
+| `generate-trend-brief` | ✅ Deployed | `buildBriefPlan()` pure data-prep + `triggerSecondaryGeneration()` explicit Plan-and-Execute pattern. TokenRouter `TREND_BRIEF_MODEL` primary (streaming); secondary language via non-streaming call. `trend_briefs` 6h TTL cache. Historical enrichment via `match_articles`. **pg_cron pre-warm at 00:25 UTC** via `pg_net.http_post`, 5 min before `send-digest`. |
+| `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate via `is_ai_relevant` RPC (fail-open); `run_id` UUID stamps every batch for full pipeline trace; writes `pipeline_events` at every step (keyword_gate, llm, insert, llm_category_mismatch); triggered by pg_cron `*/5 * * * *` via Vault service_role key |
 | `redeem-invite` | ✅ Deployed | Closed-beta auth gate (Round 1); `verify_jwt = true` (default); CORS allowlist includes `apikey, x-client-info`; atomic claim + idempotent recovery branch for network-partition retries; writes `app_metadata.is_beta_user` via service-role `auth.admin.updateUserById` |
+| `unsubscribe-email` | ✅ Deployed | GET `?id=<uuid>`; PATCHes `email_subscribers.unsubscribed_at`; returns HTML confirmation page. Deploy with `--no-verify-jwt` (unauthenticated link). |
 
 ### Supabase Tables & RPC
 
 | Component | Status | Notes |
 |---|---|---|
 | `sources` | ✅ Live | 12 rows (rss + wechat + github_feed + podcast); source_type + metadata JSONB columns active |
-| `raw_ingestion` | ✅ Live | State machine: pending → processing → done/error; metadata JSONB column active |
-| `daily_news` | ✅ Live | article_content, questions JSONB, title_en/zh, summary_en/zh, embedding, engagement JSONB all populated |
+| `raw_ingestion` | ✅ Live | State machine: pending → processing → done/error; metadata JSONB column active; `run_id` UUID stamps each process-queue batch |
+| `daily_news` | ✅ Live | article_content, questions JSONB, title_en/zh, summary_en/zh, embedding, engagement JSONB all populated; `run_id` UUID for pipeline trace |
+| `pipeline_events` | ✅ Live | Append-only observability log. Columns: `run_id`, `step` (claim/keyword_gate/llm/insert/embed/llm_category_mismatch), `status` (ok/skip/error), `source_id`, `raw_id`, `daily_id`, `duration_ms`, `error_text`. ~288 events/day. Service-role only (no RLS policies). |
+| `qa_logs` | ✅ Live | Full Q&A trace per `answer-question` call. Columns: `request_id` UUID, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`. |
 | `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question and generate-trend-brief |
+| `is_ai_relevant` RPC | ✅ Live | Canonical AI keyword gate. EN word-boundary regex + ZH substring list. Called by process-queue and ingest-apify-tweets (fail-open). Mirror in `workers/ingest-builders/src/keywords.ts` (CF subrequest budget constraint). |
+| `fetch_grouped_feed` RPC | ✅ Live | Server-side feed with cursor (keyset) pagination and tweet thread grouping. Params: `p_date_start`, `p_date_end`, `p_category`, `p_lang`, `p_limit`, `p_cursor`. Returns `thread_group` (handle for x_api/apify_tweet, NULL otherwise) and `next_cursor` for stateless pagination. Replaces client-side `displayArticles` useMemo + offset pagination. |
 | `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
 | `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; NULL for RSS (HN source disabled); NULL for WeChat |
 | `trend_briefs` | ✅ Live | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL; index on (anchor_date, step_days, expires_at); columns `synthesis_en` + `synthesis_zh` |
 | `digest_sent` | ✅ Live | Per-channel per-day delivery accounting for `send-digest`. UNIQUE (channel, anchor_date) gives idempotent claim via `ON CONFLICT DO NOTHING RETURNING`. Statuses: `pending | sent | failed | skipped_empty_brief`. |
+| `trend_brief_feedback` | ✅ Live | Per-user thumbs up/down on trend briefs. PK: `(user_id, anchor_date, step_days)` — keyed on the time window, not brief row, so feedback survives brief refreshes. RLS: authenticated users read/write only their own rows. Columns: `user_id`, `anchor_date`, `step_days`, `feedback` (smallint, -1 or 1), `feedback_at`. |
+| `email_subscribers` | ✅ Live | Email digest opt-in list. Columns: `id` UUID PK, `email` (unique), `lang` ('en'\|'zh'), `created_at`, `unsubscribed_at` (null = active). RLS: anon + authenticated can INSERT; no read policy (service-role only for reads). |
+| `email_digest_sent` | ✅ Live | Per-subscriber per-day delivery accounting for email channel. UNIQUE `(subscriber_id, anchor_date, step_days)`. Statuses: `pending | sent | failed | skipped_empty_brief`. |
 | `beta_invites` | ✅ Live | Round 1 closed-beta invite-link redemption table. RLS enabled with **no anon/authenticated policies** — only `redeem-invite` (service role) reads/writes. Columns: `code` PK, `display_name`, `default_lang`, `email` (nullable, reserved for Round 2 magic-link), `expires_at`, `used_at`, `user_id` FK to `auth.users` (`on delete set null`). Operator mints rows via Supabase SQL Editor. |
 | `is_beta_user()` | ✅ Live | `security definer` SQL helper (returns boolean). Queries `beta_invites` for the current `auth.uid()`. One-line gate for future user-scoped table RLS: `using (is_beta_user() and user_id = auth.uid())`. |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
-**Stage 3 UI redesign complete.**
+**Stage 3 UI redesign complete. Architecture alignment (cursor pagination, server-side thread grouping, global DeepThink) shipped 2026-05-03.**
 
 Working features:
 - Warm editorial aesthetic: `#F7F6F2` background, `#1A1A1A` accent/pills, `#E0DDD6` borders
 - `MarkdownText` component: renders `• **Label:** text` bullets with indent + bold inline
-- Paginated feed (20/page, page number nav)
-- EN/中 language toggle — bilingual titles + summaries; proportional scroll position preserved
+- Cursor (keyset) pagination via `fetch_grouped_feed` RPC — stateless, no offset drift
+- EN/中 language toggle — bilingual titles + summaries; proportional scroll position preserved across lang switch (lang change skips scroll-to-0 reset)
+- Server-side tweet thread grouping: `thread_group` from RPC, URL regex fallback for legacy rows
+- Global DeepThink toggle — toggling in any card turns it on for all questions app-wide
 - Source label: `公众号 - Founder Park` (WeChat) or `TechCrunch` (RSS)
 - `? Questions` pill (top-right) — only shows when `questions` non-null; `↻` pill when null
 - Questions expand/collapse; `↻` refresh regenerates via `refresh-questions`
@@ -73,6 +85,11 @@ Working features:
 - **`dateRange` now initializes eagerly to today** — no flash of all articles on first load
 - **Auto-fallback to 3D when Today returns 0 articles** — `DrumWheelSidebar` exposes `switchTo(days)` control; App calls it automatically
 - Title bracket-stripping rule added to both prompts — prevents `[Title]` formatting artifacts
+- Copy-to-clipboard on QA answers (`AnswerFeedback`) and trend briefs (`TrendBriefFeedback`): uses `ClipboardItem` API to write `text/html` (bold renders in Notion/Docs) + `text/plain` fallback simultaneously
+- Per-user trend brief feedback: thumbs 👍/👎 written to `trend_brief_feedback` table; persists across brief refreshes; pre-loaded on brief expand
+- Email subscription tab in SubscriptionManualModal: enter email + select EN/ZH lang; duplicate detection with inline error; shake animation on invalid email format
+- **New-articles banner bug fix:** `checkMissedArticles` now uses `max(created_at)` across all loaded articles (was `articles[0].created_at` which could lag behind recently-ingested articles with older `published_at`)
+- Favicon: new brand icon with rounded corners; served at `/favicon.ico` via Expo FaviconMiddleware
 - **Closed-beta auth gate** at app root ([news-app/lib/auth.ts](../news-app/lib/auth.ts), [news-app/components/BetaGateScreen.tsx](../news-app/components/BetaGateScreen.tsx)). Blocks every data effect in `App.tsx` until `app_metadata.is_beta_user === true`. Bilingual gate UI; default language carries over from invite metadata. Anonymous Supabase user under the hood — Round 2 will upgrade to email-bound via `updateUser({ email })` while preserving `auth.uid()`.
 
 ---
@@ -198,29 +215,35 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 
 - **Project URL:** `https://exjbwdcxyrkxsmzaowkx.supabase.co`
 - **sources columns:** `id, name, rss_url (UNIQUE), is_active, created_at, source_type, metadata JSONB`
-- **raw_ingestion columns:** `id, source_id, url (UNIQUE), raw_content, fetched_at, status, retry_count, last_error, processed_at, metadata JSONB`
-- **daily_news columns:** `id, source_id, raw_ingestion_id, url (UNIQUE), title, summary, title_en, summary_en, title_zh, summary_zh, article_content, questions JSONB, embedding vector(1024), engagement JSONB, created_at`
+- **raw_ingestion columns:** `id, source_id, url (UNIQUE), raw_content, fetched_at, status, retry_count, last_error, processed_at, metadata JSONB, run_id UUID`
+- **daily_news columns:** `id, source_id, raw_ingestion_id, url (UNIQUE), title, summary, title_en, summary_en, title_zh, summary_zh, article_content, questions JSONB, embedding vector(1024), engagement JSONB, created_at, run_id UUID`
 - **trend_briefs columns:** `id, anchor_date, step_days, synthesis_en, synthesis_zh, sources_json JSONB, model, tokens_used, generated_at, expires_at`
 - **digest_sent columns:** `id, channel, anchor_date, status, last_error, created_at, updated_at` — UNIQUE (channel, anchor_date) for idempotent claim
+- **trend_brief_feedback columns:** `user_id UUID FK`, `anchor_date date`, `step_days int`, `feedback smallint (-1|1)`, `feedback_at timestamptz`
+- **email_subscribers columns:** `id UUID PK`, `email text UNIQUE`, `lang text`, `created_at timestamptz`, `unsubscribed_at timestamptz`
+- **email_digest_sent columns:** `id UUID PK`, `subscriber_id UUID FK`, `anchor_date date`, `step_days int`, `status text`, `last_error text`, `created_at timestamptz`, `updated_at timestamptz`
 
 ---
 
 ## Key Technical Facts
 
-- **LLM (summaries + questions):** OpenRouter primary (`OPENROUTER_MODEL` secret, swappable without redeploy) → Groq `llama-3.3-70b-versatile` fallback (AbortError/TCP/429 only)
-- **LLM (bio extraction):** Groq `llama-3.3-70b-versatile` directly (ingest-builders; no OpenRouter)
-- **LLM (answer streaming):** Groq `llama-3.3-70b-versatile` — only `type:content` SSE events (no reasoning)
+- **LLM (summaries + questions):** TokenRouter `qwen/qwen3.6-plus` primary (120s timeout) → OpenRouter secondary → Groq `llama-3.3-70b-versatile` tertiary. 1 combined call per article (summary + EN questions + ZH questions). Secret: `TOKENROUTER_API_KEY` in process-queue Edge Function.
+- **LLM (bio extraction):** Groq `llama-3.3-70b-versatile` directly (ingest-builders CF Worker; no TokenRouter)
+- **LLM (answer streaming):** TokenRouter `QA_LLM_MODEL` (default `qwen/qwen3.5-flash`; deep_think mode: `qwen/qwen3.6-plus`) → OpenRouter → Groq fallback. SSE: `type:thinking` (deep_think only) + `type:content` chunks + `type:meta` (qa_log_id) + `data:[DONE]`.
+- **LLM (trend brief):** TokenRouter `TREND_BRIEF_MODEL` (default `anthropic/claude-opus-4.7`) streaming primary + non-streaming secondary language call in parallel.
 - **Cohere model (embeddings):** `embed-english-v3.0` — 1024-dim; `input_type: search_document` at index time, `input_type: search_query` for RAG — asymmetry is load-bearing, do not change
-- **process-queue LLM calls per article:** 1 (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
-- **process-queue tweet pre-filter:** keyword gate (EN regex + ZH substring) fires before LLM call — zero-cost NOT_AI_RELEVANT for tweets with no AI signal
+- **process-queue LLM calls per article:** 1 (TokenRouter primary → OpenRouter secondary → Groq tertiary; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
+- **process-queue tweet pre-filter:** `is_ai_relevant` RPC (fail-open) fires before LLM call — zero-cost skip for tweets with no AI signal; `run_id` UUID stamps every batch; writes `pipeline_events` at keyword_gate, llm, insert, llm_category_mismatch steps
+- **answer-question observability:** `request_id` UUID on every `qa_logs` row; user 👍/👎 feedback written back via `AnswerFeedback` component
 - **ingest-builders Groq calls per run:** 1 batch call for all bios; subrequest count ~38/50 (tweets + podcasts)
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — **4/5 slots used**; ingest-x deleted to make room; process-queue migrated to Supabase Edge Function (pg_cron) freeing one slot
 - **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
 - **send-digest:** Trend-brief-only delivery. Feishu (ZH `synthesis_zh`) + optional Slack / Discord / Telegram (EN `synthesis_en`) + optional WeCom (ZH `synthesis_zh`) + optional Notion (EN `synthesis_en`, one database row per day). Anchor date = `today_utc - 1`. Per-channel idempotency via `digest_sent`. CommonMark from the LLM is converted per-channel: Feishu `lark_md` passthrough, Slack `**X**`→`*X*`, Discord stdlib MD passthrough, Telegram `parse_mode: 'HTML'` with `<b>X</b>`, WeCom plain markdown passthrough, Notion structured-blocks via `markdownToBlocks()`. Long briefs chunk at `\n\n` boundaries; Telegram + WeCom chunks send sequentially.
-- **answer-question SSE events:** `{ type: "content", content: "..." }` chunks then `data: [DONE]`
+- **answer-question SSE events:** `{ type: "thinking", content }` (deep_think only) + `{ type: "content", content }` chunks + `{ type: "meta", qa_log_id }` then `data: [DONE]`
 - **Streaming in Expo:** use `fetch` + `ReadableStream` with line buffer — do NOT use `supabase.functions.invoke()` (buffers entire response)
 - **PostgREST join staleness:** always fetch sources separately and join client-side — do not use embedded joins
+- **Feed pagination:** cursor (keyset) via `fetch_grouped_feed` RPC; `next_cursor` = oldest row id in page; stateless across page loads
 
 ---
 
@@ -229,13 +252,22 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 | File | Purpose |
 |---|---|
 | `workers/ingest-rss/src/index.ts` | RSS fetcher — every 4h |
-| `supabase/functions/process-queue/index.ts` | Scrape + bilingual summarize + questions + engagement propagation (Edge Function; node-html-parser) |
+| `supabase/functions/process-queue/index.ts` | Scrape + bilingual summarize + questions + engagement propagation (Edge Function; TokenRouter; run_id; pipeline_events; is_ai_relevant gate) |
 | `workers/ingest-builders/src/index.ts` | feed-x.json (tweets) + feed-podcasts.json (podcasts) → raw_ingestion; bio extraction; engagement metadata |
+| `workers/ingest-builders/src/keywords.ts` | AI keyword lists mirroring `is_ai_relevant` SQL function (CF subrequest budget constraint) |
 | `workers/embed-batch/src/index.ts` | Cohere embeddings — every 5 min |
 | `workers/send-digest/src/index.ts` | Daily digest — 00:30 UTC; Feishu (ZH) + optional Slack/Discord/Notion (EN); includes trend brief |
-| `supabase/functions/answer-question/index.ts` | Streaming RAG answer — deployed with RAG |
+| `supabase/functions/answer-question/index.ts` | Streaming RAG answer — route/retrieve/generate/orchestrateAnswer decomposition; TokenRouter; request_id; qa_logs |
+| `supabase/functions/generate-trend-brief/index.ts` | Trend brief — buildBriefPlan() + triggerSecondaryGeneration() Plan-and-Execute; TokenRouter streaming |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question refresh |
-| `news-app/App.tsx` | Expo frontend — Stage 3 redesign complete (warm editorial, MarkdownText, scroll fix) |
+| `supabase/sql/20260503_observability_foundation.sql` | pipeline_events table + run_id on raw_ingestion/daily_news + request_id on qa_logs |
+| `supabase/sql/20260503_is_ai_relevant.sql` | is_ai_relevant() RPC — canonical AI keyword gate |
+| `supabase/sql/20260503_fetch_grouped_feed.sql` | fetch_grouped_feed() RPC — server-side feed + cursor pagination + thread grouping |
+| `supabase/sql/20260504_trend_brief_feedback.sql` | `trend_brief_feedback` table + RLS |
+| `supabase/sql/20260504_email_subscribers.sql` | `email_subscribers` + `email_digest_sent` tables |
+| `news-app/components/TrendBriefFeedback.tsx` | Per-user trend brief thumbs + copy button; reads/writes `trend_brief_feedback` |
+| `supabase/functions/unsubscribe-email/index.ts` | Unauthenticated unsubscribe link handler |
+| `news-app/App.tsx` | Expo frontend — cursor pagination, server-side thread grouping, global DeepThink, scroll fix |
 | `AI-SWE-skill.md` | Full technical reference — read before any code change |
 | `keep-in-mind.md` | Hard-won lessons — read before debugging anything |
 | `docs/architecture.md` | All major technical decisions with rationale |

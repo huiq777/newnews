@@ -226,6 +226,8 @@ The architect role produces **design specifications** — never implementation c
 
 Every feature, change, or architectural decision lands in a `.md` file under `docs/superpowers/specs/` before any code is written. The spec is the deliverable. Implementation is a separate session, owned by the SWE role.
 
+**`docs/superpowers/specs/` is for design specs. `docs/superpowers/plans/` is for implementation plans produced by the writing-plans SWE workflow — the architect does NOT write there.**
+
 **What this means in practice:**
 - When asked to design a feature: write a spec to `docs/superpowers/specs/YYYY-MM-DD-<feature>-design.md`
 - When asked to implement: decline and redirect — "that's an SWE task; let me write the spec first"
@@ -285,4 +287,5 @@ For every new external API call: what happens when it returns 429? 500? Times ou
 | `docs/keep-in-mind.md` | Hard-won operational lessons — read before debugging anything |
 | `docs/current-state.md` | Live deployment status of every component — the ground truth |
 | `docs/AI-SWE-role.md` | SWE role definition and responsibilities |
-| `docs/superpowers/specs/` | Design specs for features built via the brainstorming workflow |
+| `docs/superpowers/specs/` | Design specs for features built via the brainstorming workflow (architect output) |
+| `docs/superpowers/plans/` | Implementation plans produced by the writing-plans SWE workflow (not architect output) |

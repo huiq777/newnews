@@ -23,6 +23,8 @@ function TweetRow({
   isCardExpanded,
   showFire,
   onToggle,
+  deepThink,
+  onDeepThinkChange,
 }: {
   tweet: Article
   lang: 'en' | 'zh'
@@ -31,6 +33,8 @@ function TweetRow({
   isCardExpanded: boolean
   showFire: boolean
   onToggle: () => void
+  deepThink: boolean
+  onDeepThinkChange: (v: boolean) => void
 }) {
   const [hovered, setHovered] = useState(false)
   const innerPressed = useRef(false)
@@ -39,7 +43,6 @@ function TweetRow({
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
   const [localQuestions, setLocalQuestions] = useState(tweet.questions)
   const [thinkingExpanded, setThinkingExpanded] = useState<Record<number, boolean>>({})
-  const [deepThink, setDeepThink] = useState(false)
   const [hoverRefreshQuestions, setHoverRefreshQuestions] = useState(false)
   const spinAnim = useRef(new Animated.Value(0)).current
 
@@ -234,7 +237,7 @@ function TweetRow({
               ]}>↻</Animated.Text>
             </Pressable>
             <Pressable
-              onPress={() => { innerPressed.current = true; setDeepThink(prev => !prev) }}
+              onPress={() => { innerPressed.current = true; onDeepThinkChange(!deepThink) }}
               onHoverIn={() => setHoverDeepThink(true)}
               onHoverOut={() => setHoverDeepThink(false)}
               style={[
@@ -287,7 +290,7 @@ function TweetRow({
                       </View>
                     )}
                     {!ans.streaming && ans.qaLogId && (
-                      <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
+                      <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} copyText={ans.content} />
                     )}
                   </View>
                 )}
@@ -306,11 +309,15 @@ export default function XThreadCard({
   lang,
   isExpanded,
   onExpandedChange,
+  deepThink,
+  onDeepThinkChange,
 }: {
   group: XThreadGroup
   lang: 'en' | 'zh'
   isExpanded: boolean
   onExpandedChange: (v: boolean) => void
+  deepThink: boolean
+  onDeepThinkChange: (v: boolean) => void
 }) {
   const top = group.tweets[0]
   const rest = group.tweets.slice(1)
@@ -351,6 +358,8 @@ export default function XThreadCard({
         isCardExpanded={isExpanded}
         showFire={isMultiple}
         onToggle={() => onExpandedChange(!isExpanded)}
+        deepThink={deepThink}
+        onDeepThinkChange={onDeepThinkChange}
       />
 
       {/* Collapsed hint */}
@@ -376,6 +385,8 @@ export default function XThreadCard({
               isCardExpanded={isExpanded}
               showFire={isMultiple}
               onToggle={() => onExpandedChange(!isExpanded)}
+              deepThink={deepThink}
+              onDeepThinkChange={onDeepThinkChange}
             />
           ))}
         </View>
