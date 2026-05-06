@@ -12,12 +12,14 @@ import AnswerFeedback from './AnswerFeedback'
 import ThinkingIndicator from './ThinkingIndicator'
 
 export default function ArticleCard({
-  item, lang, sourceMap, bioMap,
+  item, lang, sourceMap, bioMap, deepThink, onDeepThinkChange,
 }: {
   item: Article
   lang: 'en' | 'zh'
   sourceMap: Record<string, string>
   bioMap: Record<string, string>
+  deepThink: boolean
+  onDeepThinkChange: (v: boolean) => void
 }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const [isHovered, setIsHovered] = useState(false)
@@ -27,7 +29,6 @@ export default function ArticleCard({
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
   const [localQuestions, setLocalQuestions] = useState(item.questions)
   const [thinkingExpanded, setThinkingExpanded] = useState<Record<number, boolean>>({})
-  const [deepThink, setDeepThink] = useState(false)
   const [hoverRefreshQuestions, setHoverRefreshQuestions] = useState(false)
   const spinAnim = useRef(new Animated.Value(0)).current
 
@@ -54,10 +55,11 @@ export default function ArticleCard({
   })
   const [hoverDeepThink, setHoverDeepThink] = useState(false)
 
-  const displayTitle = (lang === 'en' ? item.title_en : item.title_zh) || item.title
-  const displaySummary = (lang === 'en' ? item.summary_en : item.summary_zh) || item.summary
+  const displayTitle = (lang === 'en' ? item.title_en : item.title_zh) ?? ''
+  const displaySummary = (lang === 'en' ? item.summary_en : item.summary_zh) ?? ''
   const sourceName = sourceMap[item.source_id] || 'Unknown Source'
   const isWechat = item.url?.includes('mp.weixin.qq.com')
+  const isYoutube = item.url?.includes('youtube.com') || item.url?.includes('youtu.be')
   const isReddit = item.url?.includes('reddit.com') || sourceName?.toLowerCase().includes('reddit')
   const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
   const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
@@ -66,7 +68,9 @@ export default function ArticleCard({
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
     : xHandle
       ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}`
-      : showName || sourceName
+      : isYoutube
+        ? `YouTube - ${showName || sourceName}`
+        : showName || sourceName
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
   useEffect(() => { setAnswers({}) }, [lang])
@@ -92,7 +96,7 @@ export default function ArticleCard({
           'Authorization': `Bearer ${accessToken}`,
           'apikey': SUPABASE_ANON_KEY,
         },
-        body: JSON.stringify({ article_id: item.id, question, lang, deep_think: deepThink }),
+        body: JSON.stringify({ article_id: item.id, question, lang, deep_think: deepThink, force_refresh: forceRefresh }),
       })
       if (!res.ok) {
         console.error('answer-question error:', await res.text())
@@ -122,7 +126,7 @@ export default function ArticleCard({
             } else if (parsed.type === 'content') {
               setAnswers(prev => ({ ...prev, [index]: { ...prev[index], content: prev[index].content + parsed.content, thinkingDone: true } }))
             } else if (parsed.type === 'meta' && parsed.qa_log_id) {
-              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id } }))
+              setAnswers(prev => ({ ...prev, [index]: { ...prev[index], qaLogId: parsed.qa_log_id, feedback: parsed.feedback } }))
             }
           } catch { }
         }
@@ -257,11 +261,11 @@ export default function ArticleCard({
                   ]}>↻</Animated.Text>
                 </Pressable>
                 <Pressable
-                  onPress={() => { innerPressed.current = true; setDeepThink(prev => !prev) }}
+                  onPress={() => { innerPressed.current = true; onDeepThinkChange(!deepThink) }}
                   onHoverIn={() => setHoverDeepThink(true)}
                   onHoverOut={() => setHoverDeepThink(false)}
                   style={[
-                    styles.deepThinkToggle, 
+                    styles.deepThinkToggle,
                     hoverDeepThink && styles.deepThinkToggleHovered,
                     deepThink && styles.deepThinkToggleActive
                   ]}
@@ -310,7 +314,7 @@ export default function ArticleCard({
                           </View>
                         )}
                         {!ans.streaming && ans.qaLogId && (
-                          <AnswerFeedback qaLogId={ans.qaLogId} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} />
+                          <AnswerFeedback qaLogId={ans.qaLogId} initialFeedback={ans.feedback} lang={lang} onRefresh={() => { innerPressed.current = true; handleAsk(i, q, true) }} copyText={ans.content} />
                         )}
                       </View>
                     )}

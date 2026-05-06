@@ -6,7 +6,7 @@ This document is the authoritative reference for every secret in the system. Bef
 
 ## Security Rules
 
-1. **The Supabase service role key bypasses all RLS policies.** Any system that holds this key has full read/write access to the entire database. It must only ever exist in Cloudflare Workers secrets.
+1. **The Supabase service role key bypasses all RLS policies.** Any system that holds this key has full read/write access to the entire database. It must only ever exist in Cloudflare Workers secrets or Supabase Vault (for use in pg_cron SQL — see `service_role_key` row below).
 2. **The Supabase anon key is safe for the frontend.** It respects RLS policies — users can only read/write what the policies allow.
 3. **No AI provider keys (Groq, Cohere) should ever reach the client.** They live in Cloudflare Workers secrets or Supabase Edge Function secrets only.
 
@@ -19,11 +19,13 @@ This document is the authoritative reference for every secret in the system. Bef
 | `SUPABASE_URL` | Supabase → Settings → API | Yes (all workers) | No (use built-in Supabase client) | Yes (`EXPO_PUBLIC_SUPABASE_URL`) |
 | `SUPABASE_ANON_KEY` | Supabase → Settings → API | No | No | Yes (`EXPO_PUBLIC_SUPABASE_ANON_KEY`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API | **Yes — all workers. ONLY HERE.** | No | **Never** |
-| `GROQ_API_KEY` | console.groq.com | Yes (`process-queue`, `ingest-builders`) | Yes (`answer-question`, `refresh-questions`) | **Never** |
-| `OPENROUTER_API_KEY` | openrouter.ai → Keys | Yes (`process-queue`, `ingest-builders`) | No | **Never** |
-| `OPENROUTER_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`process-queue`) | No | **Never** |
+| `GROQ_API_KEY` | console.groq.com | Yes (`ingest-builders`) | Yes (`answer-question`, `refresh-questions`) | **Never** |
+| `TOKENROUTER_API_KEY` | TokenRouter dashboard | No | Yes (`process-queue`, `generate-trend-brief`, `answer-question`) | **Never** |
+| `OPENROUTER_API_KEY` | openrouter.ai → Keys | Yes (`ingest-builders`) | No | **Never** |
 | `OPENROUTER_BIO_MODEL` | n/a — you choose (e.g. `google/gemma-2-9b-it:free`) | Yes (`ingest-builders`) | No | **Never** |
-| `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question` function) | **Never** |
+| `TREND_BRIEF_MODEL` | n/a — TokenRouter model ID (e.g. `anthropic/claude-opus-4.7`) | No | Yes (`generate-trend-brief`) | **Never** |
+| `QA_LLM_MODEL` | n/a — TokenRouter model ID (e.g. `qwen/qwen3.5-flash`) | No | Yes (`answer-question`) | **Never** |
+| `COHERE_API_KEY` | dashboard.cohere.com | Yes (`embed-batch` worker) | Yes (`answer-question`, `generate-trend-brief`) | **Never** |
 | `FEISHU_WEBHOOK_URL` | Feishu group → Settings → Bots → Add Bot → Custom Bot → copy Webhook URL | Yes (`send-digest` worker) | No | **Never** |
 | `SLACK_WEBHOOK_URL` | Slack → app → Incoming Webhooks → New Webhook | Optional (`send-digest`) | No | **Never** |
 | `DISCORD_WEBHOOK_URL` | Discord channel → Edit Channel → Integrations → Webhooks | Optional (`send-digest`) | No | **Never** |
@@ -33,6 +35,7 @@ This document is the authoritative reference for every secret in the system. Bef
 | `NOTION_TOKEN` | notion.so/my-integrations → New integration (Internal) → "Insert content" + "Read content" → copy Internal Integration Secret | Optional (`send-digest`; paired with `NOTION_DATABASE_ID`) | No | **Never** |
 | `NOTION_DATABASE_ID` | Open the target Notion database → URL contains `notion.so/<workspace>/<database-id>?v=...` → copy the database-id segment. **Must connect the integration to the database** (top-right `···` → `Connections` → `Add connections` → pick the integration) or POSTs return 404. After connecting, share the database with end users and tell them to **subscribe** (database top-right `···` → `Updates` → `Subscribe`) to get push notifications when each daily row lands. | Optional (`send-digest`) | No | **Never** |
 | `CRON_SECRET` | Generate a random string; used to auth pg_cron → `generate-trend-brief` | No | Yes (`generate-trend-brief`) | **Never** |
+| `service_role_key` (Vault) | Same value as `SUPABASE_SERVICE_ROLE_KEY`; stored via `select vault.create_secret('<jwt>', 'service_role_key', '...')` — used by pg_cron to call process-queue and generate-trend-brief | No | No — lives in **Supabase Vault** only | **Never** |
 
 ---
 
@@ -94,8 +97,11 @@ wrangler secret put GROQ_API_KEY
 Go to: Supabase Dashboard → Edge Functions → Manage Secrets
 
 Add:
-- `GROQ_API_KEY` (used by `answer-question` and `refresh-questions`)
-- `COHERE_API_KEY` (used by `answer-question` for query embedding)
+- `TOKENROUTER_API_KEY` (used by `process-queue`, `generate-trend-brief`, `answer-question`)
+- `GROQ_API_KEY` (used by `answer-question` and `refresh-questions` as fallback)
+- `COHERE_API_KEY` (used by `answer-question` and `generate-trend-brief` for embeddings)
+- `TREND_BRIEF_MODEL` (TokenRouter model ID for `generate-trend-brief`, e.g. `anthropic/claude-opus-4.7`)
+- `QA_LLM_MODEL` (TokenRouter model ID for `answer-question` default path, e.g. `qwen/qwen3.5-flash`)
 - `CRON_SECRET` (used by `generate-trend-brief` to auth pg_cron-triggered runs)
 
 These are accessible inside Edge Functions via `Deno.env.get('COHERE_API_KEY')`.

@@ -1,3 +1,5 @@
+import { hasAISignal } from './keywords'
+
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
@@ -136,15 +138,7 @@ function extractAccounts(data: unknown): BuilderAccount[] {
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
 const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
 
-// Pre-LLM keyword gate — same as process-queue. Must be kept in sync manually.
-const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
 
-const ZH_AI_KEYWORDS = [
-  '人工智能','大模型','语言模型','神经网络','深度学习','机器学习',
-  '生成式','多模态','算力','英伟达',
-  '智谱','文心','通义','混元','月之暗面','零一万物','阶跃星辰',
-  'DeepSeek','百川','商汤','科大讯飞','华为盘古',
-]
 const BIO_SYSTEM_PROMPT = 'You extract professional titles, roles, and credentials from Twitter bios. Output ONE flat JSON object where keys are handles and values are the exact, unabbreviated title strings extracted directly from the bio.\n\nRules:\n1. For people: DO NOT summarize, abbreviate, or alter the titles. Extract the exact relevant text verbatim. Include previous roles, multiple affiliations, or degrees if listed. Exclude conversational filler or hobbies (e.g., drop "I like to train large deep neural nets.").\n2. For products: Use the format "[Name] is [Exact Description] @[Company]".\n\nExample output:\n{"karpathy": "Previously Director of AI @ Tesla, founding team @ OpenAI, PhD @ Stanford", "claudeai": "Claude is LLM @Anthropic"}\n\nNo arrays, no extra keys, no markdown blocks (like ```json), no explanation.'
 
 // Extracts the first complete JSON object from a string, ignoring surrounding prose/markdown.
@@ -213,10 +207,7 @@ function gradeTweets(allTweets: BuilderTweetRow[], knownUrls: Set<string>): Buil
     // 1. Filter net-new (not already in raw_ingestion)
     const netNew = tweets.filter(t => !knownUrls.has(t.url))
     // 2. Keyword gate
-    const relevant = netNew.filter(t => {
-      const text = t.raw_content
-      return EN_AI_KEYWORDS.test(text) || ZH_AI_KEYWORDS.some(kw => text.includes(kw))
-    })
+    const relevant = netNew.filter(t => hasAISignal(t.raw_content))
     // 3. Sort by likes + retweets descending
     const sorted = relevant.sort((a, b) => {
       const scoreA = (a.metadata.likes ?? 0) + (a.metadata.retweets ?? 0)

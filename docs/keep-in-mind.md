@@ -192,6 +192,46 @@ Then re-trigger the worker. Safe to run anytime — rows that genuinely finished
 
 ---
 
+## pg_cron → Edge Function Authentication
+
+**Never add a manual `Authorization` header check inside an Edge Function called by pg_cron.**
+
+The Supabase Edge Runtime validates the JWT at the gateway level before `Deno.serve()` runs. By the time your handler executes, the caller is already authenticated. A manual check like:
+
+```ts
+const authHeader = req.headers.get('Authorization') ?? ''
+if (authHeader !== `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!}`) {
+  return new Response('Unauthorized', { status: 401 })
+}
+```
+
+will **always fail** — the Edge Runtime processes the Authorization header before Deno sees it, so `req.headers.get('Authorization')` does not return the raw JWT string you expect. The function silently rejects every pg_cron tick with 401 and the queue stops.
+
+**How to call a JWT-verified Edge Function from pg_cron (the correct pattern):**
+
+1. Store the service role key in Vault:
+   ```sql
+   select vault.create_secret('<service_role_jwt>', 'service_role_key', 'pg_cron auth');
+   ```
+2. In the pg_cron schedule, look it up at call time:
+   ```sql
+   select cron.schedule('job-name', '*/5 * * * *', $$
+     select net.http_post(
+       url := 'https://<ref>.supabase.co/functions/v1/<function>',
+       headers := jsonb_build_object(
+         'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key'),
+         'Content-Type', 'application/json'
+       ),
+       body := '{}'::jsonb
+     );
+   $$);
+   ```
+3. Do NOT add any auth check inside the function — the gateway handles it.
+
+**Diagnostic:** If pg_cron fires but the Edge Function returns 401 with `sb_error_code: UNAUTHORIZED_NO_AUTH_HEADER`, the Vault lookup returned NULL (secret name mismatch or secret not created). Verify with: `select name from vault.decrypted_secrets;`.
+
+---
+
 ## Supabase Edge Functions — External Webhook Receivers
 
 When an external service (e.g. Apify, Stripe, GitHub) POSTs to a Supabase Edge Function, **always deploy with `--no-verify-jwt`:**
@@ -222,15 +262,24 @@ By default, Supabase validates the `Authorization` header as a Supabase JWT. Ext
 
 ## The Live AI Model Is Not in Git History
 
-`OPENROUTER_MODEL` and `OPENROUTER_BIO_MODEL` are Cloudflare Worker secrets. The active model in production is invisible to `git log`. Before debugging a summarization quality regression, always check the active model: run `wrangler secret list --name process-queue` (confirms the secret exists but not its value — check the OpenRouter dashboard request logs for the actual model string).
+`TOKENROUTER_API_KEY`, `TREND_BRIEF_MODEL`, and `QA_LLM_MODEL` are Supabase Edge Function secrets. `OPENROUTER_BIO_MODEL` is a Cloudflare Worker secret for `ingest-builders`. The active model in production is invisible to `git log`. Before debugging a summarization quality regression, always check the active model via Supabase Dashboard → Edge Functions → Manage Secrets (values are masked — check TokenRouter dashboard request logs for actual model strings).
 
-If temporarily adding `console.log('Model:', env.OPENROUTER_MODEL)` to debug, remove it before committing.
+`process-queue` is now a **Supabase Edge Function** — do NOT use `wrangler secret list --name process-queue`. That worker no longer exists. Manage its secrets via:
+```bash
+supabase secrets list --project-ref <ref>
+```
 
 To swap models without redeployment:
 ```bash
-wrangler secret put OPENROUTER_MODEL --name process-queue
-# paste new model ID (e.g. qwen/qwen3-235b-a22b:free)
-# Takes effect on next cron cycle automatically
+supabase secrets set TREND_BRIEF_MODEL=anthropic/claude-opus-4.7 --project-ref <ref>
+supabase secrets set QA_LLM_MODEL=qwen/qwen3.5-flash --project-ref <ref>
+# Takes effect on next function invocation automatically
+```
+
+To swap the bio extraction model (ingest-builders CF Worker):
+```bash
+wrangler secret put OPENROUTER_BIO_MODEL --name ingest-builders
+# paste new model ID
 ```
 
 ---
@@ -423,6 +472,18 @@ https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdef-1234-...
 - `429` — rate limit (3 req/s). Won't trigger for one daily call.
 
 **Rule for any new Notion integration** in this project: token + database ID + share-the-database is the three-step setup. All three are mandatory; missing any returns a different unhelpful error.
+
+---
+
+## Trend Brief Feedback — Key on Time Window, Not Brief Row
+
+**Trend brief feedback is keyed on `(anchor_date, step_days)`, not `brief_id`.** The `trend_briefs` table creates a new row on every force-refresh. If feedback were stored on the brief row, a user's vote would be lost on refresh. The separate `trend_brief_feedback` table with `(user_id, anchor_date, step_days)` PK survives brief refreshes and supports independent votes per user.
+
+---
+
+## Copy-to-Clipboard — Use `ClipboardItem` for Rich Paste
+
+**Use `ClipboardItem` to write both `text/html` and `text/plain` simultaneously for copy-to-clipboard.** `navigator.clipboard.writeText()` alone pastes raw markdown asterisks in rich-text apps. `new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': plainBlob })` lets Notion/Docs receive bold text while plain editors receive stripped text. Fall back to `writeText` if `ClipboardItem` is undefined.
 
 ---
 

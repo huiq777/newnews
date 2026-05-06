@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
-import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native'
+import { useEffect, useRef, useState } from 'react'
+import { Animated, Image, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { supabase } from '../lib/config'
 import WebHTML from './WebHTML'
 
 type Channel = 'feishu' | 'slack' | 'discord' | 'telegram' | 'notion'
+type ActivePane = Channel | 'email'
 
 type ChannelInvite = {
   channel: Channel
@@ -28,6 +29,9 @@ const CHANNEL_ICONS: Record<Channel, (color: string) => string> = {
   // Notion — black square with the "N" wordmark stylized as two strokes.
   notion: () => `<svg viewBox="0 0 24 24" width="14" height="14" xmlns="http://www.w3.org/2000/svg" style="display:block"><rect width="22" height="22" x="1" y="1" rx="3" fill="#000"/><path fill="#fff" d="M7 6.5h2.6l5.4 7.4V6.5h2v11h-2.4l-5.6-7.6v7.6H7v-11Z"/></svg>`,
 }
+
+const EMAIL_ICON = (color: string) =>
+  `<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="14" height="14" style="display:block"><rect x="2" y="4" width="20" height="16" rx="2" stroke="${color}" stroke-width="1.5"/><path d="M2 7l10 7 10-7" stroke="${color}" stroke-width="1.5" stroke-linecap="round"/></svg>`
 
 const STRINGS = {
   en: {
@@ -126,7 +130,7 @@ export default function SubscriptionManualModal({
 }) {
   const [invites, setInvites] = useState<ChannelInvite[] | null>(null)
   const [fetchError, setFetchError] = useState(false)
-  const [active, setActive] = useState<Channel | null>(null)
+  const [active, setActive] = useState<ActivePane | null>(null)
   const [hovered, setHovered] = useState<string | null>(null)
 
   // Lazy fetch on first open; cache for the session.
@@ -201,7 +205,7 @@ export default function SubscriptionManualModal({
               <Text style={styles.muted}>{t.empty}</Text>
             )}
             {visibleInvites.map(inv => {
-              const isActive = inv.channel === activeInvite?.channel
+              const isActive = active === inv.channel
               const rowKey = `rail-${inv.channel}`
               const isHovered = hovered === rowKey
               return (
@@ -226,11 +230,35 @@ export default function SubscriptionManualModal({
                 </Pressable>
               )
             })}
+            {(() => {
+              const isActive = active === 'email'
+              const rowKey = 'rail-email'
+              const isHovered = hovered === rowKey
+              return (
+                <Pressable
+                  onPress={() => setActive('email')}
+                  onHoverIn={() => setHovered(rowKey)}
+                  onHoverOut={() => setHovered(null)}
+                  style={[
+                    styles.railRow,
+                    isHovered && !isActive && styles.railRowHovered,
+                    isActive && styles.railRowActive,
+                  ]}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <WebHTML html={EMAIL_ICON(isActive ? '#18181b' : '#3f3f46')} />
+                    <Text style={[styles.railLabel, isActive && styles.railLabelActive]}>Email</Text>
+                  </View>
+                </Pressable>
+              )
+            })()}
           </View>
 
           {/* Right pane */}
           <View style={styles.pane}>
-            {activeInvite ? (
+            {active === 'email' ? (
+              <EmailPane lang={lang} hovered={hovered} setHovered={setHovered} />
+            ) : activeInvite ? (
               <ChannelSteps
                 key={activeInvite.channel}
                 invite={activeInvite}
@@ -266,6 +294,165 @@ function visibleRows(invites: ChannelInvite[], currentLang: 'en' | 'zh'): Channe
       return a.channel.localeCompare(b.channel)
     })
 }
+
+function EmailPane({
+  lang,
+  hovered,
+  setHovered,
+}: {
+  lang: 'en' | 'zh'
+  hovered: string | null
+  setHovered: (h: string | null) => void
+}) {
+  const [emailLang, setEmailLang] = useState<'en' | 'zh'>(lang)
+  const [email, setEmail] = useState('')
+  const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'duplicate' | 'error'>('idle')
+  const [validationError, setValidationError] = useState(false)
+  const shakeAnim = useRef(new Animated.Value(0)).current
+  const ctaKey = 'email-cta'
+  const ctaHovered = hovered === ctaKey
+
+  const S = {
+    en: {
+      heading: 'Get the trend brief in your inbox',
+      placeholder: 'your@email.com',
+      cta: 'Subscribe →',
+      success: (e: string) => `Subscribed! Next brief goes to ${e}`,
+      duplicate: 'Already subscribed.',
+      error: 'Something went wrong — try again.',
+      fine: 'Unsubscribe any time.',
+      invalid: 'Invalid email',
+    },
+    zh: {
+      heading: '将趋势摘要发送到你的邮箱',
+      placeholder: '你的邮箱地址',
+      cta: '订阅 →',
+      success: (e: string) => `订阅成功！下一封摘要将发送至 ${e}`,
+      duplicate: '该邮箱已订阅。',
+      error: '出错了，请重试。',
+      fine: '随时可退订。',
+      invalid: '邮箱格式不正确',
+    },
+  }
+  const t = S[lang]
+
+  function triggerShake() {
+    Animated.sequence([
+      Animated.timing(shakeAnim, { toValue: 6, duration: 55, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -6, duration: 55, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 4, duration: 55, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: -4, duration: 55, useNativeDriver: true }),
+      Animated.timing(shakeAnim, { toValue: 0, duration: 55, useNativeDriver: true }),
+    ]).start()
+  }
+
+  async function handleSubscribe() {
+    const trimmed = email.trim().toLowerCase()
+    if (!trimmed || !trimmed.includes('@') || trimmed.indexOf('@') === trimmed.length - 1) {
+      setValidationError(true)
+      triggerShake()
+      return
+    }
+    setValidationError(false)
+    setStatus('loading')
+    const { error } = await supabase
+      .from('email_subscribers')
+      .insert({ email: trimmed, lang: emailLang })
+    if (!error) {
+      setStatus('success')
+    } else if (error.code === '23505') {
+      setStatus('duplicate')
+    } else {
+      setStatus('error')
+    }
+  }
+
+  return (
+    <View style={{ gap: 14 }}>
+      <Text style={emailStyles.heading}>{t.heading}</Text>
+      <View style={{ flexDirection: 'row', gap: 8 }}>
+        {(['en', 'zh'] as const).map(l => (
+          <Pressable
+            key={l}
+            onPress={() => setEmailLang(l)}
+            style={[emailStyles.langBtn, emailLang === l && emailStyles.langBtnActive]}
+          >
+            <Text style={[emailStyles.langBtnText, emailLang === l && emailStyles.langBtnTextActive]}>
+              {l === 'en' ? 'English' : '中文'}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      <TextInput
+        value={email}
+        onChangeText={(v) => { setEmail(v); if (validationError) setValidationError(false) }}
+        placeholder={t.placeholder}
+        keyboardType="email-address"
+        autoCapitalize="none"
+        style={[emailStyles.input, validationError && emailStyles.inputError]}
+        editable={status !== 'loading' && status !== 'success'}
+      />
+      {status === 'success' ? (
+        <Text style={emailStyles.successText}>{t.success(email.trim().toLowerCase())}</Text>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <Animated.View style={{ transform: [{ translateX: shakeAnim }] }}>
+            <Pressable
+              onPress={() => { void handleSubscribe() }}
+              onHoverIn={() => setHovered(ctaKey)}
+              onHoverOut={() => setHovered(null)}
+              style={({ pressed }) => [
+                emailStyles.cta,
+                ctaHovered && emailStyles.ctaHovered,
+                pressed && emailStyles.ctaPressed,
+                status === 'loading' && emailStyles.ctaDisabled,
+              ]}
+              disabled={status === 'loading'}
+            >
+              <Text style={emailStyles.ctaText}>{status === 'loading' ? '…' : t.cta}</Text>
+            </Pressable>
+          </Animated.View>
+          {validationError && <Text style={emailStyles.inlineError}>{t.invalid}</Text>}
+          {status === 'duplicate' && <Text style={emailStyles.inlineMuted}>{t.duplicate}</Text>}
+          {status === 'error' && <Text style={emailStyles.inlineError}>{t.error}</Text>}
+        </View>
+      )}
+      <Text style={emailStyles.fineText}>{t.fine}</Text>
+    </View>
+  )
+}
+
+const emailStyles = StyleSheet.create({
+  heading: { fontSize: 13, fontWeight: '600', color: '#27272a', fontFamily: 'Space Grotesk, sans-serif' },
+  langBtn: {
+    paddingHorizontal: 12, paddingVertical: 5,
+    borderRadius: 16, borderWidth: 1, borderColor: '#d4d4d8',
+    backgroundColor: '#fff',
+  },
+  langBtnActive: { borderColor: '#18181b', backgroundColor: '#18181b' },
+  langBtnText: { fontSize: 13, fontWeight: '600', color: '#71717a', fontFamily: 'Space Grotesk, sans-serif' },
+  langBtnTextActive: { color: '#fff' },
+  input: {
+    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 8,
+    fontSize: 13, color: '#27272a', fontFamily: 'Space Grotesk, sans-serif',
+    backgroundColor: '#fff',
+  },
+  inputError: { borderColor: '#ef4444' },
+  cta: {
+    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 8,
+    paddingVertical: 7, paddingHorizontal: 14,
+    backgroundColor: '#fff', alignSelf: 'flex-start',
+  },
+  ctaHovered: { backgroundColor: '#f4f4f5', borderColor: '#a1a1aa' },
+  ctaPressed: { backgroundColor: '#e4e4e7', borderColor: '#71717a' },
+  ctaDisabled: { opacity: 0.5 },
+  ctaText: { fontSize: 12, fontWeight: '700', color: '#18181b', fontFamily: 'Space Grotesk, sans-serif' },
+  successText: { fontSize: 12, color: '#16a34a', fontFamily: 'Space Grotesk, sans-serif' },
+  inlineError: { fontSize: 11, color: '#ef4444', fontFamily: 'Space Grotesk, sans-serif' },
+  inlineMuted: { fontSize: 11, color: '#71717a', fontFamily: 'Space Grotesk, sans-serif' },
+  fineText: { fontSize: 11, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif' },
+})
 
 function ChannelSteps({
   invite,

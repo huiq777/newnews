@@ -9,55 +9,61 @@ Supabase Edge Functions serve as the secure bridge between the frontend and AI p
 ## `answer-question` — Inline RAG Q&A
 
 ### Purpose
-Takes a user's question about a specific article, embeds the question with Cohere, finds related articles via `match_articles` RPC, and streams the answer back via Groq.
+Takes a user's question about a specific article, embeds the question with Cohere, finds related articles via `match_articles` RPC, and streams the answer back. Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Every call writes a `qa_logs` row with full trace (`request_id`, timing, tokens, abort flag) and accepts user 👍/👎 feedback written back by the `AnswerFeedback` component.
 
 ### Request
 
 ```
 POST /functions/v1/answer-question
-Authorization: Bearer <supabase_anon_key>
+Authorization: Bearer <user_jwt>
+apikey: <supabase_anon_key>
 Content-Type: application/json
 
 {
   "article_id": "uuid",
   "question": "string",
-  "lang": "en" | "zh"
+  "lang": "en" | "zh",
+  "deep_think": false,
+  "force_refresh": false
 }
 ```
+
+`deep_think: true` routes to `qwen/qwen3.6-plus` (thinking model); default uses `QA_LLM_MODEL` (e.g. `qwen/qwen3.5-flash`).
 
 ### Response
 
 ```
 Content-Type: text/event-stream
 
+data: {"type": "thinking", "content": "..."}   ← deep_think only
 data: {"type": "content", "content": "Based on the article,"}
 data: {"type": "content", "content": " OpenAI reduced prices..."}
+data: {"type": "meta", "qa_log_id": "uuid", "feedback": null}
 data: [DONE]
 ```
-
-Only `type: "content"` events are emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned) — do not remove until a reasoning model replaces it.
 
 ### Internal Flow
 
 ```
-1. Fetch article from daily_news (title, summary_en/zh, article_content)
-2. Use article_content if available, else summary (fallback)
-3. POST question to Cohere (input_type='search_query')  ← ASYMMETRIC — do not change
-4. RPC match_articles(query_embedding, match_count=4) → top 3 related (excluding primary)
-5. POST to Groq llama-3.3-70b-versatile streaming with full context + related articles
-6. SSE stream: { type: 'content', content: string } chunks + data: [DONE]
+1. route()    — resolve article, check cache, select LLM model (deep_think vs default)
+2. retrieve() — Cohere embed question (input_type='search_query' ← ASYMMETRIC, load-bearing)
+               → match_articles(query_embedding, match_count=4) → top 3 related (excluding primary)
+3. generate() — TokenRouter streaming SSE (primary → OpenRouter → Groq fallback)
+               — deep_think: stream type:thinking chunks before type:content
+4. orchestrateAnswer() — wire abort propagation, persist qa_logs row with request_id + timing
 ```
 
 ### Required Secrets
-- `GROQ_API_KEY`
+- `TOKENROUTER_API_KEY`
+- `QA_LLM_MODEL` (default path model, e.g. `qwen/qwen3.5-flash`)
+- `GROQ_API_KEY` (fallback)
 - `COHERE_API_KEY`
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ### Deploy
 ```bash
 supabase functions deploy answer-question
-supabase secrets set GROQ_API_KEY=... COHERE_API_KEY=... --project-ref <ref>
+supabase secrets set TOKENROUTER_API_KEY=... COHERE_API_KEY=... QA_LLM_MODEL=qwen/qwen3.5-flash --project-ref <ref>
 ```
 
 ---
@@ -250,6 +256,32 @@ supabase functions deploy redeem-invite
 # this function relies on the gateway pre-validating user JWTs.
 ```
 
+---
+
+## `unsubscribe-email` — Email Digest Unsubscribe
+
+### Purpose
+Unauthenticated one-click unsubscribe for email digest subscribers. Visited directly from an unsubscribe link embedded in digest emails.
+
+### Deploy
+```bash
+supabase functions deploy unsubscribe-email --no-verify-jwt
+```
+
+### Request
+```
+GET /functions/v1/unsubscribe-email?id=<subscriber-uuid>
+```
+
+### Flow
+1. Extract `id` from query params; return 400 if missing.
+2. PATCH `email_subscribers` where `id = ?` and `unsubscribed_at IS NULL`, setting `unsubscribed_at = now()` (service role, PostgREST REST call).
+3. Return an HTML confirmation page (200) regardless of whether the row existed — idempotent.
+
+### Notes
+- `--no-verify-jwt` required: unsubscribe links in emails are clicked by unauthenticated users.
+- Service role key used internally; never exposed to the caller.
+
 ### Project-Level Pre-Reqs
 The function alone is not enough. Three Supabase project settings must be in place — see [keep-in-mind.md](keep-in-mind.md#1-anonymous-sign-ins-are-off-by-default-in-newer-supabase-projects) for the full diagnosis of each:
 1. Authentication → Sign In / Sign Up → **Anonymous Sign-Ins ON**.
@@ -315,6 +347,54 @@ The line buffer (splitting on `\n`, keeping the incomplete tail) is required bec
 
 ---
 
+## `process-queue` — Scrape, Summarize, and Queue Articles
+
+### Purpose
+Pulls batches of `pending` rows from `raw_ingestion`, scrapes article content, runs bilingual summary + question generation via TokenRouter, and writes clean articles to `daily_news`. Triggered by pg_cron every 5 min via Supabase Vault service role key.
+
+### Internal Flow
+
+```
+1. claim_pending_batch(batch_size=5) RPC — atomic batch claim; MVCC guard against double-processing
+2. Per article:
+   a. is_ai_relevant RPC — keyword gate (fail-open); skip → pipeline_events step=keyword_gate status=skip
+   b. Scrape article URL (node-html-parser) — tweets and WeChat use raw_content directly
+   c. 1 TokenRouter LLM call: title_en/zh + summary_en/zh + questions_en/zh combined prompt
+      Primary: qwen/qwen3.6-plus (120s) → OpenRouter secondary → Groq tertiary
+   d. parseJsonSection extracts JSON arrays from LLM response
+   e. INSERT into daily_news; propagate engagement from raw_ingestion.metadata
+   f. Write pipeline_events rows: keyword_gate, llm, insert, llm_category_mismatch
+3. run_id UUID stamped on raw_ingestion + daily_news rows for full pipeline trace
+```
+
+### Required Secrets
+- `TOKENROUTER_API_KEY`
+- `GROQ_API_KEY` (tertiary fallback)
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+- `service_role_key` in Supabase Vault (for pg_cron invocation)
+
+### Deploy
+```bash
+supabase functions deploy process-queue
+supabase secrets set TOKENROUTER_API_KEY=... GROQ_API_KEY=... --project-ref <ref>
+```
+
+### pg_cron trigger
+```sql
+select cron.schedule('process-queue-every-5min', '*/5 * * * *', $$
+  select net.http_post(
+    url := 'https://<ref>.supabase.co/functions/v1/process-queue',
+    headers := jsonb_build_object(
+      'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key'),
+      'Content-Type', 'application/json'
+    ),
+    body := '{}'::jsonb
+  );
+$$);
+```
+
+---
+
 ## Diagnostic Logs
 
 ```bash
@@ -323,6 +403,7 @@ supabase functions logs answer-question --tail
 supabase functions logs refresh-questions --tail
 supabase functions logs ingest-apify-tweets --tail
 supabase functions logs generate-trend-brief --tail
+supabase functions logs process-queue --tail
 ```
 
 ---
@@ -413,7 +494,7 @@ Frontend AbortController fires on window change — `req.signal` is propagated t
 ### Deploy
 ```bash
 supabase functions deploy generate-trend-brief
-supabase secrets set GROQ_API_KEY=... --project-ref <ref>
+supabase secrets set TOKENROUTER_API_KEY=... TREND_BRIEF_MODEL=anthropic/claude-opus-4.7 COHERE_API_KEY=... --project-ref <ref>
 ```
 
 ### Token Budget
