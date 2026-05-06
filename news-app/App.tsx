@@ -15,12 +15,29 @@ import SubscriptionManualModal from './components/SubscriptionManualModal'
 import NewArticlesBanner from './components/NewArticlesBanner'
 import XThreadCard, { XThreadGroup } from './components/XThreadCard'
 
+type FeedRow = {
+  id: string
+  title_en: string | null
+  title_zh: string | null
+  summary_en: string | null
+  summary_zh: string | null
+  source_type: string
+  source_id: string
+  thread_group: string | null
+  url: string | null
+  published_at: string | null
+  created_at: string
+  questions: { en: string[]; zh: string[] } | null
+  engagement: Record<string, number> | null
+  next_cursor: string | null
+}
+
 export default function App() {
   const { status: authStatus, defaultLang: authDefaultLang, redeemError, retry } = useAuthGate()
   const [articles, setArticles] = useState<Article[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
-  const [feedOffset, setFeedOffset] = useState(0)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [lang, setLang] = useState<'en' | 'zh'>(getInitialLang)
@@ -39,17 +56,16 @@ export default function App() {
   const [newArticlesCount, setNewArticlesCount] = useState(0)
   const [expandedThreads, setExpandedThreads] = useState<Record<string, boolean>>({})
   const wheelControlsRef = useRef<{ resetToToday: () => void; switchTo: (days: 1 | 3 | 7 | 30) => void } | null>(null)
+  const [deepThink, setDeepThink] = useState(false)
   const listRef = useRef<FlatList>(null)
   const scrollOffsetRef = useRef(0)
   const contentHeightRef = useRef<{ en: number; zh: number }>({ en: 0, zh: 0 })
   const pendingPropRef = useRef<number | null>(null)
   const langRef = useRef(lang)
-  const feedOffsetRef = useRef(0)
   const isInitialLoadRef = useRef(true)
-  useEffect(() => { 
+  useEffect(() => {
     langRef.current = lang
   }, [lang])
-  useEffect(() => { feedOffsetRef.current = feedOffset }, [feedOffset])
 
   // Native async-storage fallback for initial language
   useEffect(() => {
@@ -78,6 +94,11 @@ export default function App() {
   // Font injection (web-only)
   useEffect(() => {
     if (typeof document === 'undefined') return
+    const favicon = document.createElement('link')
+    favicon.rel = 'icon'
+    favicon.type = 'image/png'
+    favicon.href = '/favicon.ico'
+    document.head.appendChild(favicon)
     const link = document.createElement('link')
     link.rel = 'stylesheet'
     link.href = 'https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@300..700&family=Inter:wght@400;500;600&display=swap'
@@ -133,7 +154,10 @@ export default function App() {
 
   const checkMissedArticles = useCallback(async () => {
     if (authStatusRef.current !== 'authed') return
-    let latestDate = articlesRef.current[0]?.created_at
+    let latestDate = articlesRef.current.reduce<string | undefined>(
+      (max, a) => (a.created_at && (!max || a.created_at > max) ? a.created_at : max),
+      undefined
+    )
     if (!latestDate && dateRangeRef.current) {
       latestDate = dateRangeRef.current.start.toISOString()
     }
@@ -199,44 +223,42 @@ export default function App() {
     setLoading(true)
     setArticles([])
     setHasMore(true)
-    feedOffsetRef.current = 0
+    setNextCursor(null)
 
-    let query = supabase
-      .from('daily_news')
-      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
-      .order('created_at', { ascending: false })
+    if (!dateRange) { setLoading(false); return }
 
-    if (activeCategory !== 'all') {
-      query = query.eq('category', activeCategory)
-    }
+    const startDate = dateRange.start.toISOString().slice(0, 10)
+    const endDate = dateRange.end.toISOString().slice(0, 10)
 
-    if (dateRange) {
-      const s = dateRange.start.toISOString()
-      const e = dateRange.end.toISOString()
-      query = query.or(
-        `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
-      )
-    }
-
-    query.range(0, FEED_PAGE_SIZE - 1).then(({ data, error }) => {
-      if (error) console.error(error)
-      else {
+    supabase
+      .rpc('fetch_grouped_feed', {
+        p_date_start: startDate,
+        p_date_end: endDate,
+        p_category: activeCategory === 'all' ? null : activeCategory,
+        p_limit: FEED_PAGE_SIZE,
+        p_cursor: null,
+      })
+      .then(({ data, error }) => {
+        if (error) {
+          console.error('fetch_grouped_feed error:', error.message)
+          setLoading(false)
+          return
+        }
+        const rows = (data ?? []) as FeedRow[]
         // Auto-fallback: if Today returns nothing on INITIAL LOAD, widen to 3D
-        if ((!data || data.length === 0) && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
+        if (rows.length === 0 && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
           isInitialLoadRef.current = false
+          setLoading(false)
           wheelControlsRef.current.switchTo(3)
           return
         }
         isInitialLoadRef.current = false
-        setArticles(data as unknown as Article[])
-        const loaded = data?.length ?? 0
-        setHasMore(loaded === FEED_PAGE_SIZE)
-        setFeedOffset(FEED_PAGE_SIZE)
-        feedOffsetRef.current = FEED_PAGE_SIZE
-      }
-      setLoading(false)
-      listRef.current?.scrollToOffset({ offset: 0, animated: false })
-    })
+        setArticles(rows as unknown as Article[])
+        setHasMore(rows.length === FEED_PAGE_SIZE)
+        setNextCursor(rows.length > 0 ? rows[rows.length - 1].next_cursor : null)
+        setLoading(false)
+        listRef.current?.scrollToOffset({ offset: 0, animated: false })
+      })
   }, [dateRange, activeCategory, refreshTrigger, authStatus]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleLoadNew() {
@@ -245,36 +267,25 @@ export default function App() {
   }
 
   async function loadMoreArticles() {
-    if (loading || loadingMore || !hasMore) return
+    if (loading || loadingMore || !hasMore || !nextCursor || !dateRange) return
     setLoadingMore(true)
-    const offset = feedOffsetRef.current
 
-    let query = supabase
-      .from('daily_news')
-      .select('id, source_id, title, summary, title_en, summary_en, title_zh, summary_zh, url, created_at, published_at, questions, engagement')
-      .order('created_at', { ascending: false })
+    const startDate = dateRange.start.toISOString().slice(0, 10)
+    const endDate = dateRange.end.toISOString().slice(0, 10)
 
-    if (activeCategory !== 'all') {
-      query = query.eq('category', activeCategory)
-    }
-
-    if (dateRange) {
-      const s = dateRange.start.toISOString()
-      const e = dateRange.end.toISOString()
-      query = query.or(
-        `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
-      )
-    }
-
-    query.range(offset, offset + FEED_PAGE_SIZE - 1).then(({ data, error }) => {
-      if (error) { console.error(error); setLoadingMore(false); return }
-      const loaded = data?.length ?? 0
-      setArticles(prev => [...prev, ...(data as unknown as Article[])])
-      setHasMore(loaded === FEED_PAGE_SIZE)
-      setFeedOffset(offset + FEED_PAGE_SIZE)
-      feedOffsetRef.current = offset + FEED_PAGE_SIZE
-      setLoadingMore(false)
+    const { data, error } = await supabase.rpc('fetch_grouped_feed', {
+      p_date_start: startDate,
+      p_date_end: endDate,
+      p_category: activeCategory === 'all' ? null : activeCategory,
+      p_limit: FEED_PAGE_SIZE,
+      p_cursor: nextCursor,
     })
+    setLoadingMore(false)
+    if (error) { console.error('loadMoreArticles error:', error.message); return }
+    const rows = (data ?? []) as FeedRow[]
+    setArticles(prev => [...prev, ...(rows as unknown as Article[])])
+    setHasMore(rows.length === FEED_PAGE_SIZE)
+    setNextCursor(rows.length > 0 ? rows[rows.length - 1].next_cursor : null)
   }
 
   const handleFilterChange = useCallback((start: Date, end: Date, label: string, days: number) => {
@@ -296,33 +307,40 @@ export default function App() {
     setActiveCategory(cat)
   }
 
-  const displayArticles = useMemo(() => {
+  const grouped = useMemo(() => {
     const result: (Article | XThreadGroup)[] = []
-    const authorGroupMap = new Map<string, XThreadGroup>()
+    const threadMap = new Map<string, XThreadGroup>()
 
     for (const item of articles) {
-      const match = item.url?.match(/x\.com\/([^/]+)\/status\//)
-      if (match && match[1]) {
-        const handle = match[1].toLowerCase()
-        if (authorGroupMap.has(handle)) {
-          authorGroupMap.get(handle)!.tweets.push(item)
+      const row = item as unknown as FeedRow
+      // Use server-provided thread_group; fall back to URL extraction if null
+      const handle = row.thread_group
+        ?? row.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]?.toLowerCase()
+        ?? null
+      if (handle) {
+        if (threadMap.has(handle)) {
+          threadMap.get(handle)!.tweets.push(item)
         } else {
-          const newGroup: XThreadGroup = {
-            handle: match[1],
-            bio: bioMap[handle],
+          const group: XThreadGroup = {
+            handle,
+            bio: bioMap[handle.toLowerCase()],
             tweets: [item],
           }
-          authorGroupMap.set(handle, newGroup)
-          result.push(newGroup)
+          threadMap.set(handle, group)
+          result.push(group)
         }
       } else {
         result.push(item)
       }
     }
 
-    // Sort tweets within groups by likes desc
-    for (const group of authorGroupMap.values()) {
-      group.tweets.sort((a, b) => (b.engagement?.likes ?? 0) - (a.engagement?.likes ?? 0))
+    // Sort within each group by likes desc
+    for (const group of threadMap.values()) {
+      group.tweets.sort((a, b) => {
+        const aRow = a as unknown as FeedRow
+        const bRow = b as unknown as FeedRow
+        return (bRow.engagement?.likes ?? 0) - (aRow.engagement?.likes ?? 0)
+      })
     }
 
     return result
@@ -359,7 +377,7 @@ export default function App() {
             ? <LoadingIndicator lang={lang} />
             : <FlatList
               ref={listRef}
-              data={displayArticles}
+              data={grouped}
               showsVerticalScrollIndicator={false}
               extraData={[sourceMap, categoryMap, lang, activeCategory]}
               ListHeaderComponent={
@@ -368,7 +386,7 @@ export default function App() {
                     lang={lang}
                     dateRange={dateRange}
                     stepDays={stepDays}
-                    hasArticles={displayArticles.length > 0}
+                    hasArticles={grouped.length > 0}
                     onOpenManual={() => setShowManual(true)}
                   />
                 ) : null
@@ -394,10 +412,12 @@ export default function App() {
                       lang={lang}
                       isExpanded={isExpanded}
                       onExpandedChange={(v) => setExpandedThreads(prev => ({ ...prev, [handleLower]: v }))}
+                      deepThink={deepThink}
+                      onDeepThinkChange={setDeepThink}
                     />
                   )
                 }
-                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} />
+                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} deepThink={deepThink} onDeepThinkChange={setDeepThink} />
               }}
               onEndReached={loadMoreArticles}
               onEndReachedThreshold={0.2}
@@ -409,7 +429,7 @@ export default function App() {
               }
               ListFooterComponent={
                 <View style={styles.loadMoreSentinel}>
-                  {displayArticles.length === 0
+                  {grouped.length === 0
                     ? <Text style={styles.loadMoreTextDone}>{lang === 'en' ? '──────── all caught up ────────' : '──────── 已经到底了 ────────'}</Text>
                     : loadingMore
                       ? <Text style={styles.loadMoreText}>{lang === 'en' ? 'loading ···' : '加载中 ···'}</Text>

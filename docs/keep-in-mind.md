@@ -262,15 +262,24 @@ By default, Supabase validates the `Authorization` header as a Supabase JWT. Ext
 
 ## The Live AI Model Is Not in Git History
 
-`OPENROUTER_MODEL` and `OPENROUTER_BIO_MODEL` are Cloudflare Worker secrets. The active model in production is invisible to `git log`. Before debugging a summarization quality regression, always check the active model: run `wrangler secret list --name process-queue` (confirms the secret exists but not its value — check the OpenRouter dashboard request logs for the actual model string).
+`TOKENROUTER_API_KEY`, `TREND_BRIEF_MODEL`, and `QA_LLM_MODEL` are Supabase Edge Function secrets. `OPENROUTER_BIO_MODEL` is a Cloudflare Worker secret for `ingest-builders`. The active model in production is invisible to `git log`. Before debugging a summarization quality regression, always check the active model via Supabase Dashboard → Edge Functions → Manage Secrets (values are masked — check TokenRouter dashboard request logs for actual model strings).
 
-If temporarily adding `console.log('Model:', env.OPENROUTER_MODEL)` to debug, remove it before committing.
+`process-queue` is now a **Supabase Edge Function** — do NOT use `wrangler secret list --name process-queue`. That worker no longer exists. Manage its secrets via:
+```bash
+supabase secrets list --project-ref <ref>
+```
 
 To swap models without redeployment:
 ```bash
-wrangler secret put OPENROUTER_MODEL --name process-queue
-# paste new model ID (e.g. qwen/qwen3-235b-a22b:free)
-# Takes effect on next cron cycle automatically
+supabase secrets set TREND_BRIEF_MODEL=anthropic/claude-opus-4.7 --project-ref <ref>
+supabase secrets set QA_LLM_MODEL=qwen/qwen3.5-flash --project-ref <ref>
+# Takes effect on next function invocation automatically
+```
+
+To swap the bio extraction model (ingest-builders CF Worker):
+```bash
+wrangler secret put OPENROUTER_BIO_MODEL --name ingest-builders
+# paste new model ID
 ```
 
 ---
@@ -463,6 +472,18 @@ https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdef-1234-...
 - `429` — rate limit (3 req/s). Won't trigger for one daily call.
 
 **Rule for any new Notion integration** in this project: token + database ID + share-the-database is the three-step setup. All three are mandatory; missing any returns a different unhelpful error.
+
+---
+
+## Trend Brief Feedback — Key on Time Window, Not Brief Row
+
+**Trend brief feedback is keyed on `(anchor_date, step_days)`, not `brief_id`.** The `trend_briefs` table creates a new row on every force-refresh. If feedback were stored on the brief row, a user's vote would be lost on refresh. The separate `trend_brief_feedback` table with `(user_id, anchor_date, step_days)` PK survives brief refreshes and supports independent votes per user.
+
+---
+
+## Copy-to-Clipboard — Use `ClipboardItem` for Rich Paste
+
+**Use `ClipboardItem` to write both `text/html` and `text/plain` simultaneously for copy-to-clipboard.** `navigator.clipboard.writeText()` alone pastes raw markdown asterisks in rich-text apps. `new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': plainBlob })` lets Notion/Docs receive bold text while plain editors receive stripped text. Fall back to `writeText` if `ClipboardItem` is undefined.
 
 ---
 

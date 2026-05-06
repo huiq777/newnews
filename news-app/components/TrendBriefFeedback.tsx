@@ -1,17 +1,4 @@
-// AnswerFeedback — 👍/👎 row beneath a completed RAG answer.
-// Spec C §3b: docs/superpowers/specs/2026-04-26-qa-logs-and-feedback-design.md
-//
-// Optimistic local state + supabase.from('qa_logs').update(...).eq('id', qaLogId).
-// Tap-same-again clears (sets feedback: null). Errors revert optimistic state
-// with a tiny inline notice. No success toast — visual state change is the
-// confirmation.
-//
-// Telemetry integrity: this PATCH succeeds only because of the column-level
-// GRANT in 20260426_qa_logs.sql — clients have UPDATE rights on
-// (feedback, feedback_at) only. Attempts to write any other column would
-// fail at the Postgres permission layer.
-
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Pressable, StyleSheet, Text, View } from 'react-native'
 import { supabase } from '../lib/config'
 import WebHTML from './WebHTML'
@@ -30,77 +17,87 @@ const getIconHtml = (svg: string, active: boolean, hovered: boolean) =>
 type Feedback = -1 | 0 | 1 | null
 
 const STRINGS = {
-  en: {
-    helpful: 'Helpful',
-    notHelpful: 'Not helpful',
-    error: 'Could not save — try again',
-  },
-  zh: {
-    helpful: '有帮助',
-    notHelpful: '没帮助',
-    error: '保存失败，请重试',
-  },
+  en: { helpful: 'Good brief', notHelpful: 'Poor brief', error: 'Could not save — try again' },
+  zh: { helpful: '摘要不错', notHelpful: '摘要较差', error: '保存失败，请重试' },
 }
 
-export default function AnswerFeedback({
-  qaLogId,
+export default function TrendBriefFeedback({
+  anchorDate,
+  stepDays,
+  synthesis,
   lang,
-  onRefresh,
-  initialFeedback = null,
-  copyText,
 }: {
-  qaLogId: string
+  anchorDate: string
+  stepDays: number
+  synthesis: string
   lang: 'en' | 'zh'
-  onRefresh?: () => void
-  initialFeedback?: Feedback
-  copyText?: string
 }) {
-  const [feedback, setFeedback] = useState<Feedback>(initialFeedback)
+  const [feedback, setFeedback] = useState<Feedback>(null)
   const [error, setError] = useState(false)
   const [hoverUp, setHoverUp] = useState(false)
   const [hoverDown, setHoverDown] = useState(false)
-  const [hoverRefresh, setHoverRefresh] = useState(false)
   const [copied, setCopied] = useState(false)
   const [hoverCopy, setHoverCopy] = useState(false)
   const t = STRINGS[lang]
 
+  useEffect(() => {
+    void (async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) return
+      const { data } = await supabase
+        .from('trend_brief_feedback')
+        .select('feedback')
+        .eq('anchor_date', anchorDate)
+        .eq('step_days', stepDays)
+        .maybeSingle()
+      if (data) setFeedback(data.feedback as Feedback)
+    })()
+  }, [anchorDate, stepDays])
+
   async function vote(next: Feedback) {
-    // Tap-same-again clears.
     const target: Feedback = feedback === next ? null : next
     const previous = feedback
     setFeedback(target)
     setError(false)
 
-    const { data, error: err } = await supabase
-      .from('qa_logs')
-      .update({
-        feedback: target,
-        feedback_at: target === null ? null : new Date().toISOString(),
-      })
-      .eq('id', qaLogId)
-      .select('id')
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) { setFeedback(previous); setError(true); return }
 
-    // Three failure shapes to distinguish:
-    //   - err set: column-GRANT or other Postgres error.
-    //   - err null + data empty: RLS row-scope blocked silently — the row
-    //     isn't visible to this user (auth state lost, qaLogId mismatched, etc.).
-    //   - err null + data has 1 row: success.
-    if (err || !data || data.length === 0) {
-      console.error('[AnswerFeedback] PATCH failed:', err?.message ?? 'no rows updated (RLS row-scope or stale qaLogId)')
+    let err: { message: string } | null = null
+
+    if (target === null) {
+      const { error: e } = await supabase
+        .from('trend_brief_feedback')
+        .delete()
+        .eq('anchor_date', anchorDate)
+        .eq('step_days', stepDays)
+      err = e
+    } else {
+      const { error: e } = await supabase
+        .from('trend_brief_feedback')
+        .upsert(
+          { user_id: user.id, anchor_date: anchorDate, step_days: stepDays,
+            feedback: target, feedback_at: new Date().toISOString() },
+          { onConflict: 'user_id,anchor_date,step_days' }
+        )
+      err = e
+    }
+
+    if (err) {
+      console.error('[TrendBriefFeedback] vote failed:', err.message)
       setFeedback(previous)
       setError(true)
     }
   }
 
   async function handleCopy() {
-    if (!copyText) return
-    const plain = copyText
+    const plain = synthesis
       .replace(/\*\*(.*?)\*\*/gs, '$1')
       .replace(/\*(.*?)\*/gs, '$1')
       .replace(/^#{1,6}\s+/gm, '')
       .replace(/`{3}[\s\S]*?`{3}/g, '')
       .replace(/`([^`]+)`/g, '$1')
-    const htmlBody = copyText
+    const htmlBody = synthesis
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/\*\*(.*?)\*\*/gs, '<strong>$1</strong>')
       .replace(/\*(.*?)\*/gs, '<em>$1</em>')
@@ -130,7 +127,7 @@ export default function AnswerFeedback({
   return (
     <View style={styles.row}>
       <Pressable
-        onPress={(e) => { e.stopPropagation?.(); vote(1) }}
+        onPress={(e) => { e.stopPropagation?.(); void vote(1) }}
         onHoverIn={() => setHoverUp(true)}
         onHoverOut={() => setHoverUp(false)}
         accessibilityLabel={t.helpful}
@@ -139,7 +136,7 @@ export default function AnswerFeedback({
         <WebHTML html={getIconHtml(UPVOTE_SVG, upActive, hoverUp)} style={styles.svgWrapper} />
       </Pressable>
       <Pressable
-        onPress={(e) => { e.stopPropagation?.(); vote(-1) }}
+        onPress={(e) => { e.stopPropagation?.(); void vote(-1) }}
         onHoverIn={() => setHoverDown(true)}
         onHoverOut={() => setHoverDown(false)}
         accessibilityLabel={t.notHelpful}
@@ -147,28 +144,15 @@ export default function AnswerFeedback({
       >
         <WebHTML html={getIconHtml(DOWNVOTE_SVG, downActive, hoverDown)} style={styles.svgWrapper} />
       </Pressable>
-      {onRefresh && (
-        <Pressable
-          onPress={(e) => { e.stopPropagation?.(); onRefresh() }}
-          onHoverIn={() => setHoverRefresh(true)}
-          onHoverOut={() => setHoverRefresh(false)}
-          accessibilityLabel="Refresh"
-          style={[styles.btn, hoverRefresh && styles.btnHovered]}
-        >
-          <Text style={[styles.icon, hoverRefresh && styles.iconHovered]}>↻</Text>
-        </Pressable>
-      )}
-      {copyText !== undefined && (
-        <Pressable
-          onPress={(e) => { e.stopPropagation?.(); void handleCopy() }}
-          onHoverIn={() => setHoverCopy(true)}
-          onHoverOut={() => setHoverCopy(false)}
-          accessibilityLabel="Copy"
-          style={[styles.btn, copied ? styles.btnCopied : (hoverCopy && styles.btnHovered)]}
-        >
-          <WebHTML html={copied ? COPY_DONE_SVG : getIconHtml(COPY_SVG, false, hoverCopy)} style={{ width: 17, height: 17 }} />
-        </Pressable>
-      )}
+      <Pressable
+        onPress={(e) => { e.stopPropagation?.(); void handleCopy() }}
+        onHoverIn={() => setHoverCopy(true)}
+        onHoverOut={() => setHoverCopy(false)}
+        accessibilityLabel="Copy"
+        style={[styles.btn, copied ? styles.btnCopied : (hoverCopy && styles.btnHovered)]}
+      >
+        <WebHTML html={copied ? COPY_DONE_SVG : getIconHtml(COPY_SVG, false, hoverCopy)} style={styles.svgWrapper} />
+      </Pressable>
       {error && <Text style={styles.errorText}>{t.error}</Text>}
     </View>
   )
@@ -179,7 +163,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 10,
+    marginTop: 12,
     marginBottom: 4,
   },
   btn: {
@@ -207,14 +191,6 @@ const styles = StyleSheet.create({
   svgWrapper: {
     width: 20,
     height: 20,
-  },
-  icon: {
-    fontSize: 16,
-    opacity: 0.6,
-    color: '#1A1A1A',
-  },
-  iconHovered: {
-    opacity: 0.9,
   },
   errorText: {
     fontSize: 11,

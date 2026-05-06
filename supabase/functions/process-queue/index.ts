@@ -682,6 +682,36 @@ async function callGroqFallback(isTweet: boolean, content: string, sourceType: s
   }
 }
 
+// ── Observability helpers ──────────────────────────────────────────────────
+
+function log(runId: string | null, event: string, payload: Record<string, unknown> = {}) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'process-queue', run_id: runId, event, ...payload }))
+}
+
+async function writePipelineEvent(
+  runId: string,
+  step: string,
+  status: 'ok' | 'skip' | 'error',
+  opts: { rawId?: string; dailyId?: string; sourceId?: string; durationMs?: number; errorText?: string } = {}
+) {
+  try {
+    await fetch(`${SB_URL()}/rest/v1/pipeline_events`, {
+      method: 'POST',
+      headers: SB_HEADERS(),
+      body: JSON.stringify({
+        run_id: runId,
+        step,
+        status,
+        raw_id: opts.rawId ?? null,
+        daily_id: opts.dailyId ?? null,
+        source_id: opts.sourceId ?? null,
+        duration_ms: opts.durationMs ?? null,
+        error_text: opts.errorText ?? null,
+      }),
+    })
+  } catch { /* fire-and-forget — never block the pipeline on observability */ }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 // JWT verification is handled by Supabase's gateway (deployed without --no-verify-jwt).
@@ -716,10 +746,21 @@ async function processBatch() {
   }
   const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } }[] = await res.json()
 
+  const runId = crypto.randomUUID()
+  log(runId, 'batch_claimed', { count: articles.length })
+
   if (articles.length === 0) {
-    console.log('No pending articles.')
+    log(runId, 'no_pending_articles', {})
     return
   }
+
+  // Stamp run_id on all claimed raw_ingestion rows
+  const idList = (articles as Array<{ id: string }>).map(a => a.id).join(',')
+  await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=in.(${idList})`, {
+    method: 'PATCH',
+    headers: SB_HEADERS(),
+    body: JSON.stringify({ run_id: runId }),
+  }).catch((e: unknown) => log(runId, 'run_id_stamp_failed', { error: (e as Error).message }))
 
   // Follow-up SELECT for source metadata. claim_pending_batch RPC stays unchanged
   // (per architect: avoid a DB function migration); one extra fetch per batch on
@@ -737,16 +778,16 @@ async function processBatch() {
   const sourceRows: { id: string; category: string; source_type: string }[] = await srcRes.json()
   const sourceMap = new Map(sourceRows.map(s => [s.id, { source_type: s.source_type, source_category: s.category }]))
 
-  console.log(`Processing ${articles.length} articles across ${sourceIds.length} sources`)
+  log(runId, 'batch_processing', { count: articles.length, source_count: sourceIds.length })
   await Promise.all(articles.map(a => {
     const meta = sourceMap.get(a.source_id)
     if (!meta) {
       console.error(`[processBatch] source_id ${a.source_id} missing from sources lookup — skipping article ${a.id}`)
       return Promise.resolve()
     }
-    return processArticle({ ...a, source_type: meta.source_type, source_category: meta.source_category })
+    return processArticle({ ...a, source_type: meta.source_type, source_category: meta.source_category }, runId)
   }))
-  console.log('Done.')
+  log(runId, 'batch_done', { count: articles.length })
 }
 
 // ── Article scraping ──────────────────────────────────────────────────────────
@@ -841,6 +882,7 @@ async function insertAndMarkDone(
   published_at: string | null,
   llm_model: string,
   category: Category,
+  runId: string,
 ) {
   await fetch(`${SB_URL()}/rest/v1/daily_news`, {
     method: 'POST',
@@ -861,6 +903,7 @@ async function insertAndMarkDone(
       published_at,
       llm_model,
       category,
+      run_id: runId,
     }),
   })
 
@@ -909,27 +952,11 @@ function parseJsonSection(text: string, tag: string): string[] | null {
   }
 }
 
-// Pre-LLM keyword gate — tweets only.
-// A tweet must contain ZERO of these signals to be filtered at zero token cost.
-// Conservative by design: any genuine AI signal passes through to LLM evaluation.
-const EN_AI_KEYWORDS = /\b(ai|agi|asi|llm|gpt|claude|gemini|openai|anthropic|deepmind|mistral|llama|groq|cohere|sora|midjourney|runway|nvidia|hugging|transformers|neural|multimodal|generative|agents?|embedding|rag|inference|benchmark|fine.tun|training\s+run|gpu|h100|a100|compute|foundation\s+model|reasoning\s+model|o1|o3|o4)\b/i
-
-const ZH_AI_KEYWORDS = [
-  '人工智能', '大模型', '语言模型', '神经网络', '深度学习', '机器学习',
-  '生成式', '多模态', '算力', '芯片', '英伟达',
-  '智谱', '文心', '通义', '混元', '月之暗面', '零一万物', '阶跃星辰',
-  'DeepSeek', '百川', '商汤', '科大讯飞', '华为盘古',
-]
-
-function hasAISignal(text: string): boolean {
-  if (EN_AI_KEYWORDS.test(text)) return true
-  return ZH_AI_KEYWORDS.some(kw => text.includes(kw))
-}
-
 // ── Article pipeline ──────────────────────────────────────────────────────────
 
 async function processArticle(
   article: { id: string; source_id: string; source_type: string; source_category: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } },
+  runId: string,
 ) {
   try {
     const rawContent = stripHtml((article.raw_content || '').trim())
@@ -940,7 +967,8 @@ async function processArticle(
         headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'empty raw_content' }),
       })
-      console.log(`SKIP (empty): ${article.url}`)
+      log(runId, 'article_skip', { reason: 'empty_raw_content', url: article.url })
+      writePipelineEvent(runId, 'keyword_gate', 'skip', { rawId: article.id, errorText: 'empty raw_content' })
       return
     }
 
@@ -955,28 +983,39 @@ async function processArticle(
       engagement = { stars: article.metadata.stars }
     } else if (article.url.includes('reddit.com') && article.metadata?.score != null) {
       engagement = { score: article.metadata.score, num_comments: article.metadata.num_comments ?? 0 }
+    } else if (article.source_type === 'youtube' && article.metadata) {
+      engagement = { likes: article.metadata.likes ?? 0, show_name: article.metadata.show_name ?? '' }
     } else if (article.metadata?.show_name) {
       engagement = { show_name: article.metadata.show_name }
     }
 
     // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
     // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary
-    // Tweet-specific pre-LLM gate: filter zero-AI-signal tweets at zero token cost
-    if (isTweet && !hasAISignal(rawContent)) {
-      await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
-        method: 'PATCH',
-        headers: SB_HEADERS(),
-        body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
+    // Tweet-specific pre-LLM gate: delegate to is_ai_relevant RPC (fail-open on error)
+    if (isTweet) {
+      const kwRes = await fetch(`${SB_URL()}/rest/v1/rpc/is_ai_relevant`, {
+        method: 'POST',
+        headers: { ...SB_HEADERS(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: rawContent, source_type: 'tweet' }),
       })
-      console.log(`SKIP (keyword gate — not AI relevant): ${article.url}`)
-      return
+      const isRelevant: boolean = kwRes.ok ? await kwRes.json() : true  // fail-open on RPC error
+      if (!isRelevant) {
+        await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
+          method: 'PATCH',
+          headers: SB_HEADERS(),
+          body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
+        })
+        log(runId, 'article_skip', { reason: 'keyword_gate', url: article.url })
+        writePipelineEvent(runId, 'keyword_gate', 'skip', { rawId: article.id, sourceId: article.source_id })
+        return
+      }
     }
 
     const isArxiv = article.url.startsWith('https://arxiv.org/')
     const fetched = isArxiv ? { content: '', published_at: null } : await fetchArticleContent(article.url)
     const articleContent = fetched.content
     const contentForLLM = (articleContent.length > 500 ? articleContent : rawContent).substring(0, 24000)
-    console.log(`Content source: ${isArxiv ? 'arxiv raw_content' : articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)`}`)
+    log(runId, 'content_source', { source: isArxiv ? 'arxiv raw_content' : articleContent.length > 500 ? `scraped (${articleContent.length} chars)` : `rss snippet (${rawContent.length} chars)` })
 
     // Resolve published_at: prefer metadata (from ingestion), fall back to HTML meta tag
     const published_at = article.published_at || fetched.published_at || null
@@ -988,7 +1027,8 @@ async function processArticle(
         method: 'PATCH', headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'INSUFFICIENT_CONTENT' }),
       })
-      console.log(`SKIP (insufficient): ${article.url}`)
+      log(runId, 'article_skip', { reason: 'insufficient_content', url: article.url })
+      writePipelineEvent(runId, 'llm', 'skip', { rawId: article.id, errorText: 'INSUFFICIENT_CONTENT' })
       return
     }
 
@@ -997,7 +1037,8 @@ async function processArticle(
         method: 'PATCH', headers: SB_HEADERS(),
         body: JSON.stringify({ status: 'error', last_error: 'NOT_AI_RELEVANT' }),
       })
-      console.log(`SKIP (not AI relevant): ${article.url}`)
+      log(runId, 'article_skip', { reason: 'llm_not_ai_relevant', url: article.url })
+      writePipelineEvent(runId, 'llm', 'skip', { rawId: article.id, errorText: 'NOT_AI_RELEVANT' })
       return
     }
 
@@ -1013,13 +1054,26 @@ async function processArticle(
     // Write-time category fallback: if the LLM emitted a valid category, use it;
     // otherwise fall back to sources.category (always populated, NOT NULL on sources).
     // This guarantees daily_news.category is never NULL — the schema's NOT NULL CHECK holds.
-    const finalCategory: Category = isValidCategory(result.category) ? result.category : (article.source_category as Category)
+    let finalCategory: Category
+    if (isValidCategory(result.category)) {
+      finalCategory = result.category
+    } else {
+      finalCategory = article.source_category as Category
+      log(runId, 'category_fallback', { url: article.url, llm_output: result.category, fallback_used: article.source_category })
+      writePipelineEvent(runId, 'llm_category_mismatch', 'skip', {
+        rawId: article.id,
+        sourceId: article.source_id,
+        errorText: `llm_output=${result.category ?? 'null'} fallback=${article.source_category}`,
+      })
+    }
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, finalCategory)
-    console.log(`OK: ${article.url}`)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, finalCategory, runId)
+    log(runId, 'article_done', { url: article.url })
+    writePipelineEvent(runId, 'insert', 'ok', { rawId: article.id, sourceId: article.source_id })
 
   } catch (err: unknown) {
-    console.error(`FAIL: ${article.url}`, (err as Error).message)
+    log(runId, 'article_error', { url: article.url, error: (err as Error).message })
+    writePipelineEvent(runId, 'insert', 'error', { rawId: article.id, errorText: (err as Error).message })
 
     const countRes = await fetch(
       `${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}&select=retry_count`,
