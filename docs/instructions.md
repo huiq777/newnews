@@ -243,15 +243,13 @@ Apply migration once: paste `supabase/sql/20260426_beta_invites.sql` into the
 Supabase SQL Editor (idempotent — safe to re-run). Then mint an invite:
 
 ```sql
-insert into beta_invites (code, display_name, default_lang)
-values (
-  replace(replace(replace(
-    encode(gen_random_bytes(12), 'base64'),
-    '+', '-'), '/', '_'), '=', ''),
-  'Wang Lei',  -- the invitee's display name
-  'zh'         -- 'en' or 'zh' — preselects gate language
+INSERT INTO beta_invites (code, display_name, default_lang)
+VALUES (
+  'beta-000',
+  'xxx',
+  'zh'
 )
-returning code;
+RETURNING code;
 ```
 
 Share over WeChat: `https://<host>/?invite=<code>`. First click signs the user
