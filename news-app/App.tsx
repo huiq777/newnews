@@ -146,6 +146,8 @@ export default function App() {
   const articlesRef = useRef(articles)
   const appStateRef = useRef(AppState.currentState)
   const authStatusRef = useRef(authStatus)
+  const feedLoadingRef = useRef(false)
+  const feedBaselineRef = useRef<string | undefined>(undefined)
 
   useEffect(() => { activeCategoryRef.current = activeCategory }, [activeCategory])
   useEffect(() => { dateRangeRef.current = dateRange }, [dateRange])
@@ -154,13 +156,8 @@ export default function App() {
 
   const checkMissedArticles = useCallback(async () => {
     if (authStatusRef.current !== 'authed') return
-    let latestDate = articlesRef.current.reduce<string | undefined>(
-      (max, a) => (a.created_at && (!max || a.created_at > max) ? a.created_at : max),
-      undefined
-    )
-    if (!latestDate && dateRangeRef.current) {
-      latestDate = dateRangeRef.current.start.toISOString()
-    }
+    if (feedLoadingRef.current) return
+    const latestDate = feedBaselineRef.current
     if (!latestDate) return
 
     const cat = activeCategoryRef.current
@@ -220,12 +217,15 @@ export default function App() {
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {
     if (authStatus !== 'authed') return
+    feedLoadingRef.current = true
+    feedBaselineRef.current = undefined
     setLoading(true)
     setArticles([])
+    setNewArticlesCount(0)
     setHasMore(true)
     setNextCursor(null)
 
-    if (!dateRange) { setLoading(false); return }
+    if (!dateRange) { feedLoadingRef.current = false; setLoading(false); return }
 
     const startDate = dateRange.start.toISOString().slice(0, 10)
     const endDate = dateRange.end.toISOString().slice(0, 10)
@@ -241,6 +241,7 @@ export default function App() {
       .then(({ data, error }) => {
         if (error) {
           console.error('fetch_grouped_feed error:', error.message)
+          feedLoadingRef.current = false
           setLoading(false)
           return
         }
@@ -248,11 +249,14 @@ export default function App() {
         // Auto-fallback: if Today returns nothing on INITIAL LOAD, widen to 3D
         if (rows.length === 0 && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
           isInitialLoadRef.current = false
+          feedLoadingRef.current = false
           setLoading(false)
           wheelControlsRef.current.switchTo(3)
           return
         }
         isInitialLoadRef.current = false
+        feedLoadingRef.current = false
+        feedBaselineRef.current = new Date().toISOString()
         setArticles(rows as unknown as Article[])
         setHasMore(rows.length === FEED_PAGE_SIZE)
         setNextCursor(rows.length > 0 ? rows[rows.length - 1].next_cursor : null)
