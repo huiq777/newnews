@@ -134,6 +134,10 @@ wrangler secret put SLACK_WEBHOOK_URL          --name send-digest  # optional
 wrangler secret put DISCORD_WEBHOOK_URL        --name send-digest  # optional
 wrangler secret put TELEGRAM_BOT_TOKEN         --name send-digest  # optional (paired)
 wrangler secret put TELEGRAM_CHAT_ID           --name send-digest  # optional (paired)
+wrangler secret put RESEND_API_KEY             --name send-digest  # email delivery via Resend
+wrangler secret put RESEND_FROM               --name send-digest  # e.g. "Newnews Brief <brief@newnews.dev>"
+wrangler secret put APP_URL                   --name send-digest  # e.g. "https://newnews.dev" (used for unsubscribe link)
+# Without RESEND_API_KEY, email delivery is silently skipped (worker guards with if (!env.RESEND_API_KEY))
 # Remove stale Notion secrets if previously bound:
 # wrangler secret delete NOTION_API_KEY       --name send-digest
 # wrangler secret delete NOTION_DATABASE_ID   --name send-digest
@@ -180,18 +184,20 @@ npx expo start --ios
 ## Supabase Edge Functions
 
 ```bash
-# Deploy
+# Deploy all functions
 supabase functions deploy answer-question
 supabase functions deploy refresh-questions
 supabase functions deploy process-queue
+supabase functions deploy generate-trend-brief
 supabase functions deploy ingest-apify-tweets  # --no-verify-jwt required
 supabase functions deploy redeem-invite        # closed-beta auth gate (Round 1)
+supabase functions deploy unsubscribe-email --no-verify-jwt
 
 # Test answer-question (streaming)
 curl -X POST https://<project>.supabase.co/functions/v1/answer-question \
   -H "Authorization: Bearer <anon-key>" \
   -H "Content-Type: application/json" \
-  -d '{"article_id":"<uuid>","question":"What is this about?","lang":"en"}'
+  -d '{"article_id":"<uuid>","question":"What is this about?","lang":"en","deep_think":false}'
 
 # Test refresh-questions (non-streaming JSON)
 curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
@@ -200,10 +206,34 @@ curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
   -d '{"article_id":"<uuid>"}'
 
 # Add secrets
+supabase secrets set TOKENROUTER_API_KEY=... --project-ref <ref>
 supabase secrets set GROQ_API_KEY=... --project-ref <ref>
 supabase secrets set COHERE_API_KEY=... --project-ref <ref>
+supabase secrets set TREND_BRIEF_MODEL=anthropic/claude-opus-4.7 --project-ref <ref>
+supabase secrets set QA_LLM_MODEL=qwen/qwen3.5-flash --project-ref <ref>
 supabase secrets list
 ```
+
+### Apply new SQL migrations (2026-05-03)
+
+Run each file in the Supabase SQL Editor (all idempotent — safe to re-run):
+
+1. `supabase/sql/20260503_observability_foundation.sql` — `pipeline_events` table + `run_id` columns + `request_id` on `qa_logs`
+2. `supabase/sql/20260503_is_ai_relevant.sql` — `is_ai_relevant()` RPC (canonical AI keyword gate)
+3. `supabase/sql/20260503_fetch_grouped_feed.sql` — `fetch_grouped_feed()` RPC (cursor pagination + thread grouping)
+
+---
+
+## Beta Invite Link Format
+
+```
+https://<host>/?invite=<code>
+```
+
+Share this URL with invitees (e.g. over WeChat). The first click signs them in anonymously and ties them to the invite row. Subsequent reloads skip the gate entirely.
+
+- `<host>` — your Cloudflare Pages domain (e.g. `news-app.pages.dev`) or custom domain
+- `<code>` — the random URL-safe slug from the `beta_invites.code` column
 
 ---
 
@@ -247,6 +277,172 @@ wrangler secret put FEISHU_WEBHOOK_URL --name send-digest
 # List secrets for a worker
 wrangler secret list --name ingest-builders
 ```
+
+---
+
+## Operational Health Checks
+
+Run these in the **Supabase SQL Editor**. No code changes needed — just paste and read.
+
+---
+
+### Every day (~2 min)
+
+**1. Did the pipeline run and produce articles?**
+```sql
+select date_trunc('hour', created_at) as hour, count(*) as articles
+from daily_news
+where created_at > now() - interval '24 hours'
+group by 1 order by 1 desc;
+```
+Expect: rows in the last 24h. If empty, check `raw_ingestion` for stuck rows (see #3 below).
+
+**2. Did the trend brief send?**
+```sql
+select channel, anchor_date, status, last_error
+from digest_sent
+order by anchor_date desc, channel
+limit 10;
+```
+Expect: `status = 'sent'` for each channel. `skipped_empty_brief` means no articles for that UTC day — normal if ingestion ran late. `failed` means delivery error — check `last_error`.
+
+**3. Any stuck or errored rows in the queue?**
+```sql
+select status, count(*) as cnt,
+       max(fetched_at) as newest
+from raw_ingestion
+where fetched_at > now() - interval '24 hours'
+group by status;
+```
+Expect: mostly `done`. `processing` rows older than 10 min = stuck (fix: reset to `pending`). High `error` count = LLM or scraper failure — check `last_error` on those rows:
+```sql
+select url, last_error, retry_count
+from raw_ingestion
+where status = 'error' and fetched_at > now() - interval '24 hours'
+order by retry_count desc limit 10;
+```
+
+**4. Are embeddings keeping up?**
+```sql
+select count(*) as unembedded
+from daily_news
+where embedding is null
+  and created_at > now() - interval '24 hours';
+```
+Expect: 0 or near-0. `embed-batch` runs every 5 min. >10 unembedded after an hour = `embed-batch` worker down or Cohere key expired.
+
+---
+
+### When something feels off (on-demand)
+
+**Trace a full pipeline run by run_id**
+```sql
+-- Pick a run_id from a recent pipeline_events row
+select run_id, step, status, duration_ms, error_text, created_at
+from pipeline_events
+where run_id = '<paste-run-id>'
+order by created_at;
+```
+Expect: `keyword_gate ok` → `llm ok` → `insert ok` for each article in the batch. `keyword_gate skip` = filtered as not AI-relevant (normal). `llm error` = LLM call failed.
+
+**Find the run_id for a specific article**
+```sql
+select dn.id, dn.title_en, dn.run_id, dn.created_at
+from daily_news dn
+where dn.id = '<article-uuid>';
+-- then paste run_id into the query above
+```
+
+**Q&A is returning bad answers — check recent request trace**
+```sql
+select request_id, asked_at, lang, deep_think,
+       left(question, 80) as q,
+       left(response_text, 120) as answer,
+       total_ms, feedback, error_message
+from qa_logs
+order by asked_at desc limit 20;
+```
+
+**Is the Q&A abort rate spiking? (users giving up)**
+```sql
+select date_trunc('day', asked_at)::date as day,
+       count(*) as total,
+       count(*) filter (where aborted) as aborted,
+       round(count(*) filter (where aborted) * 100.0 / count(*), 1) as abort_pct
+from qa_logs
+where asked_at > now() - interval '7 days'
+group by 1 order by 1 desc;
+```
+Expect: abort_pct < 20%. Spike = LLM slow or context too large.
+
+**Token leak canary — run after any answer-question deploy**
+```sql
+select id, asked_at, total_tokens,
+       case when total_tokens > 800 then 'LEAK' else 'ok' end as canary
+from qa_logs
+where aborted = true
+order by asked_at desc limit 10;
+```
+Expect: all `ok`. `LEAK` = abort signal not reaching the upstream LLM — redeploy `answer-question`.
+
+---
+
+### Weekly (5 min)
+
+**LLM category mismatch rate — prompt drift signal**
+```sql
+select date_trunc('day', created_at)::date as day,
+       count(*) as mismatches
+from pipeline_events
+where step = 'llm_category_mismatch'
+group by 1 order by 1 desc limit 14;
+```
+Expect: 0–2/day. Creeping up = LLM is drifting on category assignment — review the prompt's category list.
+
+**Negative feedback triage — badcase queue**
+```sql
+select asked_at, lang, left(question, 100) as q,
+       left(response_text, 200) as answer
+from qa_logs
+where feedback = -1
+  and asked_at > now() - interval '7 days'
+order by asked_at desc;
+```
+Review each row: is the answer factually wrong, incomplete, or off-topic? Fix: adjust system prompt or retrieval context.
+
+**Source coverage — is every active source producing articles?**
+```sql
+select s.name, s.source_type, count(dn.id) as articles_7d,
+       max(dn.created_at) as last_article
+from sources s
+left join daily_news dn on dn.source_id = s.id
+  and dn.created_at > now() - interval '7 days'
+where s.is_active = true
+group by s.id, s.name, s.source_type
+order by articles_7d asc;
+```
+Expect: every active source has articles in the last 7 days. `articles_7d = 0` = that source's ingest is broken. Check `raw_ingestion` for that `source_id`.
+
+**Token cost per user (last 30 days)**
+```sql
+select user_id, count(*) as questions, sum(total_tokens) as tokens
+from qa_logs
+where asked_at > now() - interval '30 days'
+group by user_id order by tokens desc;
+```
+Spot any user burning disproportionate tokens — relevant if moving to a paid LLM tier.
+
+---
+
+### Fix recipes
+
+| Symptom | Fix |
+|---|---|
+| Rows stuck in `processing` | `UPDATE raw_ingestion SET status='pending', retry_count=0, last_error=NULL WHERE status='processing' AND processed_at IS NULL;` |
+| 429 errors in `last_error` | Wait until UTC midnight (Groq TPD resets). Do not retry in a loop. |
+| `unembedded > 0` after 1h | Check `embed-batch` CF Worker — redeploy or check `COHERE_API_KEY` |
+| Trend brief missing both languages | Check `trend_briefs` for `synthesis_zh IS NULL` — `triggerSecondaryGeneration` timed out; retrigger manually |
+| `pipeline_events` table empty | SQL migration `20260503_observability_foundation.sql` not yet applied — run it in SQL Editor |
 
 ---
 
