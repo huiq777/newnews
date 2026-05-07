@@ -76,10 +76,10 @@ export default function App() {
     }
   }, [])
 
-  // Auto set screen size to 90% on web when first loading
+  // Auto set screen size to 100% on web when first loading
   useEffect(() => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
-      document.documentElement.style.setProperty('zoom', '0.9')
+      document.documentElement.style.setProperty('zoom', '1.0')
     }
   }, [])
 
@@ -111,7 +111,7 @@ export default function App() {
     style.textContent = `
       *::-webkit-scrollbar { display: none; }
       * { scrollbar-width: none; -ms-overflow-style: none; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
-      body { overflow: hidden; zoom: 0.9; -webkit-text-size-adjust: none; text-size-adjust: none; }
+      body { overflow: hidden; zoom: 0.98; -webkit-text-size-adjust: none; text-size-adjust: none; }
     `
     document.head.appendChild(style)
     return () => {
