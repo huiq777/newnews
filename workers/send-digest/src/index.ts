@@ -1,4 +1,4 @@
-import { renderBrief, type Channel } from './render'
+import { renderBrief, formatDateLabel, type Channel } from './render'
 import { markdownToBlocks } from './notion-blocks'
 
 export interface Env {
@@ -51,8 +51,8 @@ function configuredChannels(env: Env): Channel[] {
 }
 
 // ── Channel senders ──────────────────────────────────────────────────────────
-async function sendFeishu(synthesis: string, today: string, env: Env): Promise<void> {
-  const { bodies } = renderBrief('feishu', synthesis, today)
+async function sendFeishu(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
+  const { bodies } = renderBrief('feishu', synthesis, today, stepDays)
   const res = await fetch(env.FEISHU_WEBHOOK_URL!, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -61,8 +61,8 @@ async function sendFeishu(synthesis: string, today: string, env: Env): Promise<v
   if (!res.ok) throw new Error(`Feishu ${res.status}: ${(await res.text()).slice(0, 300)}`)
 }
 
-async function sendSlack(synthesis: string, today: string, env: Env): Promise<void> {
-  const { bodies } = renderBrief('slack', synthesis, today)
+async function sendSlack(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
+  const { bodies } = renderBrief('slack', synthesis, today, stepDays)
   const res = await fetch(env.SLACK_WEBHOOK_URL!, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -71,8 +71,8 @@ async function sendSlack(synthesis: string, today: string, env: Env): Promise<vo
   if (!res.ok) throw new Error(`Slack ${res.status}: ${(await res.text()).slice(0, 300)}`)
 }
 
-async function sendDiscord(synthesis: string, today: string, env: Env): Promise<void> {
-  const { bodies } = renderBrief('discord', synthesis, today)
+async function sendDiscord(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
+  const { bodies } = renderBrief('discord', synthesis, today, stepDays)
   const res = await fetch(env.DISCORD_WEBHOOK_URL!, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -84,8 +84,8 @@ async function sendDiscord(synthesis: string, today: string, env: Env): Promise<
 // Telegram: sequential await across chunks. Architect-approved exception to
 // NFR §9 — concurrent dispatch races and reorders messages, breaking reading
 // flow.
-async function sendTelegram(synthesis: string, today: string, env: Env): Promise<void> {
-  const { bodies } = renderBrief('telegram', synthesis, today)
+async function sendTelegram(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
+  const { bodies } = renderBrief('telegram', synthesis, today, stepDays)
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`
   for (let i = 0; i < bodies.length; i++) {
     const res = await fetch(url, {
@@ -105,11 +105,12 @@ async function sendTelegram(synthesis: string, today: string, env: Env): Promise
 // two-step pattern (POST first 100; PATCH /blocks/{page_id}/children for the rest).
 async function sendNotion(synthesis: string, today: string, sourcesCount: number | null, stepDays: number, env: Env): Promise<void> {
   const blocks = markdownToBlocks(synthesis)
+  const dateLabel = formatDateLabel(today, stepDays)
   const briefLabel = stepDays >= 30
-    ? `MONTHLY BRIEF · ${today.slice(0, 7)}`
+    ? `MONTHLY BRIEF · ${dateLabel}`
     : stepDays >= 7
-      ? `WEEKLY BRIEF · ${today}`
-      : `TREND BRIEF · ${today}`
+      ? `WEEKLY BRIEF · ${dateLabel}`
+      : `TREND BRIEF · ${today.slice(5).replace('-', '/')}`
   const res = await fetch('https://api.notion.com/v1/pages', {
     method: 'POST',
     headers: {
@@ -133,10 +134,10 @@ async function sendNotion(synthesis: string, today: string, sourcesCount: number
 
 async function sendOne(channel: Channel, synthesis: string, today: string, env: Env, sourcesCount: number | null, stepDays: number): Promise<void> {
   switch (channel) {
-    case 'feishu':   return sendFeishu(synthesis, today, env)
-    case 'slack':    return sendSlack(synthesis, today, env)
-    case 'discord':  return sendDiscord(synthesis, today, env)
-    case 'telegram': return sendTelegram(synthesis, today, env)
+    case 'feishu':   return sendFeishu(synthesis, today, stepDays, env)
+    case 'slack':    return sendSlack(synthesis, today, stepDays, env)
+    case 'discord':  return sendDiscord(synthesis, today, stepDays, env)
+    case 'telegram': return sendTelegram(synthesis, today, stepDays, env)
     case 'notion':   return sendNotion(synthesis, today, sourcesCount, stepDays, env)
   }
 }

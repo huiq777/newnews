@@ -744,7 +744,7 @@ async function processBatch() {
     const errBody = await res.text().catch(() => '(unreadable)')
     throw new Error(`claim_pending_batch RPC failed (${res.status}): ${errBody}`)
   }
-  const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } }[] = await res.json()
+  const articles: { id: string; source_id: string; url: string; raw_content: string; published_at?: string | null; metadata?: Record<string, unknown> }[] = await res.json()
 
   const runId = crypto.randomUUID()
   log(runId, 'batch_claimed', { count: articles.length })
@@ -879,6 +879,7 @@ async function insertAndMarkDone(
   questions: { en: string[]; zh: string[] } | null,
   articleContent: string,
   engagement: Record<string, number | string> | null,
+  articleMetadata: Record<string, unknown> | null,
   published_at: string | null,
   llm_model: string,
   category: Category,
@@ -900,6 +901,7 @@ async function insertAndMarkDone(
       questions,
       article_content: articleContent || null,
       engagement,
+      metadata: articleMetadata,
       published_at,
       llm_model,
       category,
@@ -955,7 +957,7 @@ function parseJsonSection(text: string, tag: string): string[] | null {
 // ── Article pipeline ──────────────────────────────────────────────────────────
 
 async function processArticle(
-  article: { id: string; source_id: string; source_type: string; source_category: string; url: string; raw_content: string; published_at?: string | null; metadata?: { likes?: number; retweets?: number; stars?: number; score?: number; num_comments?: number; show_name?: string } },
+  article: { id: string; source_id: string; source_type: string; source_category: string; url: string; raw_content: string; published_at?: string | null; metadata?: Record<string, unknown> },
   runId: string,
 ) {
   try {
@@ -976,18 +978,23 @@ async function processArticle(
     // RSS/other articles get HN score if the article was posted to Hacker News
     const isTweet = article.url.includes('x.com') && article.url.includes('/status/')
     const isGitHub = article.url.startsWith('https://github.com/')
+    const m = article.metadata
     let engagement: Record<string, number | string> | null = null
-    if (isTweet && article.metadata) {
-      engagement = { likes: article.metadata.likes ?? 0, retweets: article.metadata.retweets ?? 0 }
-    } else if (isGitHub && article.metadata?.stars != null) {
-      engagement = { stars: article.metadata.stars }
-    } else if (article.url.includes('reddit.com') && article.metadata?.score != null) {
-      engagement = { score: article.metadata.score, num_comments: article.metadata.num_comments ?? 0 }
-    } else if (article.source_type === 'youtube' && article.metadata) {
-      engagement = { likes: article.metadata.likes ?? 0, show_name: article.metadata.show_name ?? '' }
-    } else if (article.metadata?.show_name) {
-      engagement = { show_name: article.metadata.show_name }
+    if (isTweet && m) {
+      engagement = { likes: (m.likes as number) ?? 0, retweets: (m.retweets as number) ?? 0 }
+    } else if (isGitHub && m?.stars != null) {
+      engagement = { stars: m.stars as number }
+    } else if (article.url.includes('reddit.com') && m?.score != null) {
+      engagement = { score: m.score as number, num_comments: (m.num_comments as number) ?? 0 }
+    } else if (article.source_type === 'youtube' && m) {
+      engagement = { likes: (m.likes as number) ?? 0, show_name: (m.show_name as string) ?? '' }
+    } else if (m?.show_name) {
+      engagement = { show_name: m.show_name as string }
     }
+
+    // Pass AIHot editorial metadata (title_en, category, source, aihot_id) through to daily_news.
+    const articleMetadata: Record<string, unknown> | null =
+      article.source_type === 'aihot' ? (m ?? null) : null
 
     // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
     // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary
@@ -1067,7 +1074,7 @@ async function processArticle(
       })
     }
 
-    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, published_at, result.llm_model, finalCategory, runId)
+    await insertAndMarkDone(article, title, summary, title_en, summary_en, title_zh, summary_zh, questions, articleContent, engagement, articleMetadata, published_at, result.llm_model, finalCategory, runId)
     log(runId, 'article_done', { url: article.url })
     writePipelineEvent(runId, 'insert', 'ok', { rawId: article.id, sourceId: article.source_id })
 
