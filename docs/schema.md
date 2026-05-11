@@ -1,6 +1,6 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-05-06. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-05-11. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
@@ -27,7 +27,7 @@ Registry of content feeds. Adding a new feed means inserting a row here — no p
 The ingestion queue. Cloudflare Workers write raw article content here and track processing state. Acts as a buffer between fetching and summarization — the two operations are decoupled intentionally (see [architecture.md](architecture.md)). The `status` column is a state machine: `pending → processing → done` or `pending → processing → error`. `retry_count` tracks failed attempts; after 3 failures the row is permanently set to `error` and excluded from future runs. The `metadata` JSONB column stores source-specific per-row data (e.g. `{likes, retweets}` for builder tweets written by `ingest-builders`).
 
 ### `daily_news`
-The clean, production-ready article store. Contains AI-generated bilingual summaries, pre-generated questions, scraped full article content, and Cohere vector embeddings. This is what the frontend reads and what the RAG chatbot searches. Linked back to `raw_ingestion` via `raw_ingestion_id` for audit traceability. The `engagement` JSONB column stores platform engagement data: `{likes, retweets}` for tweets (propagated from `raw_ingestion.metadata`), or `{hn_score, hn_comments}` for RSS articles enriched via the HN Algolia API.
+The clean, production-ready article store. Contains AI-generated bilingual summaries, pre-generated questions, scraped full article content, and Cohere vector embeddings. This is what the frontend reads and what the RAG chatbot searches. Linked back to `raw_ingestion` via `raw_ingestion_id` for audit traceability. The `engagement` JSONB column stores platform engagement data: `{likes, retweets}` for tweets (propagated from `raw_ingestion.metadata`), or `{hn_score, hn_comments}` for RSS articles enriched via the HN Algolia API. The `metadata` JSONB column (added 2026-05-11) stores source-specific article-level data: for `aihot` rows it holds `{source, title_en, category, aihot_id}` where `source` is the original outlet name (e.g. "Hugging Face"); propagated by `process-queue` from `raw_ingestion.metadata` at insert time.
 
 ### `trend_briefs`
 Cache table for cross-window trend synthesis. One row per `(anchor_date, step_days)` time window; covers ALL content categories in a single brief. The `generate-trend-brief` Edge Function writes here on successful completion; the frontend reads via anon key and renders the Trend Brief card only when the "All" tab is active. TTL is 6 hours — no automated invalidation beyond that; a Refresh button gives the user manual control. Feishu does NOT read from this table.
@@ -106,7 +106,7 @@ CREATE TABLE sources (
     rss_url     TEXT        UNIQUE NOT NULL,
     is_active   BOOLEAN     NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    source_type TEXT        NOT NULL DEFAULT 'rss',   -- 'rss' | 'wechat' | 'x_api' | 'apify_tweet' | 'github_feed' | 'github_trending' | 'podcast' | 'reddit' | 'arxiv' | 'producthunt' | 'nowcoder'
+    source_type TEXT        NOT NULL DEFAULT 'rss',   -- 'rss' | 'wechat' | 'x_api' | 'apify_tweet' | 'github_feed' | 'github_trending' | 'podcast' | 'reddit' | 'arxiv' | 'producthunt' | 'nowcoder' | 'aihot'
     metadata    JSONB                                  -- {bio_map: {handle: "role"}} for github_feed; NULL for others
 );
 
@@ -145,6 +145,7 @@ CREATE TABLE daily_news (
     published_at     TIMESTAMPTZ,
     embedding        vector(1024),                      -- Cohere embed-english-v3.0; HNSW cosine index
     engagement       JSONB,                             -- {likes, retweets} for tweets | {hn_score, hn_comments} for RSS | NULL for WeChat
+    metadata         JSONB,                             -- {source, title_en, category, aihot_id} for aihot rows; NULL for others
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -350,22 +351,36 @@ RETURNS BOOLEAN LANGUAGE plpgsql STABLE ...
 
 EN word-boundary regex + ZH substring list. Called by `process-queue` and `ingest-apify-tweets`. Mirrored in `workers/ingest-builders/src/keywords.ts` (CF subrequest budget constraint). The SQL function is authoritative — keep `keywords.ts` in sync when keywords change.
 
-### Feed RPC (2026-05-03)
+### Feed RPC (2026-05-03, updated 2026-05-11)
 
 Migration: [supabase/sql/20260503_fetch_grouped_feed.sql](../supabase/sql/20260503_fetch_grouped_feed.sql)
+Updated: [supabase/sql/20260511_fetch_grouped_feed_add_metadata.sql](../supabase/sql/20260511_fetch_grouped_feed_add_metadata.sql)
 
 ```sql
 CREATE OR REPLACE FUNCTION public.fetch_grouped_feed(
   p_date_start DATE, p_date_end DATE, p_category TEXT DEFAULT NULL,
-  p_lang TEXT DEFAULT 'en', p_limit INT DEFAULT 10, p_cursor UUID DEFAULT NULL
-) RETURNS TABLE (id UUID, title TEXT, summary TEXT, source_type TEXT, source_id UUID,
-  thread_group TEXT, url TEXT, published_at TIMESTAMPTZ, created_at TIMESTAMPTZ,
-  questions JSONB, engagement JSONB, next_cursor UUID)
+  p_limit INT DEFAULT 10, p_cursor UUID DEFAULT NULL
+) RETURNS TABLE (id UUID, title_en TEXT, title_zh TEXT, summary_en TEXT, summary_zh TEXT,
+  source_type TEXT, source_id UUID, thread_group TEXT, url TEXT,
+  published_at TIMESTAMPTZ, created_at TIMESTAMPTZ,
+  questions JSONB, engagement JSONB, metadata JSONB, next_cursor UUID)
 ```
 
-`thread_group` = `sources.metadata->>'handle'` for `x_api`/`apify_tweet` sources, NULL otherwise. `next_cursor` = oldest row id in the current page (keyset pagination). Date range uses `>= p_date_start AND < p_date_end` (exclusive end — matches app's `dateRange.end = midnight of next day` convention).
+`thread_group` = `sources.metadata->>'handle'` for `x_api`/`apify_tweet` sources, NULL otherwise. `next_cursor` = oldest row id in the current page (keyset pagination). Date range uses `>= p_date_start AND < p_date_end` (exclusive end — matches app's `dateRange.end = midnight of next day` convention). `metadata` returns `daily_news.metadata` (AIHot: original outlet name in `metadata->>'source'`; NULL for others).
+
+Note: `p_lang` parameter was removed in the 2026-05-03 version — all four bilingual columns are returned and the client switches language client-side. The 2026-05-11 update added `metadata JSONB` to the return type; because `CREATE OR REPLACE FUNCTION` cannot change return types, the old function was DROPped and recreated.
 
 GRANT EXECUTE to `anon` and `authenticated`.
+
+### `daily_news.metadata` column (2026-05-11)
+
+Migration: [supabase/sql/20260511_add_daily_news_metadata.sql](../supabase/sql/20260511_add_daily_news_metadata.sql)
+
+```sql
+ALTER TABLE daily_news ADD COLUMN IF NOT EXISTS metadata JSONB;
+```
+
+Stores AIHot original outlet data `{source, title_en, category, aihot_id}` propagated by `process-queue` from `raw_ingestion.metadata` at insert time. NULL for all other source types.
 
 ### Round 1 Auth (2026-04-26)
 
