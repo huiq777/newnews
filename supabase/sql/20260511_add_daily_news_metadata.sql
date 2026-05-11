@@ -1,0 +1,1 @@
+ALTER TABLE daily_news ADD COLUMN IF NOT EXISTS metadata JSONB;

@@ -64,13 +64,14 @@ export default function ArticleCard({
   const xHandle = item.url?.match(/x\.com\/([^/]+)\/status\//)?.[1]
   const xBio = xHandle ? bioMap[xHandle.toLowerCase()] : undefined
   const showName = item.engagement?.show_name?.trim()
+  const aihotSource = item.source_type === 'aihot' ? (item.metadata?.source as string | undefined) : undefined
   const sourceLabel = isWechat
     ? `${lang === 'zh' ? '公众号' : 'WeChat'} - ${sourceName}`
     : xHandle
       ? `X - @${xHandle}${xBio ? ` - ${xBio}` : ''}`
       : isYoutube
         ? `YouTube - ${showName || sourceName}`
-        : showName || sourceName
+        : aihotSource || showName || sourceName
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
   useEffect(() => { setAnswers({}) }, [lang])

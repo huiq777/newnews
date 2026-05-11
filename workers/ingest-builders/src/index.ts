@@ -384,6 +384,77 @@ async function extractBioMap(biosText: string, env: Env): Promise<Record<string,
   }
 }
 
+interface AIHotItem {
+  id: string
+  url: string
+  title: string
+  title_en?: string
+  summary: string
+  category: string
+  source: string
+  publishedAt: string
+}
+
+interface AIHotResponse {
+  items: AIHotItem[]
+  hasNext: boolean
+  nextCursor?: string
+}
+
+async function fetchAIHot(
+  src: { id: string; name: string; source_type: string; metadata?: Record<string, unknown> },
+  supabaseUrl: string,
+  headers: Record<string, string>,
+): Promise<object[]> {
+  // Stateful cursor: use MAX(published_at) from last run; fall back to 25h window on first run.
+  const cursorRes = await fetch(
+    `${supabaseUrl}/rest/v1/raw_ingestion?source_id=eq.${src.id}&select=published_at&order=published_at.desc&limit=1`,
+    { headers },
+  )
+  const cursorRows: { published_at: string | null }[] = cursorRes.ok ? await cursorRes.json() : []
+  const since = cursorRows[0]?.published_at
+    ? new Date(cursorRows[0].published_at).toISOString()
+    : new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString()
+
+  const rows: object[] = []
+  let url: string | null = `https://aihot.virxact.com/api/public/items?mode=selected&take=50&since=${encodeURIComponent(since)}`
+  let page = 0
+
+  while (url && page < 2) {
+    page++
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'NewsProject-IngestBuilders/1.0' },
+    })
+    if (!res.ok) {
+      console.error(`AIHot fetch failed (page ${page}): ${res.status}`)
+      break
+    }
+    const data = await res.json() as AIHotResponse
+    for (const item of data.items ?? []) {
+      if (!item.url || !item.title) continue
+      rows.push({
+        source_id: src.id,
+        url: item.url,
+        raw_content: item.summary ? `${item.title}\n\n${item.summary}` : item.title,
+        status: 'pending',
+        metadata: {
+          title_en: item.title_en ?? null,
+          category: item.category,
+          source: item.source,
+          aihot_id: item.id,
+        },
+        published_at: item.publishedAt ?? null,
+      })
+    }
+    url = data.hasNext && data.nextCursor
+      ? `https://aihot.virxact.com/api/public/items?mode=selected&take=50&cursor=${encodeURIComponent(data.nextCursor)}`
+      : null
+  }
+
+  console.log(`AIHot: ${rows.length} items queued (since ${since})`)
+  return rows
+}
+
 export default {
   async fetch() {
     return new Response('ingest-builders is running')
@@ -392,10 +463,10 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env) {
     // 1. Get source rows for both builder tweets and podcasts (1 subrequest)
     const sourcesRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(github_feed,podcast,github_trending,producthunt,nowcoder,arxiv,reddit)&select=id,name,source_type`,
+      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(github_feed,podcast,github_trending,producthunt,nowcoder,arxiv,reddit,aihot)&select=id,name,source_type,metadata`,
       { headers: SB(env) }
     )
-    const sources: { id: string; name: string; source_type: string }[] = await sourcesRes.json()
+    const sources: { id: string; name: string; source_type: string; metadata?: Record<string, unknown> }[] = await sourcesRes.json()
 
     const builderSource        = sources.find(s => s.source_type === 'github_feed')
     const podcastSource        = sources.find(s => s.source_type === 'podcast')
@@ -404,6 +475,7 @@ export default {
     const nowcoderSource       = sources.find(s => s.source_type === 'nowcoder')
     const arxivSources         = sources.filter(s => s.source_type === 'arxiv')
     const redditSources        = sources.filter(s => s.source_type === 'reddit')
+    const aihotSource          = sources.find(s => s.source_type === 'aihot')
 
     // ── Builder tweets ──────────────────────────────────────────────────────
 
@@ -426,16 +498,24 @@ export default {
         console.log(`Fetched ${tweets.length} builder tweets from feed-x.json`)
 
         // 3. Extract AI-interpreted positions from bios → cache in sources.metadata
-        const withBio = accounts.filter((a: { handle?: string; bio?: string }) => a.handle && a.bio)
+        // Only process net-new handles to avoid LLM truncation and wasted tokens.
+        const existingBioMap: Record<string, string> =
+          (builderSource.metadata?.bio_map as Record<string, string> | undefined) ?? {}
+        const withBio = accounts.filter((a: { handle?: string; bio?: string }) =>
+          a.handle && a.bio && !existingBioMap[a.handle.toLowerCase()]
+        )
         const biosText = withBio.map((a: { handle: string; bio: string }) => `@${a.handle}: ${a.bio}`).join('\n')
-        const bioMap = biosText ? await extractBioMap(biosText, env) : {}
-        if (Object.keys(bioMap).length > 0) {
+        const newlyExtracted = biosText ? await extractBioMap(biosText, env) : {}
+        const mergedBioMap = { ...existingBioMap, ...newlyExtracted }
+        if (Object.keys(newlyExtracted).length > 0) {
           await fetch(`${env.SUPABASE_URL}/rest/v1/sources?id=eq.${builderSource.id}`, {
             method: 'PATCH',
             headers: { ...SB(env), 'Prefer': 'return=minimal' },
-            body: JSON.stringify({ metadata: { bio_map: bioMap } }),
+            body: JSON.stringify({ metadata: { ...builderSource.metadata, bio_map: mergedBioMap } }),
           })
-          console.log(`Bio map updated: ${Object.keys(bioMap).length} handles`)
+          console.log(`Bio map updated: ${Object.keys(newlyExtracted).length} new handles, ${Object.keys(mergedBioMap).length} total`)
+        } else {
+          console.log(`Bio map: no net-new handles (${Object.keys(existingBioMap).length} already cached)`)
         }
 
         // 4. Filter valid tweets (must have id, text, and url)
@@ -722,6 +802,12 @@ export default {
         })
       }
       console.log(`Reddit r/${subreddit}: ${newRows.length - countBefore} posts queued`)
+    }
+
+    // ── AIHot ───────────────────────────────────────────────────────────────────
+    if (aihotSource) {
+      const aihotRows = await fetchAIHot(aihotSource, env.SUPABASE_URL, SB(env))
+      newRows.push(...aihotRows)
     }
 
     // Batch INSERT all sources in one subrequest
