@@ -38,6 +38,7 @@ export type AnswerState = {
 export type Article = {
   id: string
   source_id: string
+  source_type?: string
   title: string
   summary: string
   title_en: string | null
@@ -49,6 +50,7 @@ export type Article = {
   published_at?: string | null
   questions: { en: string[]; zh: string[] } | null
   engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number; stars?: number; show_name?: string } | null
+  metadata?: Record<string, unknown> | null
 }
 
 export function formatPublishedDate(dateStr: string | undefined | null, lang: 'en' | 'zh'): string {

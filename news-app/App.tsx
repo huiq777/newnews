@@ -29,6 +29,7 @@ type FeedRow = {
   created_at: string
   questions: { en: string[]; zh: string[] } | null
   engagement: Record<string, number> | null
+  metadata: Record<string, unknown> | null
   next_cursor: string | null
 }
 

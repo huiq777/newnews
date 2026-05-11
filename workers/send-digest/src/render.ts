@@ -81,14 +81,23 @@ function chunkByParagraphBytes(s: string, maxBytes: number): string[] {
   return chunks
 }
 
-export function renderBrief(channel: Channel, synthesis: string, today: string): RenderedPayload {
+export function formatDateLabel(anchorDate: string, stepDays: number): string {
+  const anchor = new Date(anchorDate + 'T00:00:00Z')
+  const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`
+  if (stepDays <= 1) return fmt(anchor)
+  const start = new Date(anchor.getTime() - (stepDays - 1) * 86_400_000)
+  return `${fmt(start)} - ${fmt(anchor)}`
+}
+
+export function renderBrief(channel: Channel, synthesis: string, today: string, stepDays = 1): RenderedPayload {
+  const dateLabel = formatDateLabel(today, stepDays)
   switch (channel) {
     case 'feishu':
       return {
         bodies: [{
           msg_type: 'interactive',
           card: {
-            header: { title: { content: `每日趋势简报 — ${today}`, tag: 'plain_text' }, template: 'blue' },
+            header: { title: { content: stepDays <= 1 ? `每日趋势简报 — ${dateLabel}` : `趋势简报 — ${dateLabel}`, tag: 'plain_text' }, template: 'blue' },
             elements: [
               { tag: 'div', text: { tag: 'lark_md', content: synthesis } },
             ],
@@ -99,7 +108,7 @@ export function renderBrief(channel: Channel, synthesis: string, today: string):
     case 'slack': {
       const chunks = chunkByParagraph(slackifyMd(synthesis), SLACK_BLOCK_MAX)
       const blocks: unknown[] = [
-        { type: 'header', text: { type: 'plain_text', text: `Daily Trend Brief — ${today}` } },
+        { type: 'header', text: { type: 'plain_text', text: stepDays >= 30 ? `Monthly Trend Brief — ${dateLabel}` : stepDays >= 7 ? `Weekly Trend Brief — ${dateLabel}` : `Daily Trend Brief — ${dateLabel}` } },
         ...chunks.map(c => ({ type: 'section', text: { type: 'mrkdwn', text: c } })),
       ]
       return { bodies: [{ blocks }] }
@@ -109,7 +118,7 @@ export function renderBrief(channel: Channel, synthesis: string, today: string):
       const chunks = chunkByParagraph(synthesis, DISCORD_EMBED_DESC_MAX)
       const embeds = chunks.slice(0, DISCORD_EMBED_CAP).map((c, i) => {
         const embed: Record<string, unknown> = { description: c, color: 0x3B82F6 }
-        if (i === 0) embed.title = `Trend Brief — ${today}`
+        if (i === 0) embed.title = stepDays >= 30 ? `Monthly Trend Brief — ${dateLabel}` : stepDays >= 7 ? `Weekly Trend Brief — ${dateLabel}` : `Trend Brief — ${dateLabel}`
         return embed
       })
       return { bodies: [{ embeds }] }
@@ -120,7 +129,7 @@ export function renderBrief(channel: Channel, synthesis: string, today: string):
       const chunks = chunkByParagraph(prepared, TELEGRAM_MSG_MAX)
       return {
         bodies: chunks.map((c, i) => ({
-          text: i === 0 ? `<b>Trend Brief — ${today}</b>\n\n${c}` : c,
+          text: i === 0 ? `<b>${stepDays >= 30 ? 'Monthly Trend Brief' : stepDays >= 7 ? 'Weekly Trend Brief' : 'Trend Brief'} — ${dateLabel}</b>\n\n${c}` : c,
           parse_mode: 'HTML',
           disable_web_page_preview: true,
         })),
@@ -132,7 +141,7 @@ export function renderBrief(channel: Channel, synthesis: string, today: string):
       // tables). The brief LLM already emits a clean intersection — passthrough.
       // Header is a single paragraph so chunk packing keeps it with the first
       // body block when there's room.
-      const withHeader = `**每日趋势简报 — ${today}**\n\n${synthesis}`
+      const withHeader = `**${stepDays <= 1 ? '每日趋势简报' : '趋势简报'} — ${dateLabel}**\n\n${synthesis}`
       const chunks = chunkByParagraphBytes(withHeader, WECOM_MSG_MAX_BYTES)
       return {
         bodies: chunks.map(c => ({
