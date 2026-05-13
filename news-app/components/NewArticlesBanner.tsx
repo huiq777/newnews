@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native'
+import { colors, typography, spacing } from '../theme/tokens'
 
 export default function NewArticlesBanner({
   count,
@@ -50,7 +51,7 @@ export default function NewArticlesBanner({
 const styles = StyleSheet.create({
   wrapper: {
     position: 'absolute',
-    top: 18,           // centred in the 64px navbar
+    top: 18,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -61,19 +62,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#2d3432',
+    backgroundColor: colors.bg.pill,
     borderRadius: 999,
-    paddingHorizontal: 12,
+    paddingHorizontal: spacing[3],
     paddingVertical: 6,
   },
   pillPressed: {
-    backgroundColor: '#3f3f46',
+    backgroundColor: colors.bg.pillPressed,
   },
   label: {
-    color: '#f9f9f7',
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: 'Space Grotesk, sans-serif',
+    color: colors.bg.primary,
+    fontSize: typography.size.base,
+    fontWeight: typography.weight.bold,
+    fontFamily: typography.family.body,
     letterSpacing: 0.5,
     transform: [{ scale: 0.916 }],
   },
