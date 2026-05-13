@@ -2,9 +2,10 @@
 // Spec: docs/superpowers/specs/2026-04-26-beta-auth-gate-design.md §4b
 
 import { useMemo } from 'react'
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import type { GateStatus, RedeemError } from '../lib/auth'
 import { getDeviceLang } from '../lib/config'
+import { colors, typography, spacing } from '../theme/tokens'
 
 type Lang = 'en' | 'zh'
 
@@ -72,7 +73,7 @@ export default function BetaGateScreen({ status, redeemError, onRetry }: Props) 
     if (status === 'checking' || status === 'redeeming') {
       return (
         <>
-          <ActivityIndicator color="#1A1A1A" />
+          <ActivityIndicator color={colors.text.primary} />
           <Text style={styles.label}>{status === 'checking' ? t.loading : t.redeeming}</Text>
         </>
       )
@@ -125,53 +126,53 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F7F6F2',
-    padding: 32,
+    backgroundColor: colors.bg.primary,
+    padding: spacing[8],
   },
   card: {
     maxWidth: 420,
     alignItems: 'center',
-    gap: 16,
+    gap: spacing[4],
   },
   brand: {
-    fontFamily: 'Space Grotesk, sans-serif',
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#1A1A1A',
-    letterSpacing: -0.5,
+    fontFamily: typography.family.body,
+    fontSize: typography.size['4xl'],
+    fontWeight: typography.weight.bold,
+    color: colors.text.primary,
+    letterSpacing: typography.tracking.tight,
   },
   headline: {
-    fontFamily: 'Space Grotesk, sans-serif',
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1A1A1A',
+    fontFamily: typography.family.body,
+    fontSize: typography.size['2xl'],
+    fontWeight: typography.weight.semibold,
+    color: colors.text.primary,
     textAlign: 'center',
     marginTop: 8,
   },
   bodyText: {
-    fontFamily: 'Manrope, sans-serif',
-    fontSize: 14,
-    color: '#4A4A4A',
+    fontFamily: typography.family.heading,
+    fontSize: typography.size.lg,
+    color: colors.text.secondary,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: typography.leading.relaxed,
   },
   label: {
-    fontFamily: 'Manrope, sans-serif',
-    fontSize: 13,
-    color: '#6B6B6B',
+    fontFamily: typography.family.heading,
+    fontSize: typography.size.md,
+    color: colors.text.secondary,
     marginTop: 8,
   },
   retryBtn: {
     marginTop: 12,
-    paddingHorizontal: 24,
+    paddingHorizontal: spacing[6],
     paddingVertical: 10,
-    backgroundColor: '#1A1A1A',
+    backgroundColor: colors.text.primary,
     borderRadius: 999,
   },
   retryText: {
-    fontFamily: 'Manrope, sans-serif',
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    fontFamily: typography.family.heading,
+    fontSize: typography.size.lg,
+    fontWeight: typography.weight.semibold,
+    color: colors.text.inverse,
   },
 })
