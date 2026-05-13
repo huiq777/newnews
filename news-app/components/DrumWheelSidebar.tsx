@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { colors, typography, spacing } from '../theme/tokens'
 
 export default function DrumWheelSidebar({
   lang,
@@ -146,7 +147,7 @@ export default function DrumWheelSidebar({
       inner.style.filter = ''
       inner.style.backgroundColor = s.backgroundColor
       inner.style.borderRadius = s.borderRadius
-      
+
       const active = Math.abs(offset) < 0.5
       const mainLabel = inner.querySelector('.wheel-mainlabel') as HTMLElement | null
       if (mainLabel) {
@@ -254,7 +255,7 @@ export default function DrumWheelSidebar({
         const mo = lang === 'en' ? moEn : moZh
         const s = `${mo[start.getMonth()]} ${start.getDate()}`
         const e = isToday(endDate) ? (lang === 'en' ? 'Today' : '今天') : `${mo[endDate.getMonth()]} ${endDate.getDate()}`
-        label = `${e} \u2009↓\u2009 ${s}`
+        label = `${e}  ↓  ${s}`
       }
 
       onFilterRef.current(start, end, label, stepDays)
@@ -282,12 +283,12 @@ export default function DrumWheelSidebar({
       function step(now: number) {
         const elapsed = Math.max(0, now - startT)
         const progress = Math.min(elapsed / duration, 1)
-        
+
         // easeInOutCubic for perfect momentum
-        const ease = progress < 0.5 
-          ? 4 * progress * progress * progress 
+        const ease = progress < 0.5
+          ? 4 * progress * progress * progress
           : 1 - Math.pow(-2 * progress + 2, 3) / 2
-        
+
         track.scrollTop = startY + dist * ease
 
         if (progress < 1) {
@@ -396,7 +397,7 @@ export default function DrumWheelSidebar({
         <Animated.View style={[
           styles.tfBtnActive,
           {
-            position: 'absolute', left: 4, top: 4, bottom: 4, width: 49,
+            position: 'absolute', left: spacing[1], top: spacing[1], bottom: spacing[1], width: 49,
             transform: [{ translateX: tfAnim }]
           },
         ]} />
@@ -420,28 +421,28 @@ export default function DrumWheelSidebar({
 const styles = StyleSheet.create({
   aside: {
     width: 256, position: 'fixed' as any, top: 64, bottom: 0, left: 0,
-    borderRightWidth: 1, borderColor: '#f4f4f5',
-    backgroundColor: '#fafafa', padding: 20,
-    flexDirection: 'column', gap: 24,
+    borderRightWidth: 1, borderColor: colors.border.subtle,
+    backgroundColor: colors.bg.subtle, padding: 20,
+    flexDirection: 'column', gap: spacing[6],
   },
   tfRow: {
-    flexDirection: 'row', gap: 4,
-    backgroundColor: 'rgba(228,228,231,0.5)', padding: 4, borderRadius: 8,
+    flexDirection: 'row', gap: spacing[1],
+    backgroundColor: 'rgba(228,228,231,0.5)', padding: spacing[1], borderRadius: spacing[2],
   },
   tfBtn: {
-    flex: 1, paddingVertical: 6, paddingHorizontal: 8,
+    flex: 1, paddingVertical: 6, paddingHorizontal: spacing[2],
     borderRadius: 6, alignItems: 'center',
   },
   tfBtnActive: {
-    backgroundColor: '#ffffff', borderRadius: 6,
+    backgroundColor: colors.bg.card, borderRadius: 6,
     shadowColor: '#000', shadowOpacity: 0.08,
     shadowRadius: 2, shadowOffset: { width: 0, height: 1 },
   },
   tfBtnText: {
-    fontSize: 12, fontWeight: '600', color: '#a1a1aa',
-    fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1,
+    fontSize: typography.size.base, fontWeight: typography.weight.semibold, color: colors.text.tertiary,
+    fontFamily: typography.family.body, letterSpacing: typography.tracking.wide,
     transform: [{ scale: 0.833 }],
   },
-  tfBtnTextActive: { color: '#18181b', fontWeight: '700' },
+  tfBtnTextActive: { color: colors.text.primary, fontWeight: typography.weight.bold },
   wheelContainer: { flex: 1 },
 })

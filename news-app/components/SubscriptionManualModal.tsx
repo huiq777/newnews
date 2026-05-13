@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Animated, Image, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
+import { Animated, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native'
 import { supabase } from '../lib/config'
+import { colors, typography, spacing } from '../theme/tokens'
 import WebHTML from './WebHTML'
 
 type Channel = 'feishu' | 'slack' | 'discord' | 'telegram' | 'notion'
@@ -423,35 +424,35 @@ function EmailPane({
 }
 
 const emailStyles = StyleSheet.create({
-  heading: { fontSize: 13, fontWeight: '600', color: '#27272a', fontFamily: 'Space Grotesk, sans-serif' },
+  heading: { fontSize: typography.size.md, fontWeight: typography.weight.semibold, color: colors.text.body, fontFamily: typography.family.body },
   langBtn: {
-    paddingHorizontal: 12, paddingVertical: 5,
-    borderRadius: 16, borderWidth: 1, borderColor: '#d4d4d8',
-    backgroundColor: '#fff',
+    paddingHorizontal: spacing[3], paddingVertical: 5,
+    borderRadius: 16, borderWidth: 1, borderColor: colors.border.medium,
+    backgroundColor: colors.bg.card,
   },
-  langBtnActive: { borderColor: '#18181b', backgroundColor: '#18181b' },
-  langBtnText: { fontSize: 13, fontWeight: '600', color: '#71717a', fontFamily: 'Space Grotesk, sans-serif' },
-  langBtnTextActive: { color: '#fff' },
+  langBtnActive: { borderColor: colors.text.primary, backgroundColor: colors.text.primary },
+  langBtnText: { fontSize: typography.size.md, fontWeight: typography.weight.semibold, color: colors.text.secondary, fontFamily: typography.family.body },
+  langBtnTextActive: { color: colors.text.inverse },
   input: {
-    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 8,
-    paddingHorizontal: 12, paddingVertical: 8,
-    fontSize: 13, color: '#27272a', fontFamily: 'Space Grotesk, sans-serif',
-    backgroundColor: '#fff',
+    borderWidth: 1, borderColor: colors.border.medium, borderRadius: 8,
+    paddingHorizontal: spacing[3], paddingVertical: spacing[2],
+    fontSize: typography.size.md, color: colors.text.body, fontFamily: typography.family.body,
+    backgroundColor: colors.bg.card,
   },
-  inputError: { borderColor: '#ef4444' },
+  inputError: { borderColor: colors.status.errorBright },
   cta: {
-    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 8,
+    borderWidth: 1, borderColor: colors.border.medium, borderRadius: 8,
     paddingVertical: 7, paddingHorizontal: 14,
-    backgroundColor: '#fff', alignSelf: 'flex-start',
+    backgroundColor: colors.bg.card, alignSelf: 'flex-start',
   },
-  ctaHovered: { backgroundColor: '#f4f4f5', borderColor: '#a1a1aa' },
-  ctaPressed: { backgroundColor: '#e4e4e7', borderColor: '#71717a' },
+  ctaHovered: { backgroundColor: colors.border.subtle, borderColor: colors.text.tertiary },
+  ctaPressed: { backgroundColor: colors.border.default, borderColor: colors.text.secondary },
   ctaDisabled: { opacity: 0.5 },
-  ctaText: { fontSize: 12, fontWeight: '700', color: '#18181b', fontFamily: 'Space Grotesk, sans-serif' },
-  successText: { fontSize: 12, color: '#16a34a', fontFamily: 'Space Grotesk, sans-serif' },
-  inlineError: { fontSize: 11, color: '#ef4444', fontFamily: 'Space Grotesk, sans-serif' },
-  inlineMuted: { fontSize: 11, color: '#71717a', fontFamily: 'Space Grotesk, sans-serif' },
-  fineText: { fontSize: 11, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif' },
+  ctaText: { fontSize: typography.size.base, fontWeight: typography.weight.bold, color: colors.text.primary, fontFamily: typography.family.body },
+  successText: { fontSize: typography.size.base, color: colors.status.success, fontFamily: typography.family.body },
+  inlineError: { fontSize: typography.size.sm, color: colors.status.errorBright, fontFamily: typography.family.body },
+  inlineMuted: { fontSize: typography.size.sm, color: colors.text.secondary, fontFamily: typography.family.body },
+  fineText: { fontSize: typography.size.sm, color: colors.text.tertiary, fontFamily: typography.family.body },
 })
 
 function ChannelSteps({
@@ -508,20 +509,20 @@ const styles = StyleSheet.create({
   },
   card: {
     width: 740, maxWidth: '92%',
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.bg.card,
     borderRadius: 12,
-    borderWidth: 1, borderColor: '#e4e4e7',
+    borderWidth: 1, borderColor: colors.border.default,
     overflow: 'hidden',
   },
   cardHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 20, paddingVertical: 14,
-    borderBottomWidth: 1, borderBottomColor: '#f4f4f5',
+    borderBottomWidth: 1, borderBottomColor: colors.border.subtle,
   },
   cardTitle: {
-    fontSize: 14, fontWeight: '700', color: '#18181b',
+    fontSize: typography.size.lg, fontWeight: typography.weight.bold, color: colors.text.primary,
     letterSpacing: 0.5,
-    fontFamily: 'Manrope, sans-serif',
+    fontFamily: typography.family.heading,
   },
   closeBtn: {
     width: 28, height: 28,
@@ -530,8 +531,8 @@ const styles = StyleSheet.create({
   },
   closeBtnHovered: { backgroundColor: 'rgba(228,228,231,0.6)' },
   closeBtnText: {
-    fontSize: 14, color: '#71717a',
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.lg, color: colors.text.secondary,
+    fontFamily: typography.family.body,
   },
   cardBody: {
     flexDirection: 'row',
@@ -539,13 +540,13 @@ const styles = StyleSheet.create({
   },
   rail: {
     width: 180,
-    backgroundColor: '#fafafa',
-    borderRightWidth: 1, borderRightColor: '#f4f4f5',
-    paddingVertical: 12,
+    backgroundColor: colors.bg.subtle,
+    borderRightWidth: 1, borderRightColor: colors.border.subtle,
+    paddingVertical: spacing[3],
   },
   railRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 10, paddingHorizontal: 16,
+    paddingVertical: 10, paddingHorizontal: spacing[4],
     borderLeftWidth: 3, borderLeftColor: 'transparent',
   },
   railRowHovered: {
@@ -553,66 +554,66 @@ const styles = StyleSheet.create({
   },
   railRowActive: {
     backgroundColor: 'rgba(110,119,227,0.08)',
-    borderLeftColor: '#6e77e3',
+    borderLeftColor: colors.brand.brief,
   },
   railLabel: {
-    fontSize: 13, fontWeight: '600', color: '#3f3f46',
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.md, fontWeight: typography.weight.semibold, color: colors.text.dim,
+    fontFamily: typography.family.body,
   },
   railLabelActive: {
-    color: '#18181b',
+    color: colors.text.primary,
   },
   langBadge: {
-    fontSize: 9, color: '#a1a1aa',
-    fontWeight: '700', letterSpacing: 0.6,
+    fontSize: typography.size.xs, color: colors.text.tertiary,
+    fontWeight: typography.weight.bold, letterSpacing: 0.6,
     paddingHorizontal: 4,
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontFamily: typography.family.body,
   },
   pane: {
     flex: 1,
-    paddingVertical: 18, paddingHorizontal: 24,
+    paddingVertical: 18, paddingHorizontal: spacing[6],
   },
   stepRow: {
     flexDirection: 'row', gap: 10, alignItems: 'flex-start',
   },
   stepNumber: {
-    fontSize: 11, fontWeight: '700', color: '#71717a',
+    fontSize: 11, fontWeight: typography.weight.bold, color: colors.text.secondary,
     letterSpacing: 0.5, textTransform: 'uppercase',
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontFamily: typography.family.body,
     minWidth: 56, marginTop: 2,
   },
   stepText: {
-    fontSize: 13, lineHeight: 20, color: '#27272a',
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.md, lineHeight: typography.leading.normal, color: colors.text.body,
+    fontFamily: typography.family.body,
   },
   cta: {
     alignSelf: 'flex-start',
-    marginTop: 8,
-    borderWidth: 1, borderColor: '#d4d4d8', borderRadius: 8,
+    marginTop: spacing[2],
+    borderWidth: 1, borderColor: colors.border.medium, borderRadius: 8,
     paddingVertical: 7, paddingHorizontal: 14,
-    backgroundColor: '#ffffff',
+    backgroundColor: colors.bg.card,
   },
   ctaHovered: { backgroundColor: 'rgba(228,228,231,0.5)' },
   ctaText: {
-    fontSize: 12, fontWeight: '700', color: '#3f3f46',
+    fontSize: typography.size.base, fontWeight: typography.weight.bold, color: colors.text.dim,
     letterSpacing: 0.5,
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontFamily: typography.family.body,
   },
   qrImage: {
     width: 180, height: 180,
-    marginTop: 8,
-    backgroundColor: '#fafafa',
-    borderWidth: 1, borderColor: '#e4e4e7',
+    marginTop: spacing[2],
+    backgroundColor: colors.bg.subtle,
+    borderWidth: 1, borderColor: colors.border.default,
     borderRadius: 6,
   },
   muted: {
-    fontSize: 13, color: '#a1a1aa',
-    fontFamily: 'Space Grotesk, sans-serif',
-    paddingHorizontal: 16, paddingVertical: 12,
+    fontSize: typography.size.md, color: colors.text.tertiary,
+    fontFamily: typography.family.body,
+    paddingHorizontal: spacing[4], paddingVertical: spacing[3],
   },
   errorText: {
-    fontSize: 12, color: '#ef4444',
-    fontFamily: 'Space Grotesk, sans-serif',
-    paddingHorizontal: 16, paddingVertical: 12,
+    fontSize: typography.size.base, color: colors.status.errorBright,
+    fontFamily: typography.family.body,
+    paddingHorizontal: spacing[4], paddingVertical: spacing[3],
   },
 })

@@ -4,9 +4,13 @@ import { markdownToBlocks } from './notion-blocks'
 export interface Env {
   SUPABASE_URL: string
   SUPABASE_SERVICE_ROLE_KEY: string
-  FEISHU_WEBHOOK_URL?: string            // optional — skip channel if missing
-  SLACK_WEBHOOK_URL?: string             // optional
-  DISCORD_WEBHOOK_URL?: string           // optional
+  FEISHU_APP_ID?: string                 // optional — skip channel if missing
+  FEISHU_APP_SECRET?: string             // optional (paired with FEISHU_APP_ID)
+  FEISHU_CHAT_ID?: string                // optional (paired with FEISHU_APP_ID)
+  SLACK_BOT_TOKEN?: string               // optional
+  SLACK_CHANNEL_ID?: string              // optional (paired with SLACK_BOT_TOKEN)
+  DISCORD_BOT_TOKEN?: string             // optional
+  DISCORD_CHANNEL_ID?: string            // optional (paired with DISCORD_BOT_TOKEN)
   TELEGRAM_BOT_TOKEN?: string            // optional (paired with TELEGRAM_CHAT_ID)
   TELEGRAM_CHAT_ID?: string              // optional
   NOTION_TOKEN?: string                  // optional (paired with NOTION_DATABASE_ID)
@@ -42,9 +46,9 @@ function channelLang(channel: Channel): 'synthesis_zh' | 'synthesis_en' {
 
 function configuredChannels(env: Env): Channel[] {
   const out: Channel[] = []
-  if (env.FEISHU_WEBHOOK_URL) out.push('feishu')
-  if (env.SLACK_WEBHOOK_URL) out.push('slack')
-  if (env.DISCORD_WEBHOOK_URL) out.push('discord')
+  if (env.FEISHU_APP_ID && env.FEISHU_APP_SECRET && env.FEISHU_CHAT_ID) out.push('feishu')
+  if (env.SLACK_BOT_TOKEN && env.SLACK_CHANNEL_ID) out.push('slack')
+  if (env.DISCORD_BOT_TOKEN && env.DISCORD_CHANNEL_ID) out.push('discord')
   if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) out.push('telegram')
   if (env.NOTION_TOKEN && env.NOTION_DATABASE_ID) out.push('notion')
   return out
@@ -53,29 +57,41 @@ function configuredChannels(env: Env): Channel[] {
 // ── Channel senders ──────────────────────────────────────────────────────────
 async function sendFeishu(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
   const { bodies } = renderBrief('feishu', synthesis, today, stepDays)
-  const res = await fetch(env.FEISHU_WEBHOOK_URL!, {
+  const tokenRes = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(bodies[0]),
+    body: JSON.stringify({ app_id: env.FEISHU_APP_ID, app_secret: env.FEISHU_APP_SECRET }),
+  })
+  const { tenant_access_token: token } = await tokenRes.json() as { tenant_access_token: string }
+  const body = bodies[0] as { msg_type: string; card: unknown }
+  const res = await fetch('https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ receive_id: env.FEISHU_CHAT_ID, msg_type: 'interactive', content: JSON.stringify(body.card) }),
   })
   if (!res.ok) throw new Error(`Feishu ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  const json = await res.json() as { code: number; msg?: string }
+  if (json.code !== 0) throw new Error(`Feishu API error ${json.code}: ${json.msg}`)
 }
 
 async function sendSlack(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
   const { bodies } = renderBrief('slack', synthesis, today, stepDays)
-  const res = await fetch(env.SLACK_WEBHOOK_URL!, {
+  const body = bodies[0] as { blocks: unknown[] }
+  const res = await fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(bodies[0]),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
+    body: JSON.stringify({ channel: env.SLACK_CHANNEL_ID, ...body }),
   })
   if (!res.ok) throw new Error(`Slack ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  const json = await res.json() as { ok: boolean; error?: string }
+  if (!json.ok) throw new Error(`Slack API error: ${json.error}`)
 }
 
 async function sendDiscord(synthesis: string, today: string, stepDays: number, env: Env): Promise<void> {
   const { bodies } = renderBrief('discord', synthesis, today, stepDays)
-  const res = await fetch(env.DISCORD_WEBHOOK_URL!, {
+  const res = await fetch(`https://discord.com/api/v10/channels/${env.DISCORD_CHANNEL_ID}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` },
     body: JSON.stringify(bodies[0]),
   })
   if (!res.ok) throw new Error(`Discord ${res.status}: ${(await res.text()).slice(0, 300)}`)
@@ -398,7 +414,8 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env) {
     const nowUtc        = new Date()
     const todayUtcStart = `${nowUtc.toISOString().slice(0, 10)}T00:00:00Z`
-    const anchorDate    = new Date(nowUtc.getTime() - 86_400_000).toISOString().slice(0, 10)
+    const yesterday     = new Date(nowUtc); yesterday.setUTCDate(yesterday.getUTCDate() - 1)
+    const anchorDate    = yesterday.toISOString().slice(0, 10)
     const channels      = configuredChannels(env)
 
     if (channels.length === 0) {

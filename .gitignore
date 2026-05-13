@@ -34,3 +34,14 @@ yarn-debug.*
 yarn-error.*
 *.orig.*
 *.pem
+
+# Private docs (not for public repo)
+docs/superpowers/specs/
+docs/superpowers/ideas/
+docs/api-keys-and-env.md
+docs/AI-PM-role.md
+docs/AI-SWE-role.md
+docs/architect-role.md
+docs/keep-in-mind.md
+.superpowers/
+pencil-new.pen
