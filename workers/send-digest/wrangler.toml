@@ -5,8 +5,20 @@ compatibility_date = "2024-01-01"
 [triggers]
 crons = ["30 0 * * *"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
 # Secrets — set via: wrangler secret put <KEY>
-# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, FEISHU_WEBHOOK_URL,
-# SLACK_WEBHOOK_URL, DISCORD_WEBHOOK_URL, TELEGRAM_BOT_TOKEN,
-# TELEGRAM_CHAT_ID, NOTION_TOKEN, NOTION_DATABASE_ID,
+# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+# FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_CHAT_ID,
+# SLACK_BOT_TOKEN, SLACK_CHANNEL_ID,
+# DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID,
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+# NOTION_TOKEN, NOTION_DATABASE_ID,
 # RESEND_API_KEY, RESEND_FROM, APP_URL

@@ -7,6 +7,7 @@ import AnswerFeedback from './AnswerFeedback'
 import WebHTML from './WebHTML'
 import MarkdownText from './MarkdownText'
 import ThinkingIndicator from './ThinkingIndicator'
+import { colors, typography, spacing, surfaces } from '../theme/tokens'
 
 export interface XThreadGroup {
   handle: string
@@ -223,14 +224,14 @@ function TweetRow({
           <View style={styles.questionsDivider}>
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>{lang === 'en' ? 'Questions' : '问题'}</Text>
-            <Pressable 
-              onPress={() => { innerPressed.current = true; handleRefresh() }} 
+            <Pressable
+              onPress={() => { innerPressed.current = true; handleRefresh() }}
               disabled={refreshing}
               onHoverIn={() => setHoverRefreshQuestions(true)}
               onHoverOut={() => setHoverRefreshQuestions(false)}
             >
               <Animated.Text style={[
-                styles.refreshIcon, 
+                styles.refreshIcon,
                 hoverRefreshQuestions && styles.refreshIconHovered,
                 refreshing && styles.refreshDisabled,
                 { transform: [{ rotate: spin }] }
@@ -241,7 +242,7 @@ function TweetRow({
               onHoverIn={() => setHoverDeepThink(true)}
               onHoverOut={() => setHoverDeepThink(false)}
               style={[
-                styles.deepThinkToggle, 
+                styles.deepThinkToggle,
                 hoverDeepThink && styles.deepThinkToggleHovered,
                 deepThink && styles.deepThinkToggleActive
               ]}
@@ -397,100 +398,100 @@ export default function XThreadCard({
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#fff', marginVertical: 6, padding: 16,
-    borderRadius: 12, borderWidth: 1, borderColor: '#f4f4f5',
+    backgroundColor: colors.bg.card, marginVertical: 6, padding: spacing[4],
+    borderRadius: 12, borderWidth: 1, borderColor: colors.border.subtle,
   },
-  cardExpanded: { backgroundColor: '#F0EDE8' },
+  cardExpanded: { backgroundColor: colors.bg.hover },
 
   headerRow: {
     flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'flex-start', marginBottom: 10,
   },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: spacing[2] },
   sourceLabel: {
-    fontSize: 12, fontWeight: '700', color: '#a1a1aa',
-    letterSpacing: 2, fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.base, fontWeight: typography.weight.bold, color: colors.text.tertiary,
+    letterSpacing: typography.tracking.wider, fontFamily: typography.family.body,
     textTransform: 'uppercase', flex: 1,
     transform: [{ scale: 0.833 }], transformOrigin: 'left' as any,
   },
 
   engagementPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3,
+    flexDirection: 'row', alignItems: 'center', gap: spacing[1],
+    backgroundColor: colors.bg.card, borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3,
   },
   engagementText: {
-    fontSize: 12, fontWeight: '800', color: '#D84315',
-    fontFamily: 'Space Grotesk, sans-serif', transform: [{ scale: 0.916 }],
+    fontSize: typography.size.base, fontWeight: typography.weight.extrabold, color: colors.brand.accent,
+    fontFamily: typography.family.body, transform: [{ scale: 0.916 }],
   },
   countPill: {
-    backgroundColor: '#1A1A1A', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3,
+    ...surfaces.pill, borderRadius: 10, paddingHorizontal: 7, paddingVertical: 3,
   },
   countText: {
-    fontSize: 11, fontWeight: '700', color: '#fff',
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: 11, fontWeight: typography.weight.bold, color: colors.text.inverse,
+    fontFamily: typography.family.body,
   },
 
   // Individual tweet row
   tweetRow: {
-    borderRadius: 8, padding: 8, marginHorizontal: -8,
+    borderRadius: spacing[2], padding: spacing[2], marginHorizontal: -8,
   },
   tweetRowBorder: {
-    borderBottomWidth: 1, borderBottomColor: '#E0DDD6',
-    paddingBottom: 12, marginBottom: 4,
+    borderBottomWidth: 1, borderBottomColor: colors.border.warm,
+    paddingBottom: spacing[3], marginBottom: spacing[1],
   },
   tweetRowHovered: { backgroundColor: 'rgba(228,228,231,0.5)' },
 
   tweetRowHeader: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 4,
+    flexDirection: 'row', alignItems: 'flex-start', gap: spacing[2], marginBottom: spacing[1],
   },
   tweetTitle: {
-    flex: 1, fontSize: 16, fontWeight: '600', color: '#18181b',
-    fontFamily: 'Manrope, sans-serif', letterSpacing: -0.2, lineHeight: 22,
+    flex: 1, fontSize: typography.size.xl, fontWeight: typography.weight.semibold, color: colors.text.primary,
+    fontFamily: typography.family.heading, letterSpacing: -0.2, lineHeight: typography.leading.relaxed,
   },
   tweetDate: {
-    fontSize: 12, fontWeight: '700', color: '#a1a1aa',
-    letterSpacing: 2, fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.base, fontWeight: typography.weight.bold, color: colors.text.tertiary,
+    letterSpacing: typography.tracking.wider, fontFamily: typography.family.body,
     textTransform: 'uppercase', marginBottom: 6,
     transform: [{ scale: 0.833 }], transformOrigin: 'left' as any,
   },
-  summaryBlock: { marginTop: 4, marginBottom: 6 },
-  summary: { fontSize: 14, color: '#3D3935', lineHeight: 22 },
-  viewLink: { marginTop: 4 },
-  viewLinkText: { fontSize: 12, color: '#6B6560', fontWeight: '500' },
+  summaryBlock: { marginTop: spacing[1], marginBottom: 6 },
+  summary: { fontSize: typography.size.lg, color: '#3D3935', lineHeight: typography.leading.relaxed },
+  viewLink: { marginTop: spacing[1] },
+  viewLinkText: { fontSize: typography.size.base, color: '#6B6560', fontWeight: typography.weight.medium },
 
   collapsedHint: {
-    fontSize: 12, color: '#9E9690', marginTop: 6,
-    fontFamily: 'Space Grotesk, sans-serif',
+    fontSize: typography.size.base, color: colors.text.muted, marginTop: 6,
+    fontFamily: typography.family.body,
   },
 
-  divider: { height: 1, backgroundColor: '#E0DDD6', marginVertical: 10 },
+  divider: { height: 1, backgroundColor: colors.border.warm, marginVertical: 10 },
   threadList: {},
 
-  questionsPill: { backgroundColor: '#1A1A1A', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4, marginLeft: 8 },
-  questionsPillText: { fontSize: 12, color: '#fff', fontWeight: '600' },
-  noQuestionsPill: { backgroundColor: '#1A1A1A', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4, marginLeft: 8 },
-  noQuestionsText: { fontSize: 13, color: '#fff', fontWeight: '600' },
+  questionsPill: { ...surfaces.pill, borderRadius: 12, paddingHorizontal: 10, paddingVertical: spacing[1], marginLeft: spacing[2] },
+  questionsPillText: { fontSize: typography.size.base, color: colors.text.inverse, fontWeight: typography.weight.semibold },
+  noQuestionsPill: { ...surfaces.pill, borderRadius: 12, paddingHorizontal: spacing[2], paddingVertical: spacing[1], marginLeft: spacing[2] },
+  noQuestionsText: { fontSize: typography.size.md, color: colors.text.inverse, fontWeight: typography.weight.semibold },
   questionsSection: { marginTop: 14 },
-  questionsDivider: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 8 },
-  dividerLine: { flex: 1, height: 1, backgroundColor: '#E0DDD6' },
-  dividerText: { fontSize: 12, color: '#9E9690', fontWeight: '600', letterSpacing: 0.5, transform: [{ scale: 0.916 }] },
-  refreshIcon: { fontSize: 16, color: '#1A1A1A', transition: 'color 0.2s ease' },
+  questionsDivider: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing[3], gap: spacing[2] },
+  dividerLine: { flex: 1, height: 1, backgroundColor: colors.border.warm },
+  dividerText: { fontSize: typography.size.base, color: colors.text.muted, fontWeight: typography.weight.semibold, letterSpacing: 0.5, transform: [{ scale: 0.916 }] },
+  refreshIcon: { fontSize: typography.size.xl, color: '#1A1A1A', transition: 'color 0.2s ease' } as any,
   refreshIconHovered: { color: '#6B6B6B' },
   refreshDisabled: {
     opacity: 0.3,
   },
   deepThinkToggle: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: spacing[2],
+    paddingVertical: spacing[1],
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: '#E0DDD6',
-    marginLeft: 8,
+    borderColor: colors.border.warm,
+    marginLeft: spacing[2],
     backgroundColor: 'transparent',
   },
   deepThinkToggleHovered: {
     backgroundColor: '#FAF9F7',
-    borderColor: '#C8C4BE',
+    borderColor: colors.border.warmHover,
   },
   deepThinkToggleActive: {
     backgroundColor: '#1A1A1A',
@@ -499,19 +500,19 @@ const styles = StyleSheet.create({
   deepThinkText: {
     fontSize: 11,
     color: '#6B6B6B',
-    fontFamily: 'Manrope, sans-serif',
+    fontFamily: typography.family.heading,
   },
   deepThinkTextActive: {
-    color: '#FFFFFF',
-    fontWeight: '600',
+    color: colors.text.inverse,
+    fontWeight: typography.weight.semibold,
   },
-  questionRow: { paddingVertical: 8 },
-  questionText: { fontSize: 14, color: '#3D3935', lineHeight: 20 },
-  answerBlock: { marginBottom: 8 },
-  thinkingHeader: { paddingVertical: 4 },
-  thinkingHeaderText: { fontSize: 12, color: '#9E9690', fontStyle: 'italic' },
-  thinkingBlock: { backgroundColor: '#F0EDE8', borderRadius: 8, padding: 10, marginTop: 4 },
-  thinkingText: { fontSize: 12, color: '#9E9690', fontStyle: 'italic', lineHeight: 18 },
-  contentBlock: { backgroundColor: '#F0EDE8', borderRadius: 8, padding: 12, marginTop: 6 },
-  contentText: { fontSize: 14, color: '#3D3935', lineHeight: 22 },
+  questionRow: { paddingVertical: spacing[2] },
+  questionText: { fontSize: typography.size.lg, color: '#3D3935', lineHeight: typography.leading.normal },
+  answerBlock: { marginBottom: spacing[2] },
+  thinkingHeader: { paddingVertical: spacing[1] },
+  thinkingHeaderText: { fontSize: typography.size.base, color: colors.text.muted, fontStyle: 'italic' },
+  thinkingBlock: { backgroundColor: colors.bg.hover, borderRadius: spacing[2], padding: 10, marginTop: spacing[1] },
+  thinkingText: { fontSize: typography.size.base, color: colors.text.muted, fontStyle: 'italic', lineHeight: typography.leading.tight },
+  contentBlock: { backgroundColor: colors.bg.hover, borderRadius: spacing[2], padding: spacing[3], marginTop: 6 },
+  contentText: { fontSize: typography.size.lg, color: '#3D3935', lineHeight: typography.leading.relaxed },
 })

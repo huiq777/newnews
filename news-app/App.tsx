@@ -4,6 +4,7 @@ import {
 } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { supabase, FEED_PAGE_SIZE, Article, Category, getInitialLang, setSavedLang } from './lib/config'
+import { colors, typography, spacing } from './theme/tokens'
 import { useAuthGate } from './lib/auth'
 import BetaGateScreen from './components/BetaGateScreen'
 import NavBar from './components/NavBar'
@@ -469,7 +470,7 @@ function LoadingIndicator({ lang }: { lang: 'en' | 'zh' }) {
   
   return (
     <View style={styles.loadingContainer}>
-      <ActivityIndicator color="#18181b" />
+      <ActivityIndicator color={colors.text.primary} />
       <Text style={styles.loadingText}>
         {lang === 'en' ? 'loading ' : '加载中 '}{dots}
       </Text>
@@ -478,15 +479,15 @@ function LoadingIndicator({ lang }: { lang: 'en' | 'zh' }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f9f9f7' },
+  container: { flex: 1, backgroundColor: colors.bg.primary },
   body: { flex: 1, flexDirection: 'row', marginTop: 64 },
-  mainFeed: { flex: 1, marginLeft: 256, paddingHorizontal: 32, paddingTop: 20, paddingBottom: 24 },
+  mainFeed: { flex: 1, marginLeft: 256, paddingHorizontal: 32, paddingTop: 20, paddingBottom: spacing[6] },
   emptyState: { alignItems: 'center', justifyContent: 'center', padding: 48 },
-  emptyStateText: { fontSize: 16, fontWeight: '600', color: '#1A1A1A', marginBottom: 6 },
-  emptyStateSubtext: { fontSize: 14, color: '#9E9690', textAlign: 'center' },
-  loadMoreSentinel: { paddingVertical: 16, alignItems: 'center' },
-  loadMoreText: { fontSize: 10, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
-  loadMoreTextDone: { fontSize: 10, color: '#d4d4d8', fontFamily: 'Space Grotesk, sans-serif', letterSpacing: 1.5 },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  loadingText: { fontSize: 13, color: '#a1a1aa', fontFamily: 'Space Grotesk, sans-serif', fontVariant: ['tabular-nums'], minWidth: 80, textAlign: 'center' },
+  emptyStateText: { fontSize: typography.size.xl, fontWeight: typography.weight.semibold, color: colors.text.primary, marginBottom: 6 },
+  emptyStateSubtext: { fontSize: typography.size.lg, color: colors.text.muted, textAlign: 'center' },
+  loadMoreSentinel: { paddingVertical: spacing[4], alignItems: 'center' },
+  loadMoreText: { fontSize: typography.size.sm, color: colors.text.tertiary, fontFamily: typography.family.body, letterSpacing: 1.5 },
+  loadMoreTextDone: { fontSize: typography.size.sm, color: colors.border.medium, fontFamily: typography.family.body, letterSpacing: 1.5 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: spacing[3] },
+  loadingText: { fontSize: typography.size.md, color: colors.text.tertiary, fontFamily: typography.family.body, fontVariant: ['tabular-nums'], minWidth: 80, textAlign: 'center' },
 })
