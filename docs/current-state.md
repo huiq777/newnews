@@ -1,4 +1,4 @@
-# Current State — 2026-05-11
+# Current State — 2026-06-09
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -12,7 +12,13 @@ All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline 
 
 Trend brief per-user feedback, copy-to-clipboard, email subscription modal + email digest delivery via Resend, and `unsubscribe-email` Edge Function shipped 2026-05-06. New-articles banner false-positive bug fixed.
 
-**2026-05-11:** AIHot source added (`aihot.virxact.com`, stateful since-cursor); `daily_news.metadata JSONB` column added; `fetch_grouped_feed` RPC updated to return `metadata`; `ingest-builders` bio extraction made incremental (net-new handles only, safe-patch); `process-queue` passes `raw_ingestion.metadata` → `daily_news.metadata` for AIHot; `send-digest` cadence-aware titles with date ranges (weekly/monthly show `M/D - M/D`); `generate-trend-brief` ZH_SYSTEM_PROMPT fixed (removed "这一周期" echo); frontend `ArticleCard` shows `metadata.source` original outlet for AIHot cards (frontend redeploy pending).
+**2026-05-11:** AIHot source added (`aihot.virxact.com`, stateful since-cursor); `daily_news.metadata JSONB` column added; `fetch_grouped_feed` RPC updated to return `metadata`; `ingest-builders` bio extraction made incremental (net-new handles only, safe-patch); `process-queue` passes `raw_ingestion.metadata` → `daily_news.metadata` for AIHot; `send-digest` cadence-aware titles with date ranges (weekly/monthly show `M/D - M/D`); `generate-trend-brief` ZH_SYSTEM_PROMPT fixed (removed "这一周期" echo); frontend `ArticleCard` shows `metadata.source` original outlet for AIHot cards.
+
+**2026-06-03:** RAG refinement foundation shipped as eval/observability only. Production retrieval/model behavior is unchanged. New trace tables capture retriever inputs, candidates, injected context, and links to `qa_logs` / trend brief generation. Golden dataset v1 is live with human-reviewed evidence labels. Offline replay now supports dense, lexical, hybrid, chunk dense, chunk hybrid, and entity hybrid strategies, plus diagnostic SQL and an eval-only `article_chunks` scaffold/backfill path.
+
+**2026-06-05:** `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3` produced the strongest historical pre-remediation chunk baseline on 21 approved cases: Recall@5 0.710, Recall@10 0.757, MRR 0.620, NDCG@10 0.658, Hit@5 0.810, p50 1843ms, p95 4429ms. This was superseded by the 2026-06-09 corpus-health-valid replay. Production `answer-question` remained unchanged.
+
+**2026-06-09:** Corpus-health remediation passed for eval set `qa-v1-2026-06` with run `54dcd974-2fa2-4fb7-bb62-6eae9f3880c0`: zero chunk blockers, missing BGE embeddings, and stale-source blockers are all `0`. Fresh valid replay selects `chunk_dense @cf/baai/bge-m3` as the practical production candidate on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. `rerank_hybrid` is quality-best but latency-fails at p95 68056ms. Generation eval for `chunk_dense` is strong in aggregate: faithfulness 0.994, answer relevancy 0.950, context precision 0.785, context recall 0.819 across 24 judged rows. Production `answer-question` is still unchanged; next work is feature-flagged rollout planning and per-run generation grouping.
 
 ---
 
@@ -22,9 +28,9 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 
 | Worker | Status | Schedule | Notes |
 |---|---|---|---|
-| `ingest-rss` | ✅ Deployed | Every hour | Now fetches `source_type IN (rss, wechat, reddit)` — fixes WeChat and Reddit ingestion. Batch insert; ON CONFLICT DO NOTHING |
+| `ingest-rss` | ✅ Deployed | Every hour | Fetches `source_type IN (rss, wechat, official_rss, reddit, youtube)`. Reddit uses preserved RSS URLs instead of brittle JSON. YouTube has a lightweight handle → Atom feed fallback so channels keep up even when the Apify transcript webhook is quiet. Batch insert; ON CONFLICT DO NOTHING |
 | ~~`process-queue`~~ | ❌ Deleted | — | Migrated to Supabase Edge Function (2026-04-21); CF Worker directory deleted 2026-04-23 |
-| `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/Reddit/etc** (early return → else branch). **2026-05-11:** Bio extraction incremental — only net-new handles sent to LLM; metadata safe-patched `{...existing, bio_map: merged}`. AIHot ingestion via `fetchAIHot()` with stateful since-cursor (`MAX(published_at)` from raw_ingestion); max 2 pages; batch insert ON CONFLICT DO NOTHING; subrequest count ~40/50. |
+| `ingest-builders` | ✅ Deployed | Daily 6am UTC | Reads feed-x.json (tweets) + feed-podcasts.json (episodes); bio extraction via Groq; metadata={likes,retweets}; **missing podcast source no longer kills arXiv/etc** (early return → else branch). Reddit moved back to `ingest-rss` RSS fallback because Reddit JSON was not keeping up reliably. **2026-05-11:** Bio extraction incremental — only net-new handles sent to LLM; metadata safe-patched `{...existing, bio_map: merged}`. AIHot ingestion via `fetchAIHot()` with stateful since-cursor (`MAX(published_at)` from raw_ingestion); max 2 pages; batch insert ON CONFLICT DO NOTHING; subrequest count ~40/50. |
 | `embed-batch` | ✅ Deployed | Every 5 min | Cohere embed-english-v3.0, 1024-dim; populates daily_news.embedding |
 | `send-digest` | ✅ Deployed | Daily 00:30 UTC | **Trend-brief-only** delivery. Feishu (ZH) + optional Slack/Discord/Telegram (EN) + optional **WeCom (ZH)** + optional **Notion (EN, archival database row per day)**. Anchor date = `today_utc - 1` so the brief covers the just-closed UTC day. Per-channel-per-day idempotency via `digest_sent` (`ON CONFLICT DO NOTHING RETURNING`). Freshness gate on `trend_briefs.generated_at >= today 00:00 UTC`. Empty brief → `skipped_empty_brief`, no send. **Per-channel rendering** (Phase 8): Feishu `lark_md`, Slack `mrkdwn` (`**X**` → `*X*`), Discord stdlib MD, Telegram HTML mode (`<b>X</b>`), WeCom plain markdown (≤4096 bytes UTF-8 per chunk; sequential await), Notion structured-blocks via `markdownToBlocks()` (≤100 children per POST). Long briefs chunk at paragraph boundaries (Slack ≤ 2900/block, Discord ≤ 4000/embed, Telegram ≤ 3500/message, WeCom ≤ 3500 bytes/message; Telegram + WeCom chunks send sequentially to preserve order). **Email delivery via Resend:** `sendEmailDigests()` sends to all active `email_subscribers` after channel delivery. Per-subscriber idempotency via `email_digest_sent` (`unique(subscriber_id, anchor_date, step_days)`). Secrets required: `RESEND_API_KEY`, `RESEND_FROM`, `APP_URL`. **2026-05-11:** `formatDateLabel(anchorDate, stepDays)` pure helper; weekly/monthly briefs show date ranges (`5/4 - 5/10`); Feishu title: `每日趋势简报` (daily) vs `趋势简报` (multi-day); Slack/Discord: `Daily`/`Weekly`/`Monthly Trend Brief`; `stepDays` threaded through all channel senders. |
 | `ingest-x` | ❌ Deleted | — | Removed to free Cloudflare cron slot (5-trigger free tier limit); X API costs $100/mo |
@@ -33,10 +39,10 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 
 | Function | Status | Notes |
 |---|---|---|
-| `answer-question` | ✅ Deployed | Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Cohere query embed → `match_articles` RPC → top 3 related. LLM routing: TokenRouter `qwen/qwen3.6-plus` (deep_think) or `qwen/qwen3.5-flash` (default) → OpenRouter → Groq. SSE streaming. `request_id` UUID on every `qa_logs` row for full trace. User 👍/👎 feedback written back to `qa_logs`. |
+| `answer-question` | ✅ Deployed | Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Cohere query embed → `match_articles_prefer_analysis` RPC → top 3 related. The RPC is still article-level dense retrieval, but it prefers ready Deep Analysis vectors when available and falls back to article embeddings. LLM routing: TokenRouter `qwen/qwen3.6-plus` (deep_think) or `qwen/qwen3.5-flash` (default) → OpenRouter → Groq. SSE streaming. `request_id` UUID on every `qa_logs` row. **RAG trace completeness live:** each retrieval writes `rag_retrieval_runs`, candidate rows when present, injected-context rows, and `qa_logs.rag_retrieval_run_id`. User 👍/👎 feedback written back to `qa_logs`. |
 | `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
 | `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required; per-author grading: top-3 net-new AI-relevant tweets per author (sorted by likes+retweets); bulk dedup via `raw_ingestion` URL check; keyword gate via `is_ai_relevant` RPC (parallel, fail-open) |
-| `generate-trend-brief` | ✅ Deployed | `buildBriefPlan()` pure data-prep + `triggerSecondaryGeneration()` explicit Plan-and-Execute pattern. TokenRouter `TREND_BRIEF_MODEL` primary (streaming); secondary language via non-streaming call. `trend_briefs` 6h TTL cache. Historical enrichment via `match_articles`. **pg_cron pre-warm at 00:25 UTC** via `pg_net.http_post`, 5 min before `send-digest`. **2026-05-11:** ZH_SYSTEM_PROMPT fixed — removed "这一周期" echo phrase; "no single thread" fallback changed to `今日没有单一主线`. |
+| `generate-trend-brief` | ✅ Deployed | `buildBriefPlan()` pure data-prep + `triggerSecondaryGeneration()` explicit Plan-and-Execute pattern. TokenRouter `TREND_BRIEF_MODEL` primary (streaming); secondary language via non-streaming call. `trend_briefs` 6h TTL cache. Historical enrichment via `match_articles`. **RAG trace completeness live:** historical enrichment runs write retriever inputs, candidates, and injected prompt context linked by `trend_brief_key`. **pg_cron pre-warm at 00:25 UTC** via `pg_net.http_post`, 5 min before `send-digest`. **2026-05-11:** ZH_SYSTEM_PROMPT fixed — removed "这一周期" echo phrase; "no single thread" fallback changed to `今日没有单一主线`. |
 | `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate via `is_ai_relevant` RPC (fail-open); `run_id` UUID stamps every batch for full pipeline trace; writes `pipeline_events` at every step (keyword_gate, llm, insert, llm_category_mismatch); triggered by pg_cron `*/5 * * * *` via Vault service_role key |
 | `redeem-invite` | ✅ Deployed | Closed-beta auth gate (Round 1); `verify_jwt = true` (default); CORS allowlist includes `apikey, x-client-info`; atomic claim + idempotent recovery branch for network-partition retries; writes `app_metadata.is_beta_user` via service-role `auth.admin.updateUserById` |
 | `unsubscribe-email` | ✅ Deployed | GET `?id=<uuid>`; PATCHes `email_subscribers.unsubscribed_at`; returns HTML confirmation page. Deploy with `--no-verify-jwt` (unauthenticated link). |
@@ -49,8 +55,14 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 | `raw_ingestion` | ✅ Live | State machine: pending → processing → done/error; metadata JSONB column active; `run_id` UUID stamps each process-queue batch |
 | `daily_news` | ✅ Live | article_content, questions JSONB, title_en/zh, summary_en/zh, embedding, engagement JSONB all populated; `run_id` UUID for pipeline trace; **`metadata JSONB` column added 2026-05-11** (AIHot: `{source, title_en, category, aihot_id}`; NULL for other source types) |
 | `pipeline_events` | ✅ Live | Append-only observability log. Columns: `run_id`, `step` (claim/keyword_gate/llm/insert/embed/llm_category_mismatch), `status` (ok/skip/error), `source_id`, `raw_id`, `daily_id`, `duration_ms`, `error_text`. ~288 events/day. Service-role only (no RLS policies). |
-| `qa_logs` | ✅ Live | Full Q&A trace per `answer-question` call. Columns: `request_id` UUID, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`. |
-| `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; used by answer-question and generate-trend-brief |
+| `qa_logs` | ✅ Live | Full Q&A trace per `answer-question` call. Columns: `request_id` UUID, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`, `rag_retrieval_run_id`. |
+| `rag_retrieval_runs` | ✅ Live | Service-role RAG trace header. Records surface, request id, `qa_log_id` or trend brief key, retriever inputs/version, candidate/injected counts, context hash/chars, and latency. Observability only; no frontend access. |
+| `rag_retrieval_candidates` | ✅ Live | Service-role RAG trace rows for ranked candidates. Stores article/chunk/deep-analysis ids, title/excerpt, dense/lexical/rerank/final scores, injected flag, drop reason, and metadata. |
+| `rag_injected_contexts` | ✅ Live | Service-role prompt-context snapshots. Stores context role, ordinal, source ids, text/hash/chars, and metadata. Used to audit exactly what context reached the model. |
+| `rag_eval_*` tables | ✅ Live | Golden dataset and offline replay store: eval sets/cases, human-reviewed gold evidence, eval runs, per-case results, and aggregate retrieval metrics. Service-role/admin analysis only. |
+| `article_chunks` | ✅ Eval-only | Chunk retrieval scaffold with embedding model metadata. Current eval backfill/gating uses Cloudflare Workers AI `@cf/baai/bge-m3`; early scaffold was Cohere-compatible. Not used by production `answer-question` or `generate-trend-brief`; intended for offline chunk replay before any production retriever change. |
+| `match_articles_prefer_analysis` RPC | ✅ Live | pgvector cosine similarity; prefers ready Deep Analysis vectors and falls back to article embeddings; HNSW-backed article-level dense retrieval used by answer-question |
+| `match_articles` RPC | ✅ Live | pgvector cosine similarity; HNSW index; still used by generate-trend-brief historical enrichment |
 | `is_ai_relevant` RPC | ✅ Live | Canonical AI keyword gate. EN word-boundary regex + ZH substring list. Called by process-queue and ingest-apify-tweets (fail-open). Mirror in `workers/ingest-builders/src/keywords.ts` (CF subrequest budget constraint). |
 | `fetch_grouped_feed` RPC | ✅ Live | Server-side feed with cursor (keyset) pagination and tweet thread grouping. Params: `p_date_start`, `p_date_end`, `p_category`, `p_limit`, `p_cursor`. Returns `thread_group` (handle for x_api/apify_tweet, NULL otherwise), `next_cursor` for stateless pagination, and **`metadata JSONB`** (added 2026-05-11). Replaces client-side `displayArticles` useMemo + offset pagination. |
 | `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
@@ -179,6 +191,20 @@ Edge Function `ingest-apify-tweets` deployed. Receives `RUN_SUCCEEDED` webhook f
 
 **Note:** "Today" returns 204 (no articles) when zero articles have `created_at` in the UTC calendar day. This is correct — articles from the morning ET ingest land at Apr 1 UTC. Next UTC day's articles will populate Today correctly. Use 3D/7D to see the card in action.
 
+### RAG Refinement — Eval-Only Active Work
+
+RAG trace completeness and golden dataset v1 are live. Current production `answer-question` still uses article-level dense retrieval through `match_articles_prefer_analysis`; all lexical/hybrid/chunk work is replay-only.
+
+Next decisions:
+- Preserve the older 9-case dense/lexical/hybrid rows as historical retrospective baselines.
+- Treat `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3` as the selected eval candidate after passing corpus-health, valid replay metadata, and metric-bound checks.
+- Use `rerank_hybrid` as the offline quality ceiling, not as a production candidate, until latency is solved.
+- Group generation eval by `eval_run_id` before quoting a locked generation benchmark, because the current aggregate has 24 judged rows versus 21 retrieval cases.
+- Write a separate feature-flagged production integration/rollback plan before changing `answer-question`.
+- Keep hybrid/entity variants eval-only until latency passes the gate.
+
+Key docs: [RAG refinement progress](superpowers/rag-retrieval-refinement-progress.md), [RAG architecture spec](superpowers/specs/2026-05-31-news-project-rag-refinement-architecture.md), [Golden dataset v1 design](superpowers/specs/2026-06-01-rag-golden-dataset-v1-design.md), [Retrieval next-steps plan](superpowers/plans/2026-06-02-rag-retrieval-refinement-next-steps.md).
+
 ### Stage 6 — iOS via Expo EAS
 
 Packaging step only — do last. Requires Apple Developer account ($99/yr).
@@ -197,9 +223,14 @@ Founder Park:  https://wechat2rss.xlab.app/feed/e95ec80...xml                   
 财联社:         https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
 中国新闻社:     https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
 36氪:          https://wewe-rss-latest-oau3.onrender.com/feeds/...atom               (wechat)   ❌ DISABLED (empty raw_content)
-Reddit r/MachineLearning: https://www.reddit.com/r/MachineLearning.rss               (rss)      ✅ active (switched from JSON API to RSS)
-Reddit r/cscareerquestions: https://www.reddit.com/r/cscareerquestions.rss           (rss)      ✅ active (switched from JSON API to RSS)
-Reddit r/layoffs: https://www.reddit.com/r/layoffs.rss                               (rss)      ✅ active (switched from JSON API to RSS)
+Reddit r/MachineLearning: https://www.reddit.com/r/MachineLearning.rss               (reddit)   ✅ active — fetched by ingest-rss via RSS fallback
+Reddit r/cscareerquestions: https://www.reddit.com/r/cscareerquestions.rss           (reddit)   ✅ active — fetched by ingest-rss via RSS fallback
+Reddit r/layoffs: https://www.reddit.com/r/layoffs.rss                               (reddit)   ✅ active — fetched by ingest-rss via RSS fallback
+No Priors Podcast: https://www.youtube.com/@NoPriorsPodcast                          (youtube)  ✅ active — ingest-rss lightweight Atom fallback; Apify webhook still preferred for transcripts
+Dwarkesh Patel: https://www.youtube.com/@DwarkeshPatel                               (youtube)  ✅ active — ingest-rss lightweight Atom fallback; Apify webhook still preferred for transcripts
+Sam Witteveen AI: https://www.youtube.com/@samwitteveenai                            (youtube)  ✅ active — ingest-rss lightweight Atom fallback; Apify webhook still preferred for transcripts
+Matt Wolfe: https://www.youtube.com/@mreflow                                         (youtube)  ✅ active — ingest-rss lightweight Atom fallback; Apify webhook still preferred for transcripts
+Y Combinator: https://www.youtube.com/@ycombinator                                   (youtube)  ✅ active — ingest-rss lightweight Atom fallback; Apify webhook still preferred for transcripts
 arXiv cs.AI:   https://export.arxiv.org/api/query?search_query=cat:cs.AI             (arxiv)    ✅ active — fetched by ingest-builders
 arXiv cs.LG:   https://export.arxiv.org/api/query?search_query=cat:cs.LG             (arxiv)    ✅ active — fetched by ingest-builders
 follow-builders: https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json (github_feed) ✅ active
@@ -221,6 +252,9 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **sources columns:** `id, name, rss_url (UNIQUE), is_active, created_at, source_type, metadata JSONB`
 - **raw_ingestion columns:** `id, source_id, url (UNIQUE), raw_content, fetched_at, status, retry_count, last_error, processed_at, metadata JSONB, run_id UUID`
 - **daily_news columns:** `id, source_id, raw_ingestion_id, url (UNIQUE), title, summary, title_en, summary_en, title_zh, summary_zh, article_content, questions JSONB, embedding vector(1024), engagement JSONB, metadata JSONB, created_at, run_id UUID`
+- **rag_retrieval_* columns:** trace headers, candidate ranks/scores/drop reasons, and injected prompt contexts. Service-role only; created by `20260531_rag_trace_completeness.sql`.
+- **rag_eval_* columns:** eval sets, cases, gold evidence labels, replay runs, per-case retrieval metrics, and aggregate retrieval metrics. Service-role/admin analysis only; created by `20260601_rag_eval_dataset.sql`.
+- **article_chunks columns:** eval-only article chunk text, hashes, chunking version/params, embeddings, and indexes. Created by `20260602_article_chunks_eval_scaffold.sql`; not production retrieval.
 - **trend_briefs columns:** `id, anchor_date, step_days, synthesis_en, synthesis_zh, sources_json JSONB, model, tokens_used, generated_at, expires_at`
 - **digest_sent columns:** `id, channel, anchor_date, status, last_error, created_at, updated_at` — UNIQUE (channel, anchor_date) for idempotent claim
 - **trend_brief_feedback columns:** `user_id UUID FK`, `anchor_date date`, `step_days int`, `feedback smallint (-1|1)`, `feedback_at timestamptz`
@@ -239,9 +273,12 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **process-queue LLM calls per article:** 1 (TokenRouter primary → OpenRouter secondary → Groq tertiary; summary + QUESTIONS_EN + QUESTIONS_ZH combined; `parseJsonSection` extracts JSON arrays)
 - **process-queue tweet pre-filter:** `is_ai_relevant` RPC (fail-open) fires before LLM call — zero-cost skip for tweets with no AI signal; `run_id` UUID stamps every batch; writes `pipeline_events` at keyword_gate, llm, insert, llm_category_mismatch steps
 - **answer-question observability:** `request_id` UUID on every `qa_logs` row; user 👍/👎 feedback written back via `AnswerFeedback` component
+- **RAG trace observability:** `answer-question` and `generate-trend-brief` write `rag_retrieval_runs`, `rag_retrieval_candidates`, and `rag_injected_contexts`; this records retriever inputs, candidate ranks/scores, injected prompt context, and links back to `qa_logs` or `trend_brief_key`.
+- **RAG eval status:** production answer-question retrieval remains dense article-level `match_articles_prefer_analysis`; offline replay supports dense, lexical, hybrid, chunk dense, chunk hybrid, entity hybrid, and rerank variants. Latest valid selected eval candidate is `chunk_dense` with `@cf/baai/bge-m3` on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. Generation eval aggregate for `chunk_dense` is faithfulness 0.994, answer relevancy 0.950, context precision 0.785, context recall 0.819. This is still not a production retrieval change; historical dense/lexical/hybrid rows are retained for retrospective comparison and should not be treated as current.
 - **ingest-builders Groq calls per run:** 1 batch call for net-new bios only (incremental: skips handles already in `bio_map`); subrequest count ~40/50 (tweets + podcasts + AIHot)
 - **ingest-builders podcast handling:** feed-podcasts.json schema `{podcasts:[{source,name,title,url,transcript}]}`; batch INSERT in one PostgREST call
 - **ingest-builders AIHot:** `fetchAIHot()` with stateful since-cursor from `MAX(raw_ingestion.published_at)` WHERE source_type=aihot; max 2 pages × 20 items; metadata `{source,title_en,category,aihot_id}` written to `raw_ingestion.metadata`; `process-queue` propagates to `daily_news.metadata`
+- **Reddit/YouTube/WeChat coverage recovery:** `supabase/sql/20260604_social_source_coverage_recovery.sql` preserves the current 13 social source names. Reddit is fetched via RSS with a descriptive User-Agent. WeChat uses `wechat2rss.xlab.app` bridge URLs. YouTube stores channel IDs in `sources.metadata`; `ingest-rss` provides lightweight Atom freshness while Apify + `ingest-youtube-transcripts` remains the transcript-depth path.
 - **Cloudflare cron limit:** 5 triggers (free tier hard limit) — **4/5 slots used**; ingest-x deleted to make room; process-queue migrated to Supabase Edge Function (pg_cron) freeing one slot
 - **Stuck rows:** `UPDATE raw_ingestion SET status='pending' WHERE status='processing' AND processed_at IS NULL;`
 - **send-digest:** Trend-brief-only delivery. Feishu (ZH `synthesis_zh`) + optional Slack / Discord / Telegram (EN `synthesis_en`) + optional WeCom (ZH `synthesis_zh`) + optional Notion (EN `synthesis_en`, one database row per day). Anchor date = `today_utc - 1`. Per-channel idempotency via `digest_sent`. CommonMark from the LLM is converted per-channel: Feishu `lark_md` passthrough, Slack `**X**`→`*X*`, Discord stdlib MD passthrough, Telegram `parse_mode: 'HTML'` with `<b>X</b>`, WeCom plain markdown passthrough, Notion structured-blocks via `markdownToBlocks()`. Long briefs chunk at `\n\n` boundaries; Telegram + WeCom chunks send sequentially. `formatDateLabel(anchorDate, stepDays)` produces date-range string (`5/4 - 5/10` for weekly); all channel titles are cadence-aware.
@@ -264,6 +301,16 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 | `workers/send-digest/src/index.ts` | Daily digest — 00:30 UTC; Feishu (ZH) + optional Slack/Discord/Notion (EN); includes trend brief |
 | `supabase/functions/answer-question/index.ts` | Streaming RAG answer — route/retrieve/generate/orchestrateAnswer decomposition; TokenRouter; request_id; qa_logs |
 | `supabase/functions/generate-trend-brief/index.ts` | Trend brief — buildBriefPlan() + triggerSecondaryGeneration() Plan-and-Execute; TokenRouter streaming |
+| `supabase/sql/20260531_rag_trace_completeness.sql` | RAG trace tables + `qa_logs.rag_retrieval_run_id` |
+| `supabase/sql/20260531_rag_trace_completeness_verification.sql` | RAG trace verification queries |
+| `supabase/sql/20260601_rag_eval_dataset.sql` | Golden dataset/eval replay tables |
+| `supabase/sql/20260601_rag_eval_dataset_verification.sql` | Golden dataset verification/review SQL |
+| `supabase/sql/20260602_rag_retrieval_refinement_diagnostics.sql` | Retrieval miss diagnostics and dense/lexical/hybrid comparison SQL |
+| `supabase/sql/20260602_rag_lexical_eval_rpc.sql` | Eval-only lexical article retrieval RPC |
+| `supabase/sql/20260602_article_chunks_eval_scaffold.sql` | Eval-only article chunks table and indexes |
+| `scripts/rag-eval-generate-gold.mjs` | Seeds/expands LLM-judged gold evidence candidates |
+| `scripts/rag-eval-replay.mjs` | Offline retrieval replay for dense/lexical/hybrid strategies |
+| `scripts/rag-chunk-backfill.mjs` | Eval-only chunk backfill and embedding CLI |
 | `supabase/functions/refresh-questions/index.ts` | On-demand question refresh |
 | `supabase/sql/20260503_observability_foundation.sql` | pipeline_events table + run_id on raw_ingestion/daily_news + request_id on qa_logs |
 | `supabase/sql/20260503_is_ai_relevant.sql` | is_ai_relevant() RPC — canonical AI keyword gate |
