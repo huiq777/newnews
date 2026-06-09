@@ -1,0 +1,17 @@
+{
+  "name": "news-project-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "eval:chunk-backfill": "node scripts/rag-chunk-backfill.mjs",
+    "eval:generate-gold": "node scripts/rag-eval-generate-gold.mjs",
+    "eval:replay": "node scripts/rag-eval-replay.mjs",
+    "eval:rerank": "node scripts/rag-eval-replay.mjs --strategy rerank_hybrid",
+    "eval:generate-answers": "node scripts/rag-eval-generate-answers.mjs",
+    "eval:judge-answers": "node scripts/rag-eval-judge-answers.mjs",
+    "eval:agentic-runtime": "node scripts/rag-agentic-runtime.mjs",
+    "eval:agentic": "node scripts/rag-agentic-eval-replay.mjs"
+  }
+}

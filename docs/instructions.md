@@ -5,8 +5,32 @@
 
 ---
 
+## RAG Eval Remediation Gates
+
+Before treating replay metrics as strategy-selection evidence, run the corpus-health SQL and use its latest run id in every replay/generation/agentic command:
+
+```sql
+\i supabase/sql/20260608_rag_eval_corpus_health.sql
+\i supabase/sql/20260608_rag_eval_zero_chunk_gold_diagnostics.sql
+```
+
+If `ready_for_replay = false`, runs are smoke/diagnostic only:
+
+```bash
+npm run eval:replay -- --set qa-v1-2026-06 --strategy chunk_hybrid --rewrite-mode entity_expansion --max-cases 5 --chunking-version paragraph-window-v1-2026-06-02 --corpus-health-run-id <health_run_id> --valid-for-strategy-selection false --invalid-reason query_rewrite_smoke
+npm run eval:rerank -- --set qa-v1-2026-06 --max-cases 5 --chunking-version paragraph-window-v1-2026-06-02 --corpus-health-run-id <health_run_id> --valid-for-strategy-selection false --invalid-reason rerank_cache_smoke
+npm run eval:generate-answers -- --set qa-v1-2026-06 --mode corpus_retrieval_generation_eval --retrieval-strategy chunk_hybrid --max-cases 5 --chunking-version paragraph-window-v1-2026-06-02 --context-pack-version answer-question-v1-prefer-analysis --corpus-health-run-id <health_run_id> --valid-for-strategy-selection false --invalid-reason generation_smoke
+npm run eval:agentic -- --set qa-v1-2026-06 --max-cases 5 --retrieval-strategy chunk_hybrid --chunking-version paragraph-window-v1-2026-06-02 --corpus-health-run-id <health_run_id> --valid-for-strategy-selection false --invalid-reason agentic_smoke
+```
+
+Only use `--valid-for-strategy-selection true` after corpus health passes and fresh metric-fixed replay has no Recall/NDCG values above `1`.
+
+---
+
 ## ingest-rss
 **Runs automatically:** Every hour (`0 * * * *`)
+
+Owns RSS-like feeds: `rss`, `wechat`, `official_rss`, `reddit`, and lightweight `youtube` fallback. YouTube transcript-quality ingestion still comes from the Apify webhook, but this worker keeps channel titles/descriptions from going completely stale.
 
 ```bash
 cd workers/ingest-rss
@@ -22,6 +46,57 @@ curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"
 ```
 
 **Verify:** Supabase → `raw_ingestion` — new rows with `status=pending`
+
+**Verify source coverage after deploy:**
+```sql
+select s.name, s.source_type, count(ri.id) as raw_rows_24h, max(ri.fetched_at) as newest_raw
+from sources s
+left join raw_ingestion ri on ri.source_id = s.id
+  and ri.fetched_at > now() - interval '24 hours'
+where s.is_active = true
+  and s.source_type in ('wechat', 'reddit', 'youtube')
+group by s.id, s.name, s.source_type
+order by s.source_type, raw_rows_24h asc, s.name;
+```
+
+Expected after the hourly worker runs:
+- Reddit rows should have fresh `raw_ingestion` through preserved `.rss` URLs.
+- YouTube rows should have at least lightweight feed items when the channel published recently.
+- WeChat rows depend on upstream bridge freshness; if `raw_rows_24h = 0`, inspect the RSS URL directly.
+
+**Social source recovery:**
+Run `supabase/sql/20260604_social_source_coverage_recovery.sql` before deploying `ingest-rss` when Reddit, WeChat, or YouTube rows are stale or missing. This preserves the current source names and stores YouTube channel IDs for deterministic Atom fallback.
+
+Reddit RSS requires a descriptive `User-Agent`; plain anonymous requests can return `403`. If Reddit coverage drops again, test with:
+
+```bash
+curl -L -A 'web:LinkXCapitalNews:v1.0 (source coverage recovery; contact: ops@linkx.capital)' 'https://www.reddit.com/r/MachineLearning.rss'
+```
+
+YouTube depth comes from Apify through `ingest-youtube-transcripts`. The `ingest-rss` YouTube path is only a lightweight title/description fallback.
+
+---
+
+## ingest-official-sources (Supabase Edge Function)
+**Runs automatically:** Every 3 hours via pg_cron → `net.http_post`
+
+Fetches curated official HTML index sources (`official_html_index`) for Anthropic and Google DeepMind. OpenAI official RSS is fetched by `ingest-rss` via `source_type=official_rss`.
+
+```bash
+# Deploy
+supabase functions deploy ingest-official-sources
+
+# Trigger manually
+curl -X POST https://<SUPABASE_URL>/functions/v1/ingest-official-sources \
+  -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+**Apply source rows + cron:**
+Run `supabase/sql/20260528_official_sources.sql` in the Supabase SQL Editor or with `psql`.
+
+**Verify:** Supabase → `raw_ingestion` — official rows have `metadata->>'trust_tier' = 'official'`; duplicate-suppressed rows have `status='error'` and `last_error='DUPLICATE_SUPPRESSED'`.
 
 ---
 
@@ -81,6 +156,62 @@ supabase secrets set LLM_MODEL=... --project-ref <ref>
 supabase secrets set OPENROUTER_API_KEY=... --project-ref <ref>
 supabase secrets set OPENROUTER_MODEL=... --project-ref <ref>
 supabase secrets set GROQ_API_KEY=... --project-ref <ref>
+```
+
+---
+
+## generate-deep-analysis (Supabase Edge Function)
+**Runs automatically:** Every 5 min via pg_cron → `net.http_post`
+
+Generates bilingual structured Deep Analysis for eligible `daily_news` rows (`article_content` length > 500) after `process-queue` publishes the compact article. It writes `article_deep_analysis.status='ready'` only after both JSON analysis and Cohere embedding succeed.
+
+```bash
+# Deploy
+supabase functions deploy generate-deep-analysis
+
+# Trigger manually
+curl -X POST https://exjbwdcxyrkxsmzaowkx.supabase.co/functions/v1/generate-deep-analysis \
+  -H "Authorization: Bearer <SERVICE_ROLE_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+`<SUPABASE_URL>` means the full host, including `.supabase.co`. Using only
+`https://exjbwdcxyrkxsmzaowkx/...` causes `curl: (6) Could not resolve host`.
+
+**Apply schema + cron:**
+Run `supabase/sql/20260529_deep_analysis.sql` in the Supabase SQL Editor or with `psql`.
+
+**Verify:**
+```sql
+select status, count(*)
+from article_deep_analysis
+group by status
+order by status;
+
+select count(*) as claimable
+from article_deep_analysis ada
+join daily_news dn on dn.id = ada.article_id
+where ada.status in ('pending', 'error')
+  and ada.retry_count < 3
+  and dn.article_content is not null
+  and length(dn.article_content) > 500;
+
+select ada.status, dn.title, ada.model, ada.input_chars, ada.truncated, ada.last_error
+from article_deep_analysis ada
+join daily_news dn on dn.id = ada.article_id
+order by ada.updated_at desc
+limit 20;
+```
+
+**Secrets** (set in Supabase dashboard — `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected):
+```bash
+supabase secrets set TOKENROUTER_API_KEY=... --project-ref <ref>
+supabase secrets set DEEP_ANALYSIS_LLM_MODEL=qwen/qwen3.6-plus --project-ref <ref>
+supabase secrets set OPENROUTER_API_KEY=... --project-ref <ref>
+supabase secrets set OPENROUTER_MODEL=... --project-ref <ref>
+supabase secrets set GROQ_API_KEY=... --project-ref <ref>
+supabase secrets set COHERE_API_KEY=... --project-ref <ref>
 ```
 
 ---
@@ -188,6 +319,7 @@ npx expo start --ios
 supabase functions deploy answer-question
 supabase functions deploy refresh-questions
 supabase functions deploy process-queue
+supabase functions deploy generate-deep-analysis
 supabase functions deploy generate-trend-brief
 supabase functions deploy ingest-apify-tweets  # --no-verify-jwt required
 supabase functions deploy redeem-invite        # closed-beta auth gate (Round 1)
@@ -382,6 +514,125 @@ where aborted = true
 order by asked_at desc limit 10;
 ```
 Expect: all `ok`. `LEAK` = abort signal not reaching the upstream LLM — redeploy `answer-question`.
+
+**RAG trace completeness — verify latest production traces**
+
+Run `supabase/sql/20260531_rag_trace_completeness_verification.sql` in Supabase SQL Editor after deploying `answer-question` or `generate-trend-brief`. The trace is healthy when:
+- `qa_logs.rag_retrieval_run_id` links to `rag_retrieval_runs` for Q&A.
+- `trend_brief_key` links trend brief historical enrichment traces.
+- `rag_retrieval_candidates` has rows when candidates were returned.
+- `rag_injected_contexts` records the exact prompt context that reached the model.
+
+**RAG golden dataset — review pending labels**
+
+Use this to list every pending label with raw source context:
+```sql
+select
+  c.id as case_id,
+  g.article_id,
+  dn.raw_ingestion_id,
+  ri.url as raw_url,
+  ri.source_id,
+  ri.status as raw_status,
+  ri.raw_content,
+  ri.metadata as raw_metadata,
+  c.question,
+  dn.title as evidence_article_title,
+  g.relevance_grade,
+  g.evidence_note,
+  g.review_status,
+  g.metadata as gold_metadata
+from public.rag_eval_gold_evidence g
+join public.rag_eval_cases c on c.id = g.case_id
+join public.daily_news dn on dn.id = g.article_id
+join public.raw_ingestion ri on ri.id = dn.raw_ingestion_id
+where g.review_status = 'pending'
+order by c.created_at asc, (g.metadata->>'candidate_rank')::int asc nulls last;
+```
+
+Use `approved` for a human-trusted label, including correct low-relevance grades `0` and `1`. Use `rejected` only when the row itself is wrong/unusable, not merely because the article is irrelevant.
+
+Use this to inspect pending labels with a specific grade, for example grade `0`:
+```sql
+select
+  c.id as case_id,
+  g.id as gold_id,
+  g.article_id,
+  dn.raw_ingestion_id,
+  ri.url as raw_url,
+  c.question,
+  dn.title as evidence_article_title,
+  g.relevance_grade,
+  g.evidence_note,
+  g.metadata->>'candidate_provider' as candidate_provider,
+  g.metadata->>'query_embedding_model' as query_embedding_model
+from public.rag_eval_gold_evidence g
+join public.rag_eval_cases c on c.id = g.case_id
+join public.daily_news dn on dn.id = g.article_id
+left join public.raw_ingestion ri on ri.id = dn.raw_ingestion_id
+where g.review_status = 'pending'
+  and g.relevance_grade = 0
+order by c.created_at asc, (g.metadata->>'candidate_rank')::int asc nulls last;
+```
+
+Use this to change the grade for specific labels after review:
+```sql
+update public.rag_eval_gold_evidence
+set
+  relevance_grade = 2,
+  evidence_note = coalesce(evidence_note, '') || E'\nHuman correction: updated relevance grade after reviewing raw URL and article evidence.'
+where id in (
+  -- paste gold_id values here
+);
+```
+
+update public.rag_eval_gold_evidence
+set
+  review_status = 'rejected',
+  evidence_note = coalesce(evidence_note, '') || E'\nHuman review: rejected as duplicate evidence label.'
+where id in (
+  -- paste duplicate gold_id values here
+);
+
+After human review, approve all trusted pending labels at a specific grade:
+```sql
+update public.rag_eval_gold_evidence
+set review_status = 'approved'
+where review_status = 'pending'
+  and relevance_grade = 0;
+```
+
+Do this only after checking that the grade is correct. A trusted `0` means "this article is truly irrelevant to the question," not "delete this row."
+
+Gold generation reruns preserve existing human review state. If a case/article pair already has `review_status = 'approved'`, rerunning `npm run eval:generate-gold` should not downgrade it back to `pending`.
+
+**RAG eval replay — dense, lexical, hybrid**
+
+Apply these SQL files before lexical/hybrid/chunk work:
+```bash
+supabase/sql/20260602_rag_lexical_eval_rpc.sql
+supabase/sql/20260602_article_chunks_eval_scaffold.sql
+```
+
+Generate or expand gold candidates:
+```bash
+RAG_EVAL_GOLD_TIMEOUT_MS=240000 npm run eval:generate-gold -- --set qa-v1-2026-06 --expand-candidates true
+```
+
+Run official approved-label replays:
+```bash
+npm run eval:replay -- --set qa-v1-2026-06 --allow-pending false --strategy dense
+npm run eval:replay -- --set qa-v1-2026-06 --allow-pending false --strategy lexical
+npm run eval:replay -- --set qa-v1-2026-06 --allow-pending false --strategy hybrid
+npm run eval:chunk-backfill -- --eval-set qa-v1-2026-06 --batch-size 8
+npm run eval:replay -- --set qa-v1-2026-06 --allow-pending false --strategy chunk_dense --chunking-version paragraph-window-v1-2026-06-02
+```
+
+Then run `supabase/sql/20260602_rag_retrieval_refinement_diagnostics.sql`, especially:
+- Query 6: approved-gold readiness preflight.
+- Query 7: latest dense/lexical/hybrid comparison.
+
+As of 2026-06-09, `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3` is the selected corpus-health-valid eval candidate on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. Generation eval aggregate for `chunk_dense` is faithfulness 0.994, answer relevancy 0.950, context precision 0.785, and context recall 0.819, but group by `eval_run_id` before quoting it as a locked benchmark. Do not change production `answer-question` without a separate feature-flagged integration and rollback plan.
 
 ---
 
