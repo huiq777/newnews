@@ -1,4 +1,5 @@
 import { parse } from "https://esm.sh/node-html-parser@6.1.13"
+import { DEEP_ANALYSIS_PROMPT_VERSION } from "../_shared/deep-analysis.js"
 
 const ARTICLE_SYSTEM_PROMPT = `You are a senior AI correspondent. Your readers are smart and time-poor — some build AI systems, others are deeply curious about where AI is going. Write like the most informed person in the room who also knows how to make ideas land.
 
@@ -919,11 +920,78 @@ async function insertAndMarkDone(
     })
   }
 
+  await enqueueDeepAnalysis(article.url)
+
   await fetch(`${SB_URL()}/rest/v1/raw_ingestion?id=eq.${article.id}`, {
     method: 'PATCH',
     headers: SB_HEADERS(),
     body: JSON.stringify({ status: 'done', processed_at: new Date().toISOString() }),
   })
+}
+
+async function enqueueDeepAnalysis(articleUrl: string) {
+  try {
+    const dailyRes = await fetch(
+      `${SB_URL()}/rest/v1/daily_news?url=eq.${encodeURIComponent(articleUrl)}&select=id,article_content&limit=1`,
+      { headers: SB_HEADERS() }
+    )
+    if (!dailyRes.ok) {
+      const errBody = await dailyRes.text().catch(() => '')
+      console.log(`[deep-analysis] daily lookup failed (${dailyRes.status}): ${errBody.substring(0, 200)}`)
+      return
+    }
+
+    const dailyRows = await dailyRes.json() as { id: string; article_content: string | null }[]
+    const row = dailyRows[0]
+    if (!row) return
+
+    const contentLength = (row.article_content || '').trim().length
+    const status = contentLength > 500 ? 'pending' : 'ineligible'
+
+    const existingRes = await fetch(
+      `${SB_URL()}/rest/v1/article_deep_analysis?article_id=eq.${row.id}&select=id,status&limit=1`,
+      { headers: SB_HEADERS() }
+    )
+    const existingRows = existingRes.ok
+      ? await existingRes.json() as { id: string; status: string }[]
+      : []
+    const existing = existingRows[0]
+
+    if (!existing) {
+      const insertRes = await fetch(`${SB_URL()}/rest/v1/article_deep_analysis`, {
+        method: 'POST',
+        headers: { ...SB_HEADERS(), 'Prefer': 'resolution=ignore-duplicates' },
+        body: JSON.stringify({
+          article_id: row.id,
+          status,
+          prompt_version: DEEP_ANALYSIS_PROMPT_VERSION,
+        }),
+      })
+      if (!insertRes.ok) {
+        const errBody = await insertRes.text().catch(() => '')
+        console.log(`[deep-analysis] enqueue insert failed (${insertRes.status}): ${errBody.substring(0, 200)}`)
+      }
+      return
+    }
+
+    if (existing.status === 'ineligible' && status === 'pending') {
+      const patchRes = await fetch(`${SB_URL()}/rest/v1/article_deep_analysis?id=eq.${existing.id}`, {
+        method: 'PATCH',
+        headers: SB_HEADERS(),
+        body: JSON.stringify({
+          status: 'pending',
+          prompt_version: DEEP_ANALYSIS_PROMPT_VERSION,
+          last_error: null,
+        }),
+      })
+      if (!patchRes.ok) {
+        const errBody = await patchRes.text().catch(() => '')
+        console.log(`[deep-analysis] enqueue patch failed (${patchRes.status}): ${errBody.substring(0, 200)}`)
+      }
+    }
+  } catch (err) {
+    console.log(`[deep-analysis] enqueue skipped: ${(err as Error).message}`)
+  }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -992,9 +1060,13 @@ async function processArticle(
       engagement = { show_name: m.show_name as string }
     }
 
-    // Pass AIHot editorial metadata (title_en, category, source, aihot_id) through to daily_news.
+    // Pass source-specific metadata through to daily_news for consumers that need
+    // provenance or article-type hints. Keep this allowlisted so engagement-only
+    // metadata from social sources does not leak into the product layer.
     const articleMetadata: Record<string, unknown> | null =
-      article.source_type === 'aihot' ? (m ?? null) : null
+      article.source_type === 'aihot' || article.source_type === 'official_rss' || article.source_type === 'official_html_index'
+        ? (m ?? null)
+        : null
 
     // arXiv: skip scraping — the Atom feed already gives us the full abstract in raw_content,
     // and scraping arxiv.org/abs/* returns arXiv Labs boilerplate that poisons the summary

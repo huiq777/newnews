@@ -99,42 +99,6 @@
     "question": "AGI的模糊定义究竟是技术指标还是融资包装话术？"
   },
   {
-    "article_id": "418f85ee-e9fa-481c-b2b4-a99c46293536",
-    "title": "TechCrunch Updates AI Glossary Covering 20 Terms, Highlights RAM Shortage and Token Pricing Models",
-    "chars": 19964,
-    "cohort": "long",
-    "stress_test": true,
-    "lang": "zh",
-    "question": ""
-  },
-  {
-    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
-    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
-    "chars": 17768,
-    "cohort": "long",
-    "stress_test": false,
-    "lang": "zh",
-    "question": ""
-  },
-  {
-    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
-    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
-    "chars": 17768,
-    "cohort": "long",
-    "stress_test": false,
-    "lang": "zh",
-    "question": ""
-  },
-  {
-    "article_id": "97a725fc-f4bc-44c7-9260-a84ee52abe14",
-    "title": "VLA Models Map Vision to 65+ DoF Control at 50Hz Using Flow Matching and Diffusion",
-    "chars": 17768,
-    "cohort": "long",
-    "stress_test": true,
-    "lang": "zh",
-    "question": ""
-  },
-  {
     "article_id": "9994fd23-77fd-4f1f-9fb4-f8d88d70c9c5",
     "title": "Elon Musk Sues OpenAI Ahead of April 27 Trial, Demanding Executive Removal and Structural Overhaul",
     "chars": 11893,
@@ -187,5 +151,113 @@
     "stress_test": false,
     "lang": "zh",
     "question": "Alex Karp关于AI削弱人文选民影响力的论断，究竟是数据推演还是政治叙事?"
+  },
+  {
+    "article_id": "a6bae5a1-d063-4278-a87a-e457a7a62f04",
+    "title": "Vibe-Trading Ships 452 Pre-Built Quant Alphas and Robinhood Agentic Trading Connector in v0.1.8 Release",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Vibe-Trading v0.1.8 的 connector-first broker 架构如何改变 Robinhood 和 IBKR 的交易接入方式？"
+  },
+  {
+    "article_id": "87924d5d-13a1-4eec-85f1-39fd847b1914",
+    "title": "OpenDataLoader PDF Hits 0.907 Benchmark Score, Automating AI Data Extraction and PDF Accessibility",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "OpenDataLoader PDF 的 0.907 benchmark score 主要来自哪些 PDF 解析和无障碍自动化能力？"
+  },
+  {
+    "article_id": "b7c61c3e-eb91-4de8-a2e3-6509fc0b6327",
+    "title": "S&P 500 Boards Approve $725 Billion in AI Capex Despite Only 2.7% Director Expertise, Fueling 49,135 Job Cuts",
+    "chars": 15093,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "S&P 500 董事会在只有 2.7% 董事具备 AI 专长的情况下，如何为 7250 亿美元 AI capex 和 49135 个岗位削减承担治理责任？"
+  },
+  {
+    "article_id": "7bdb10e2-409c-4e6b-bb9f-0b7179eac166",
+    "title": "ClickUp Cuts 22% of Workforce and Introduces $1 Million Salary Bands for AI-Driven Roles",
+    "chars": 5214,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "ClickUp 裁员 22% 后提出百万美元薪酬带，所谓 100x org 如何把 AI agent 与剩余员工的激励重新绑定？"
+  },
+  {
+    "article_id": "fa7788c3-d87a-4e9b-a955-0bc353223b67",
+    "title": "Meta Cuts 10% of Workforce to Fund $115B to $135B AI Infrastructure Push",
+    "chars": 4642,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Meta 将裁员 10% 与 1150 亿到 1350 亿美元 AI 基建投入并列说明，这对员工和投资者分别释放了什么信号？"
+  },
+  {
+    "article_id": "07291b9c-11d6-445b-9a16-9b00ac8d8ef4",
+    "title": "OpenAI CEO Sam Altman Admits He Was Wrong About AI Replacing 30 to 40 Percent of Work Tasks",
+    "chars": 4128,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Sam Altman 承认 AI 尚未替代 30% 到 40% 工作任务，这如何改变外界对入门白领岗位自动化速度的判断？"
+  },
+  {
+    "article_id": "508d706c-3d12-4a64-a7ab-99d5a6b0fd1e",
+    "title": "BigID Cuts 150 Jobs, Slashing 20% of Workforce to Fund AI-First Transition",
+    "chars": 3821,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "BigID 在估值达到 10 亿美元后裁掉约 150 名员工，这轮 AI-first 转型对以色列研发中心和企业数据安全业务意味着什么？"
+  },
+  {
+    "article_id": "a1d3dc21-4447-4e36-8b18-dfd84af22b29",
+    "title": "YC GP Tom Blomfield Advocates Recursive AI Loops to Replace Middle Management and Cut Headcount",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Tom Blomfield 提出的递归式 AI 循环如何用 token 支出替代 headcount，并削弱传统中层管理的作用？"
+  },
+  {
+    "article_id": "47eb81d7-207e-428d-a794-ae695bd84af5",
+    "title": "YC's Pete Koomen Builds Internal AI Agent Infrastructure with 350 Tools and Single-Database Access",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Pete Koomen 在 YC 内部搭建的 350 工具 Agent 基础设施，为什么要给 Agent 单一中心数据库访问权限？"
+  },
+  {
+    "article_id": "a7231225-2269-436c-91e4-bcc5585824be",
+    "title": "Elon Musk Predicts Space AI Will Be Cheapest Within 36 Months, Targeting 100 Gigawatts of Solar Production",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "马斯克为什么认为太空 AI 算力会在 36 个月内变得最便宜，而这对 SpaceX 和 Tesla 的制造能力提出了什么要求？"
+  },
+  {
+    "article_id": "d0f6f7f1-02ff-432a-a858-9265ab36ca5f",
+    "title": "AI Builders Face $90 Per-User Costs and Memory Leaks When Scaling Agents Past 1,000 Users",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "当 Agent 产品从单用户扩展到 1000 名用户后，为什么 90 美元单用户成本、内存串扰和预算配额会成为核心瓶颈？"
+  },
+  {
+    "article_id": "1dbbe6b1-908e-47e3-a47d-652bfdbbb8d8",
+    "title": "Google Releases Gemma 4 Under Apache 2.0 License, Packing 31B Dense and 26B MoE Models With Native Audio and Reasoning",
+    "chars": 0,
+    "cohort": "mid",
+    "stress_test": false,
+    "lang": "zh",
+    "question": "Gemma 4 改用 Apache 2.0 协议并推出 31B 稠密与 26B MoE 模型，会如何影响本地开发者和开源模型竞争格局？"
   }
 ]

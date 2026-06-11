@@ -27,6 +27,47 @@ Only use `--valid-for-strategy-selection true` after corpus health passes and fr
 
 ---
 
+## OAuth Public Feed + Authenticated Analysis Deployment
+
+Apply the OAuth/public-feed policy before deploying the matching frontend and premium Edge Functions:
+
+```sql
+\i supabase/sql/20260610_oauth_access_policy.sql
+```
+
+Deploy the gated analysis functions:
+
+```bash
+supabase functions deploy answer-question
+supabase functions deploy refresh-questions
+supabase functions deploy generate-trend-brief
+```
+
+Supabase Auth setup:
+- Enable GitHub and Google providers.
+- Add the production site origin and local dev origin to Auth redirect URLs.
+- Disable email/password, email OTP, and email sign-up for this release.
+
+Frontend env for the nav GitHub action:
+
+```bash
+EXPO_PUBLIC_GITHUB_REPO_URL=https://github.com/<owner>/<repo>
+EXPO_PUBLIC_GITHUB_STARS_LABEL=Star
+```
+
+Post-deploy smoke:
+
+```bash
+npm test
+```
+
+Manual browser checks:
+- Anonymous visitor can load the daily feed.
+- Anonymous Deep Analysis, Q&A, and Trend Brief slots show a login row, not generated content.
+- GitHub or Google OAuth returns to the app and unlocks Deep Analysis, Q&A, question refresh, and trend brief generation.
+
+---
+
 ## ingest-rss
 **Runs automatically:** Every hour (`0 * * * *`)
 

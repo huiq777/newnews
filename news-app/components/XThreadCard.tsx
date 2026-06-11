@@ -7,6 +7,7 @@ import AnswerFeedback from './AnswerFeedback'
 import WebHTML from './WebHTML'
 import MarkdownText from './MarkdownText'
 import ThinkingIndicator from './ThinkingIndicator'
+import LoginRequiredInline from './LoginRequiredInline'
 import { colors, typography, spacing, surfaces } from '../theme/tokens'
 
 export interface XThreadGroup {
@@ -26,6 +27,8 @@ function TweetRow({
   onToggle,
   deepThink,
   onDeepThinkChange,
+  isAuthed,
+  onRequireAuth,
 }: {
   tweet: Article
   lang: 'en' | 'zh'
@@ -36,6 +39,8 @@ function TweetRow({
   onToggle: () => void
   deepThink: boolean
   onDeepThinkChange: (v: boolean) => void
+  isAuthed: boolean
+  onRequireAuth: () => void
 }) {
   const [hovered, setHovered] = useState(false)
   const innerPressed = useRef(false)
@@ -76,18 +81,27 @@ function TweetRow({
   const questions = localQuestions ? (lang === 'en' ? localQuestions.en : localQuestions.zh) : []
 
   useEffect(() => { setAnswers({}) }, [lang])
+  useEffect(() => { setLocalQuestions(tweet.questions) }, [tweet.questions])
   useEffect(() => { if (!isCardExpanded) setQuestionsOpen(false) }, [isCardExpanded])
 
   async function handleAsk(index: number, question: string, forceRefresh = false) {
+    if (!isAuthed) {
+      onRequireAuth()
+      return
+    }
     if (!forceRefresh && answers[index]?.content && !answers[index]?.streaming) {
       setAnswers(prev => { const next = { ...prev }; delete next[index]; return next })
       return
     }
     setAnswers(prev => ({ ...prev, [index]: { thinking: '', content: '', thinkingDone: false, streaming: true, qaLogId: null } }))
     try {
-      // Spec C: pass user JWT so the Edge Function can attribute the qa_log row.
       const { data: { session } } = await supabase.auth.getSession()
-      const accessToken = session?.access_token ?? SUPABASE_ANON_KEY
+      const accessToken = session?.access_token
+      if (!accessToken) {
+        onRequireAuth()
+        setAnswers(prev => ({ ...prev, [index]: { ...prev[index], streaming: false } }))
+        return
+      }
       const res = await fetch(`${SUPABASE_URL}/functions/v1/answer-question`, {
         method: 'POST',
         headers: {
@@ -138,12 +152,23 @@ function TweetRow({
   }
 
   async function handleRefresh() {
+    if (!isAuthed) {
+      onRequireAuth()
+      return
+    }
     setRefreshing(true)
     setAnswers({})
     try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const accessToken = session?.access_token
+      if (!accessToken) {
+        onRequireAuth()
+        setRefreshing(false)
+        return
+      }
       const res = await fetch(`${SUPABASE_URL}/functions/v1/refresh-questions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}`, 'apikey': SUPABASE_ANON_KEY },
         body: JSON.stringify({ article_id: tweet.id }),
       })
       const newQuestions = await res.json()
@@ -180,7 +205,11 @@ function TweetRow({
           </View>
         )}
         {isCardExpanded && (
-          localQuestions ? (
+          !isAuthed ? (
+            <TouchableOpacity onPress={() => { innerPressed.current = true; setQuestionsOpen(v => !v) }} style={styles.questionsPill}>
+              <Text style={styles.questionsPillText}>{questionsOpen ? (lang === 'en' ? '✕ Close' : '✕ 关闭') : (lang === 'en' ? '? Questions' : '? 提问')}</Text>
+            </TouchableOpacity>
+          ) : localQuestions ? (
             <TouchableOpacity onPress={() => { innerPressed.current = true; setQuestionsOpen(v => !v) }} style={styles.questionsPill}>
               <Text style={styles.questionsPillText}>{questionsOpen ? (lang === 'en' ? '✕ Close' : '✕ 关闭') : (lang === 'en' ? '? Questions' : '? 提问')}</Text>
             </TouchableOpacity>
@@ -219,7 +248,14 @@ function TweetRow({
       )}
 
       {/* Questions Section */}
-      {isCardExpanded && questionsOpen && localQuestions && (
+      {isCardExpanded && questionsOpen && !isAuthed && (
+        <LoginRequiredInline
+          message="Please log in to ask questions about this thread."
+          onLoginPress={onRequireAuth}
+        />
+      )}
+
+      {isCardExpanded && questionsOpen && isAuthed && localQuestions && (
         <View style={styles.questionsSection}>
           <View style={styles.questionsDivider}>
             <View style={styles.dividerLine} />
@@ -312,6 +348,8 @@ export default function XThreadCard({
   onExpandedChange,
   deepThink,
   onDeepThinkChange,
+  isAuthed,
+  onRequireAuth,
 }: {
   group: XThreadGroup
   lang: 'en' | 'zh'
@@ -319,6 +357,8 @@ export default function XThreadCard({
   onExpandedChange: (v: boolean) => void
   deepThink: boolean
   onDeepThinkChange: (v: boolean) => void
+  isAuthed: boolean
+  onRequireAuth: () => void
 }) {
   const top = group.tweets[0]
   const rest = group.tweets.slice(1)
@@ -361,6 +401,8 @@ export default function XThreadCard({
         onToggle={() => onExpandedChange(!isExpanded)}
         deepThink={deepThink}
         onDeepThinkChange={onDeepThinkChange}
+        isAuthed={isAuthed}
+        onRequireAuth={onRequireAuth}
       />
 
       {/* Collapsed hint */}
@@ -388,6 +430,8 @@ export default function XThreadCard({
               onToggle={() => onExpandedChange(!isExpanded)}
               deepThink={deepThink}
               onDeepThinkChange={onDeepThinkChange}
+              isAuthed={isAuthed}
+              onRequireAuth={onRequireAuth}
             />
           ))}
         </View>

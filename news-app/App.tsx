@@ -6,7 +6,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import { supabase, FEED_PAGE_SIZE, Article, Category, getInitialLang, setSavedLang } from './lib/config'
 import { colors, typography, spacing } from './theme/tokens'
 import { useAuthGate } from './lib/auth'
-import BetaGateScreen from './components/BetaGateScreen'
 import NavBar from './components/NavBar'
 import DrumWheelSidebar from './components/DrumWheelSidebar'
 import FilterTag from './components/FilterTag'
@@ -15,6 +14,8 @@ import TrendBriefCard from './components/TrendBriefCard'
 import SubscriptionManualModal from './components/SubscriptionManualModal'
 import NewArticlesBanner from './components/NewArticlesBanner'
 import XThreadCard, { XThreadGroup } from './components/XThreadCard'
+import AuthPrompt from './components/AuthPrompt'
+import LoginRequiredInline from './components/LoginRequiredInline'
 
 type FeedRow = {
   id: string
@@ -24,18 +25,41 @@ type FeedRow = {
   summary_zh: string | null
   source_type: string
   source_id: string
+  source_name: string | null
+  source_category: string | null
   thread_group: string | null
+  thread_bio: string | null
   url: string | null
   published_at: string | null
   created_at: string
   questions: { en: string[]; zh: string[] } | null
   engagement: Record<string, number> | null
   metadata: Record<string, unknown> | null
+  deep_analysis_id: string | null
+  deep_analysis_status: Article['deep_analysis_status']
+  deep_analysis: Article['deep_analysis']
+  deep_analysis_feedback_up_count: number | null
+  deep_analysis_feedback_down_count: number | null
   next_cursor: string | null
 }
 
+const NEW_ARTICLES_POLL_INTERVAL_MS = 5 * 60 * 1000
+const NEW_ARTICLES_FOCUS_THROTTLE_MS = 30 * 1000
+
 export default function App() {
-  const { status: authStatus, defaultLang: authDefaultLang, redeemError, retry } = useAuthGate()
+  const {
+    status: authStatus,
+    displayName,
+    authError,
+    signInWithProvider,
+    signOut,
+    retry,
+  } = useAuthGate()
+  const isAuthed = authStatus === 'authed'
+  const [authPromptOpen, setAuthPromptOpen] = useState(false)
+  const requireAuth = useCallback(() => {
+    setAuthPromptOpen(true)
+  }, [])
   const [articles, setArticles] = useState<Article[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
@@ -85,14 +109,6 @@ export default function App() {
     }
   }, [])
 
-  // Default-language carry-over from invite metadata.
-  useEffect(() => {
-    if (authDefaultLang && authStatus === 'authed') {
-      const hasExplicitLang = typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('news_app_lang')
-      if (!hasExplicitLang) setLang(authDefaultLang)
-    }
-  }, [authDefaultLang, authStatus])
-
   // Font injection (web-only)
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -123,26 +139,6 @@ export default function App() {
     }
   }, [])
 
-  // Load sources
-  useEffect(() => {
-    if (authStatus !== 'authed') return
-    supabase.from('sources').select('id, name, metadata, category').then(({ data }) => {
-      if (data) {
-        const sMap: Record<string, string> = {}
-        const bMap: Record<string, string> = {}
-        const cMap: Record<string, string> = {}
-        data.forEach((s: { id: string; name: string; category?: string; metadata?: { bio_map?: Record<string, string> } }) => {
-          sMap[s.id] = s.name
-          if (s.metadata?.bio_map) Object.assign(bMap, s.metadata.bio_map)
-          if (s.category) cMap[s.id] = s.category
-        })
-        setSourceMap(sMap)
-        setBioMap(bMap)
-        setCategoryMap(cMap)
-      }
-    })
-  }, [authStatus])
-
   const activeCategoryRef = useRef(activeCategory)
   const dateRangeRef = useRef(dateRange)
   const articlesRef = useRef(articles)
@@ -150,58 +146,67 @@ export default function App() {
   const authStatusRef = useRef(authStatus)
   const feedLoadingRef = useRef(false)
   const feedBaselineRef = useRef<string | undefined>(undefined)
+  const lastNewArticlesCheckRef = useRef(0)
+  const newArticlesCheckInFlightRef = useRef(false)
 
   useEffect(() => { activeCategoryRef.current = activeCategory }, [activeCategory])
   useEffect(() => { dateRangeRef.current = dateRange }, [dateRange])
   useEffect(() => { articlesRef.current = articles }, [articles])
   useEffect(() => { authStatusRef.current = authStatus }, [authStatus])
 
-  const checkMissedArticles = useCallback(async () => {
-    if (authStatusRef.current !== 'authed') return
+  const checkMissedArticles = useCallback(async (opts: { force?: boolean } = {}) => {
     if (feedLoadingRef.current) return
-    const latestDate = feedBaselineRef.current
-    if (!latestDate) return
+    if (newArticlesCheckInFlightRef.current) return
 
-    const cat = activeCategoryRef.current
-    const dr = dateRangeRef.current
+    const now = Date.now()
+    if (!opts.force && now - lastNewArticlesCheckRef.current < NEW_ARTICLES_FOCUS_THROTTLE_MS) return
+    lastNewArticlesCheckRef.current = now
+    newArticlesCheckInFlightRef.current = true
 
-    let query = supabase
-      .from('daily_news')
-      .select('id', { count: 'exact', head: true })
-      .gt('created_at', latestDate)
+    try {
+      const latestDate = feedBaselineRef.current
+      if (!latestDate) return
 
-    if (cat !== 'all') {
-      query = query.eq('category', cat)
-    }
+      const cat = activeCategoryRef.current
+      const dr = dateRangeRef.current
 
-    if (dr) {
-      const s = dr.start.toISOString()
-      const e = dr.end.toISOString()
-      query = query.or(
-        `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
-      )
-    }
+      let query = supabase
+        .from('daily_news')
+        .select('id', { count: 'exact', head: true })
+        .gt('created_at', latestDate)
 
-    const { count, error } = await query
-    if (error) {
-      console.error('Error checking missed articles:', error)
-      return
-    }
+      if (cat !== 'all') {
+        query = query.eq('category', cat)
+      }
 
-    if (count != null && count > 0) {
-      setNewArticlesCount(count)
+      if (dr) {
+        const s = dr.start.toISOString()
+        const e = dr.end.toISOString()
+        query = query.or(
+          `and(published_at.gte.${s},published_at.lt.${e}),and(published_at.is.null,created_at.gte.${s},created_at.lt.${e})`
+        )
+      }
+
+      const { count, error } = await query
+      if (error) {
+        console.error('Error checking missed articles:', error)
+        return
+      }
+
+      if (count != null && count > 0) {
+        setNewArticlesCount(count)
+      }
+    } finally {
+      newArticlesCheckInFlightRef.current = false
     }
   }, [])
 
-  // Realtime subscription and AppState watcher for background catch-up
+  // Polling + focus watcher for new-article catch-up. Avoid Supabase Realtime:
+  // realtime.list_changes dominated DB execution time on the Nano instance.
   useEffect(() => {
-    if (authStatus !== 'authed') return
-    const channel = supabase
-      .channel('public:daily_news')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'daily_news' }, () => {
-        checkMissedArticles()
-      })
-      .subscribe()
+    const pollId = setInterval(() => {
+      checkMissedArticles({ force: true })
+    }, NEW_ARTICLES_POLL_INTERVAL_MS)
 
     const appStateSubscription = AppState.addEventListener('change', nextAppState => {
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
@@ -210,15 +215,37 @@ export default function App() {
       appStateRef.current = nextAppState
     })
 
+    const handleBrowserFocus = () => {
+      checkMissedArticles()
+    }
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        checkMissedArticles()
+      }
+    }
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.addEventListener('focus', handleBrowserFocus)
+    }
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+
     return () => {
-      supabase.removeChannel(channel)
+      clearInterval(pollId)
       appStateSubscription.remove()
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        window.removeEventListener('focus', handleBrowserFocus)
+      }
+      if (Platform.OS === 'web' && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
     }
   }, [checkMissedArticles, authStatus])
 
   // Fetch articles — reset on dateRange/activeCategory change
   useEffect(() => {
-    if (authStatus !== 'authed') return
     feedLoadingRef.current = true
     feedBaselineRef.current = undefined
     setLoading(true)
@@ -248,6 +275,17 @@ export default function App() {
           return
         }
         const rows = (data ?? []) as FeedRow[]
+        const sMap: Record<string, string> = {}
+        const bMap: Record<string, string> = {}
+        const cMap: Record<string, string> = {}
+        rows.forEach(row => {
+          if (row.source_name) sMap[row.source_id] = row.source_name
+          if (row.source_category) cMap[row.source_id] = row.source_category
+          if (row.thread_group && row.thread_bio) bMap[row.thread_group.toLowerCase()] = row.thread_bio
+        })
+        setSourceMap(sMap)
+        setBioMap(bMap)
+        setCategoryMap(cMap)
         // Auto-fallback: if Today returns nothing on INITIAL LOAD, widen to 3D
         if (rows.length === 0 && stepDays === 1 && wheelControlsRef.current && isInitialLoadRef.current) {
           isInitialLoadRef.current = false
@@ -329,7 +367,7 @@ export default function App() {
         } else {
           const group: XThreadGroup = {
             handle,
-            bio: bioMap[handle.toLowerCase()],
+            bio: row.thread_bio ?? bioMap[handle.toLowerCase()],
             tweets: [item],
           }
           threadMap.set(handle, group)
@@ -352,10 +390,6 @@ export default function App() {
     return result
   }, [articles, bioMap])
 
-  if (authStatus !== 'authed') {
-    return <BetaGateScreen status={authStatus} redeemError={redeemError} onRetry={retry} />
-  }
-
   return (
     <SafeAreaView style={styles.container}>
       <NavBar
@@ -369,6 +403,11 @@ export default function App() {
           setSavedLang(newLang)
         }}
         onCategoryChange={handleCategoryChange}
+        authStatus={authStatus}
+        authDisplayName={displayName}
+        authError={authError}
+        onLoginPress={() => setAuthPromptOpen(true)}
+        onSignOut={signOut}
       />
       <View style={styles.body}>
         <DrumWheelSidebar
@@ -393,7 +432,9 @@ export default function App() {
                     dateRange={dateRange}
                     stepDays={stepDays}
                     hasArticles={grouped.length > 0}
-                    onOpenManual={() => setShowManual(true)}
+                    onOpenManual={() => isAuthed ? setShowManual(true) : requireAuth()}
+                    isAuthed={isAuthed}
+                    onLoginPress={requireAuth}
                   />
                 ) : null
               }
@@ -420,10 +461,12 @@ export default function App() {
                       onExpandedChange={(v) => setExpandedThreads(prev => ({ ...prev, [handleLower]: v }))}
                       deepThink={deepThink}
                       onDeepThinkChange={setDeepThink}
+                      isAuthed={isAuthed}
+                      onRequireAuth={requireAuth}
                     />
                   )
                 }
-                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} deepThink={deepThink} onDeepThinkChange={setDeepThink} />
+                return <ArticleCard item={item as Article} lang={lang} sourceMap={sourceMap} bioMap={bioMap} deepThink={deepThink} onDeepThinkChange={setDeepThink} isAuthed={isAuthed} onRequireAuth={requireAuth} />
               }}
               onEndReached={loadMoreArticles}
               onEndReachedThreshold={0.2}
@@ -453,6 +496,15 @@ export default function App() {
         visible={showManual}
         lang={lang}
         onClose={() => setShowManual(false)}
+      />
+      {!isAuthed && showManual && (
+        <LoginRequiredInline onLoginPress={requireAuth} />
+      )}
+      <AuthPrompt
+        visible={authPromptOpen}
+        authError={authError}
+        onDismiss={() => setAuthPromptOpen(false)}
+        onSignIn={signInWithProvider}
       />
     </SafeAreaView>
   )

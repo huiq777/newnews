@@ -1,5 +1,14 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 
+function isBriefRequest(text: string): boolean {
+  const t = text.toLowerCase()
+  return ['brief', 'trend', 'newest', '趋势', '简报', '最新', 'latest', 'today', '今天', '每日'].some(kw => t.includes(kw))
+}
+
+function toSlackBold(text: string): string {
+  return text.replace(/\*\*(.*?)\*\*/gs, '*$1*')
+}
+
 serve(async (req) => {
   if (req.method !== 'POST') return new Response('OK', { status: 200 })
 
@@ -33,19 +42,44 @@ serve(async (req) => {
   const adminMention = adminUserId ? `<@${adminUserId}>` : '@admin'
   const askerTag = event.user ? `<@${event.user}>` : 'A user'
 
-  const text =
-    stripped.length < 10
-      ? `👋 I'm the Newnews AI brief bot. I push daily AI trend briefs to this channel @ 8:30 PM.\nFor complex questions, @mention me with your question and I'll escalate to the admin.`
-      : `This question is beyond my current scope. Notifying ${adminMention}.\n\n📋 ${askerTag} asked:\n"${stripped}"`
+  let text: string
 
-  await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ channel: event.channel, text }),
-  })
+  if (isBriefRequest(stripped)) {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    const briefRes = await fetch(
+      `${supabaseUrl}/rest/v1/trend_briefs?step_days=eq.1&order=generated_at.desc&limit=1&select=synthesis_en,synthesis_zh,anchor_date`,
+      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
+    )
+    const briefs: { synthesis_en: string | null; synthesis_zh: string | null; anchor_date: string }[] = await briefRes.json()
+    const brief = briefs[0]
+    if (!brief) {
+      text = `${askerTag} No trend brief available yet. Check back after 8:30 PM.`
+    } else {
+      const synthesis = toSlackBold(brief.synthesis_en ?? brief.synthesis_zh ?? '')
+      const dateLabel = brief.anchor_date?.slice(5).replace('-', '/') ?? ''
+      text = `${askerTag} Here's the latest AI Trend Brief (${dateLabel}):\n\n${synthesis}`
+    }
+    await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ channel: event.channel, text }),
+    })
+  } else if (stripped.length < 10) {
+    text = `👋 I'm the Newnews AI brief bot. I push daily AI trend briefs to this channel.\nWant the latest? Just @mention me and say "trend brief".\nFor other questions, @mention me with your question and I'll escalate to the admin.`
+    await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ channel: event.channel, text }),
+    })
+  } else {
+    text = `This question is beyond my current scope. Notifying ${adminMention}.\n\n📋 ${askerTag} asked:\n"${stripped}"`
+    await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ channel: event.channel, text }),
+    })
+  }
 
   return new Response('OK', { status: 200 })
 })

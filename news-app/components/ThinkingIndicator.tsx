@@ -69,7 +69,6 @@ const styles = StyleSheet.create({
     fontSize: typography.size.base,
     fontStyle: 'italic',
     lineHeight: typography.leading.tight,
-    transition: 'color 0.2s ease',
   },
   thinkingBlock: {
     backgroundColor: colors.bg.hover,

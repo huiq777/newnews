@@ -38,7 +38,7 @@ Sources
     daily_news.embedding  (pgvector HNSW index)
           │
           ▼
-    [answer-question]  Supabase Edge Function (on user tap)
+    [answer-question]  Supabase Edge Function (authenticated user tap)
     • Cohere query embed → match_articles RPC → top 3 related
     • Groq streaming SSE → inline answer on article card
           │
@@ -62,8 +62,8 @@ Sources
 | LLM (primary) | TokenRouter `qwen/qwen3.6-plus` | 120s timeout; summarization + questions in one call; model-flexible without redeploy |
 | LLM (fallback) | OpenRouter → Groq `llama-3.3-70b-versatile` | AbortError / TCP / 429 fallback chain |
 | Embeddings | Cohere `embed-english-v3.0` | 1024-dim; asymmetric input_type (search_document vs search_query) |
-| Q&A | Supabase Edge Functions | `answer-question` (streaming RAG), `refresh-questions` (on-demand) |
-| Frontend | React Native / Expo | Single-file `App.tsx`; warm editorial aesthetic; web-first |
+| Q&A | Supabase Edge Functions | `answer-question` (streaming RAG), `refresh-questions` (on-demand), both OAuth-gated |
+| Frontend | React Native / Expo | Public daily feed; GitHub/Google OAuth unlocks Deep Analysis, Q&A, and Trend Briefs |
 | Delivery | Feishu / Slack / Discord / Telegram webhooks | Daily trend brief at 00:30 UTC (8:30 PM EDT); Feishu = ZH, others = EN |
 
 ---
@@ -88,9 +88,15 @@ For each pending article (5 in parallel via atomic `claim_pending_batch` RPC):
 - Up to 45 articles per run; prefers `article_content`; falls back to `summary`
 - Cohere `embed-english-v3.0` batch call → `daily_news.embedding`
 
-### 4. Q&A (`answer-question` Edge Function — on user tap)
+### 4. Q&A (`answer-question` Edge Function — authenticated user tap)
 - Cohere query embedding (`search_query`) → `match_articles` RPC → top 3 related
 - Groq streaming SSE → inline answer rendered word-by-word on article card
+
+### 5. Public Feed + OAuth-Gated Analysis
+- Anonymous visitors can read the daily feed through `fetch_grouped_feed`.
+- Premium generated content is nulled for anonymous callers by the feed RPC and replaced in the UI with inline login rows.
+- GitHub and Google OAuth unlock Deep Analysis, Q&A, question refresh, and browser-triggered trend briefs.
+- Manual question refreshes write `user_article_questions`; manual trend brief generations write `user_trend_briefs`, leaving shared defaults untouched.
 
 ---
 
@@ -117,8 +123,8 @@ News Project/
 │   └── send-digest/             ← Daily trend-brief delivery (Feishu/Slack/Discord/Telegram)
 ├── supabase/
 │   └── functions/
-│       ├── answer-question/     ← Streaming RAG Q&A
-│       └── refresh-questions/   ← On-demand question regeneration
+│       ├── answer-question/     ← Authenticated streaming RAG Q&A
+│       └── refresh-questions/   ← Authenticated user-scoped question regeneration
 └── news-app/
     └── App.tsx                  ← Full frontend
 ```

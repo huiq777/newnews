@@ -1,4 +1,10 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import {
+  requireAuthenticatedUser,
+  requireRateLimit,
+  securityOptions,
+} from '../_shared/security.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -190,10 +196,20 @@ type ArticleRow = {
   engagement: Record<string, number> | null
 }
 type HistoricalArticle = { id: string; title: string; published_at: string | null; summary_en: string | null; summary_zh: string | null }
+type TrendTraceCandidate = {
+  rank: number
+  id: string
+  title: string
+  summary: string
+  score: number | null
+  injected: boolean
+  drop_reason: string | null
+}
 
 type BriefPlan = {
   selected: ArticleRow[]
   historical: HistoricalArticle[]
+  retrievalRunId: string | null
   enMessages: object[]
   zhMessages: object[]
   sourcesJson: object[]
@@ -257,6 +273,134 @@ function buildMessages(
   ]
 }
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function userMessageText(messages: object[]): string {
+  const msg = messages.find((m: any) => m?.role === 'user') as { content?: string } | undefined
+  return typeof msg?.content === 'string' ? msg.content : ''
+}
+
+async function recordTrendBriefTrace(params: {
+  supabaseUrl: string
+  serviceKey: string
+  requestId: string
+  anchorDate: string
+  stepDays: number
+  category: string
+  dateStart: string
+  dateEnd: string
+  windowLabel: string
+  seedArticleId: string | null
+  selectedArticleIds: string[]
+  historicalArticleIds: string[]
+  candidates: TrendTraceCandidate[]
+  enMessages: object[]
+  zhMessages: object[]
+  matchCount: number
+  latencyMs: number
+}): Promise<string | null> {
+  try {
+    const sbService = createClient(params.supabaseUrl, params.serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+    const trendBriefKey = `${params.anchorDate}:${params.stepDays}:${params.category}`
+    const enContext = userMessageText(params.enMessages)
+    const zhContext = userMessageText(params.zhMessages)
+    const combinedContext = `${enContext}\n\n--- zh ---\n\n${zhContext}`
+
+    const { data: run, error: runError } = await sbService
+      .from('rag_retrieval_runs')
+      .insert({
+        surface: 'trend_brief_historical_enrichment',
+        request_id: params.requestId,
+        trend_brief_key: trendBriefKey,
+        trend_brief_anchor_date: params.anchorDate,
+        trend_brief_step_days: params.stepDays,
+        trend_brief_category: params.category,
+        query_text: params.seedArticleId,
+        query_input: {
+          seed_article_id: params.seedArticleId,
+          selected_article_ids: params.selectedArticleIds,
+          date_start: params.dateStart,
+          date_end: params.dateEnd,
+          window_label: params.windowLabel,
+        },
+        query_embedding_model: 'embed-english-v3.0',
+        embedding_input_type: 'search_document',
+        retrieval_strategy: 'single_seed_dense_article_similarity',
+        retrieval_version: 'trend-brief-historical-v1-2026-05-31',
+        retriever_name: 'match_articles',
+        match_count: params.matchCount,
+        candidate_count: params.candidates.length,
+        injected_count: params.historicalArticleIds.length,
+        context_total_chars: combinedContext.length,
+        prompt_context_hash: await sha256Hex(combinedContext),
+        latency_ms: params.latencyMs,
+      })
+      .select('id')
+      .single()
+
+    if (runError || !run?.id) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'generate-trend-brief', event: 'rag_trace_run_insert_failed', error: runError?.message, anchor_date: params.anchorDate, step_days: params.stepDays }))
+      return null
+    }
+
+    if (params.candidates.length > 0) {
+      const candidateRows = params.candidates.map(candidate => ({
+        retrieval_run_id: run.id,
+        rank: candidate.rank,
+        candidate_type: 'article',
+        article_id: candidate.id,
+        title: candidate.title,
+        summary_excerpt: (candidate.summary || '').slice(0, 1000),
+        score_dense: typeof candidate.score === 'number' ? candidate.score : null,
+        score_final: typeof candidate.score === 'number' ? candidate.score : null,
+        embedding_source: 'daily_news',
+        injected: candidate.injected,
+        drop_reason: candidate.injected ? null : candidate.drop_reason,
+        metadata: { anchor_date: params.anchorDate, step_days: params.stepDays },
+      }))
+      const { error } = await sbService.from('rag_retrieval_candidates').insert(candidateRows)
+      if (error) {
+        console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'generate-trend-brief', event: 'rag_trace_candidates_insert_failed', error: error.message, anchor_date: params.anchorDate, step_days: params.stepDays }))
+      }
+    }
+
+    const contexts = [
+      {
+        retrieval_run_id: run.id,
+        ordinal: 1,
+        context_role: 'trend_brief_user_prompt_en',
+        context_text: enContext,
+        context_hash: await sha256Hex(enContext),
+        context_chars: enContext.length,
+        metadata: { lang: 'en', historical_article_ids: params.historicalArticleIds },
+      },
+      {
+        retrieval_run_id: run.id,
+        ordinal: 2,
+        context_role: 'trend_brief_user_prompt_zh',
+        context_text: zhContext,
+        context_hash: await sha256Hex(zhContext),
+        context_chars: zhContext.length,
+        metadata: { lang: 'zh', historical_article_ids: params.historicalArticleIds },
+      },
+    ]
+    const { error: contextError } = await sbService.from('rag_injected_contexts').insert(contexts)
+    if (contextError) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'generate-trend-brief', event: 'rag_trace_contexts_insert_failed', error: contextError.message, anchor_date: params.anchorDate, step_days: params.stepDays }))
+    }
+
+    return run.id
+  } catch (e) {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'generate-trend-brief', event: 'rag_trace_insert_threw', error: (e as Error).message, anchor_date: params.anchorDate, step_days: params.stepDays }))
+    return null
+  }
+}
+
 // ── buildBriefPlan — pure data-prep, returns all inputs for both LLM calls ────
 
 async function buildBriefPlan(
@@ -289,8 +433,11 @@ async function buildBriefPlan(
   const windowStart = new Date(dateStart).getTime()
   const windowEnd = new Date(dateEnd).getTime()
   const historical: HistoricalArticle[] = []
+  let historicalCandidateTraces: TrendTraceCandidate[] = []
+  let historicalLatencyMs = 0
   const seedId = selected[0]?.id
   if (seedId) {
+    const historicalStart = Date.now()
     try {
       const embRes = await fetch(`${env.supabaseUrl}/rest/v1/daily_news?id=eq.${seedId}&select=embedding`, { headers: sbHeaders })
       if (embRes.ok) {
@@ -303,25 +450,54 @@ async function buildBriefPlan(
           })
           if (rpcRes.ok) {
             const results: { id: string; title: string; summary: string; score: number }[] = await rpcRes.json()
+            historicalCandidateTraces = results.map((r, i) => ({
+              rank: i + 1,
+              id: r.id,
+              title: r.title,
+              summary: r.summary,
+              score: typeof r.score === 'number' ? r.score : null,
+              injected: false,
+              drop_reason: null,
+            }))
             const selectedIds = new Set(selected.map(a => a.id))
-            for (const r of results) {
+            for (const [i, r] of results.entries()) {
+              const trace = historicalCandidateTraces[i]
               if (historical.length >= 8) break
-              if (selectedIds.has(r.id)) continue
+              if (selectedIds.has(r.id)) {
+                if (trace) trace.drop_reason = 'current_window_selected'
+                continue
+              }
               const detRes = await fetch(
                 `${env.supabaseUrl}/rest/v1/daily_news?id=eq.${r.id}&select=id,title,published_at,created_at,summary_en,summary_zh`,
                 { headers: sbHeaders }
               )
-              if (!detRes.ok) continue
+              if (!detRes.ok) {
+                if (trace) trace.drop_reason = 'details_fetch_failed'
+                continue
+              }
               const rows: { id: string; title: string; published_at: string | null; created_at: string; summary_en: string | null; summary_zh: string | null }[] = await detRes.json()
-              if (!rows[0]) continue
+              if (!rows[0]) {
+                if (trace) trace.drop_reason = 'details_missing'
+                continue
+              }
               const articleDate = new Date(rows[0].published_at || rows[0].created_at).getTime()
-              if (articleDate >= windowStart && articleDate < windowEnd) continue
+              if (articleDate >= windowStart && articleDate < windowEnd) {
+                if (trace) trace.drop_reason = 'current_window_article'
+                continue
+              }
               historical.push({ id: rows[0].id, title: rows[0].title, published_at: rows[0].published_at || rows[0].created_at, summary_en: rows[0].summary_en, summary_zh: rows[0].summary_zh })
+              if (trace) trace.injected = true
+            }
+            for (const trace of historicalCandidateTraces) {
+              if (!trace.injected && !trace.drop_reason) {
+                trace.drop_reason = historical.length >= 8 ? 'not_evaluated_after_context_cap' : 'not_selected'
+              }
             }
           }
         }
       }
     } catch { /* non-blocking */ }
+    historicalLatencyMs = Date.now() - historicalStart
   }
 
   // Build sources_json
@@ -338,6 +514,25 @@ async function buildBriefPlan(
   // Build message arrays for both languages
   const enMessages = buildMessages('en', selected, historical, windowLabel, category, stepDays)
   const zhMessages = buildMessages('zh', selected, historical, windowLabel, category, stepDays)
+  const retrievalRunId = await recordTrendBriefTrace({
+    supabaseUrl: env.supabaseUrl,
+    serviceKey: env.serviceKey,
+    requestId: crypto.randomUUID(),
+    anchorDate,
+    stepDays,
+    category,
+    dateStart,
+    dateEnd,
+    windowLabel,
+    seedArticleId: seedId ?? null,
+    selectedArticleIds: selected.map(a => a.id),
+    historicalArticleIds: historical.map(h => h.id),
+    candidates: historicalCandidateTraces,
+    enMessages,
+    zhMessages,
+    matchCount: 15,
+    latencyMs: historicalLatencyMs,
+  })
 
   // TTL
   const todayUtc = new Date().toISOString().slice(0, 10)
@@ -347,7 +542,7 @@ async function buildBriefPlan(
     : new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
   const dateRangeLabel = `${dateStart.slice(0, 10)} to ${anchorDate}`
 
-  return { selected, historical, enMessages, zhMessages, sourcesJson, expiresAt, dateRangeLabel, windowLabel }
+  return { selected, historical, retrievalRunId, enMessages, zhMessages, sourcesJson, expiresAt, dateRangeLabel, windowLabel }
 }
 
 // ── triggerSecondaryGeneration — fetches secondary lang text, returns it ──────
@@ -462,6 +657,7 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
   const anchor_date = url.searchParams.get('anchor_date') ?? ''
   const step_days   = parseInt(url.searchParams.get('step_days') ?? '1', 10)
   const category    = url.searchParams.get('category') ?? 'all'
+  const requestId   = crypto.randomUUID()
 
   if (!anchor_date || isNaN(step_days)) {
     return new Response('Missing anchor_date or step_days', { status: 400, headers: corsH })
@@ -527,8 +723,11 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
   const windowStart = new Date(date_start).getTime()
   const windowEnd   = new Date(date_end).getTime()
   const historical: { id: string; title: string; published_at: string | null; summary_en: string | null; summary_zh: string | null }[] = []
+  let historicalCandidateTraces: TrendTraceCandidate[] = []
+  let historicalLatencyMs = 0
   const seedId = selected[0]?.id
   if (seedId) {
+    const historicalStart = Date.now()
     try {
       const embRes = await fetch(`${SUPABASE_URL}/rest/v1/daily_news?id=eq.${seedId}&select=embedding`, { headers: sbHeaders })
       if (embRes.ok) {
@@ -541,25 +740,54 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
           })
           if (rpcRes.ok) {
             const results: { id: string; title: string; summary: string; score: number }[] = await rpcRes.json()
+            historicalCandidateTraces = results.map((r, i) => ({
+              rank: i + 1,
+              id: r.id,
+              title: r.title,
+              summary: r.summary,
+              score: typeof r.score === 'number' ? r.score : null,
+              injected: false,
+              drop_reason: null,
+            }))
             const selectedIds = new Set(selected.map(a => a.id))
-            for (const r of results) {
+            for (const [i, r] of results.entries()) {
+              const trace = historicalCandidateTraces[i]
               if (historical.length >= 8) break
-              if (selectedIds.has(r.id)) continue
+              if (selectedIds.has(r.id)) {
+                if (trace) trace.drop_reason = 'current_window_selected'
+                continue
+              }
               const detRes = await fetch(
                 `${SUPABASE_URL}/rest/v1/daily_news?id=eq.${r.id}&select=id,title,published_at,created_at,summary_en,summary_zh`,
                 { headers: sbHeaders }
               )
-              if (!detRes.ok) continue
+              if (!detRes.ok) {
+                if (trace) trace.drop_reason = 'details_fetch_failed'
+                continue
+              }
               const rows: { id: string; title: string; published_at: string | null; created_at: string; summary_en: string | null; summary_zh: string | null }[] = await detRes.json()
-              if (!rows[0]) continue
+              if (!rows[0]) {
+                if (trace) trace.drop_reason = 'details_missing'
+                continue
+              }
               const articleDate = new Date(rows[0].published_at || rows[0].created_at).getTime()
-              if (articleDate >= windowStart && articleDate < windowEnd) continue
+              if (articleDate >= windowStart && articleDate < windowEnd) {
+                if (trace) trace.drop_reason = 'current_window_article'
+                continue
+              }
               historical.push({ id: rows[0].id, title: rows[0].title, published_at: rows[0].published_at || rows[0].created_at, summary_en: rows[0].summary_en, summary_zh: rows[0].summary_zh })
+              if (trace) trace.injected = true
+            }
+            for (const trace of historicalCandidateTraces) {
+              if (!trace.injected && !trace.drop_reason) {
+                trace.drop_reason = historical.length >= 8 ? 'not_evaluated_after_context_cap' : 'not_selected'
+              }
             }
           }
         }
       }
     } catch { /* non-blocking */ }
+    historicalLatencyMs = Date.now() - historicalStart
   }
 
   const sourcesJson = [
@@ -595,14 +823,35 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
     const userPrompt = `Current window articles [${windowLabel}${category !== 'all' ? ', ' + category : ''}]:\n<articles>\n${currentBlock}${historicalBlock}\n</articles>`
     return [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }]
   }
+  const enMessages = buildMessages('en')
+  const zhMessages = buildMessages('zh')
+  await recordTrendBriefTrace({
+    supabaseUrl: SUPABASE_URL,
+    serviceKey: SERVICE_KEY,
+    requestId,
+    anchorDate: anchor_date,
+    stepDays: step_days,
+    category,
+    dateStart: date_start,
+    dateEnd: date_end,
+    windowLabel,
+    seedArticleId: seedId ?? null,
+    selectedArticleIds: selected.map(a => a.id),
+    historicalArticleIds: historical.map(h => h.id),
+    candidates: historicalCandidateTraces,
+    enMessages,
+    zhMessages,
+    matchCount: 15,
+    latencyMs: historicalLatencyMs,
+  })
 
   // Parallel TokenRouter calls for both languages
   let enResult: { text: string; tokens_used: number }
   let zhResult: { text: string; tokens_used: number }
   try {
     ;[enResult, zhResult] = await Promise.all([
-      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, buildMessages('en')),
-      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, buildMessages('zh')),
+      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, enMessages),
+      callTokenRouterNonStream(TOKENROUTER_API_KEY, TREND_BRIEF_MODEL, zhMessages),
     ])
   } catch (e) {
     const reason = (e as Error).message ?? String(e)
@@ -662,7 +911,7 @@ async function handleTrigger(req: Request, url: URL): Promise<Response> {
 
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  if (req.method === 'OPTIONS') return securityOptions(req)
 
   // ── Trigger mode: called by pg_cron, not by user browser ──────────────────
   const reqUrl = new URL(req.url)
@@ -675,6 +924,22 @@ serve(async (req) => {
   const SERVICE_KEY           = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
   const TOKENROUTER_API_KEY   = Deno.env.get('TOKENROUTER_API_KEY')!
   const TREND_BRIEF_MODEL     = Deno.env.get('TREND_BRIEF_MODEL') ?? 'anthropic/claude-opus-4.7'
+  // auth_required: user-triggered trend generation is premium.
+  const auth = await requireAuthenticatedUser(req)
+  if (!auth.ok) return auth.response
+  const sbService = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  const rate = await requireRateLimit({
+    req,
+    serviceRoleClient: sbService,
+    userId: auth.user.id,
+    surface: 'generate-trend-brief',
+    limit: 12,
+    windowSeconds: 3600,
+  })
+  if (!rate.ok) return rate.response
+  // streamBriefToUser is the authenticated browser branch below.
 
   const sbHeaders = {
     'apikey': SERVICE_KEY,
@@ -696,11 +961,34 @@ serve(async (req) => {
   // ── Cache check — one row per window, bilingual columns ───────────────────
   if (!force_refresh) {
     const cacheRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}&expires_at=gt.${new Date().toISOString()}&order=generated_at.desc&limit=1&select=${synthesisField},sources_json,generated_at`,
+      `${SUPABASE_URL}/rest/v1/user_trend_briefs?user_id=eq.${auth.user.id}&anchor_date=eq.${anchor_date}&step_days=eq.${step_days}&expires_at=gt.${new Date().toISOString()}&order=generated_at.desc&limit=1&select=${synthesisField},sources_json,generated_at`,
       { headers: sbHeaders }
     )
     if (cacheRes.ok) {
       const cached: Record<string, unknown>[] = await cacheRes.json()
+      const cachedSynthesis = cached[0]?.[synthesisField] as string | null
+      if (cached.length > 0 && cachedSynthesis) {
+        const encoder = new TextEncoder()
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(
+              `data: ${JSON.stringify({ type: 'cached', synthesis: cachedSynthesis, sources_json: cached[0].sources_json, generated_at: cached[0].generated_at })}\n\n`
+            ))
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+            controller.close()
+          },
+        })
+        return new Response(stream, {
+          headers: { ...corsHeaders, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        })
+      }
+    }
+    const sharedCacheRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}&expires_at=gt.${new Date().toISOString()}&order=generated_at.desc&limit=1&select=${synthesisField},sources_json,generated_at`,
+      { headers: sbHeaders }
+    )
+    if (sharedCacheRes.ok) {
+      const cached: Record<string, unknown>[] = await sharedCacheRes.json()
       const cachedSynthesis = cached[0]?.[synthesisField] as string | null
       if (cached.length > 0 && cachedSynthesis) {
         const encoder = new TextEncoder()
@@ -763,17 +1051,17 @@ serve(async (req) => {
       const secondaryText = secondaryHandle ? await secondaryHandle : null
       if (secondaryText) {
         const patchRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
+          `${SUPABASE_URL}/rest/v1/user_trend_briefs?user_id=eq.${auth.user.id}&anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
           { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
             body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: plan.sourcesJson, model: TREND_BRIEF_MODEL, expires_at: plan.expiresAt }) }
         )
         const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
         if (updatedCount === 0) {
-          await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
+          await fetch(`${SUPABASE_URL}/rest/v1/user_trend_briefs`, {
             method: 'POST',
             headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
             body: JSON.stringify({
-              anchor_date, step_days,
+              user_id: auth.user.id, anchor_date, step_days, date_range: plan.dateRangeLabel,
               synthesis_en: secondaryLang === 'en' ? secondaryText : null,
               synthesis_zh: secondaryLang === 'zh' ? secondaryText : null,
               sources_json: plan.sourcesJson, model: TREND_BRIEF_MODEL, expires_at: plan.expiresAt,
@@ -844,17 +1132,17 @@ serve(async (req) => {
           const secondaryText = secondaryHandle ? await secondaryHandle : null
           if (secondaryText) {
             const patchRes = await fetch(
-              `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
+              `${SUPABASE_URL}/rest/v1/user_trend_briefs?user_id=eq.${auth.user.id}&anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
               { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' },
                 body: JSON.stringify({ [secondarySynthesisField]: secondaryText, sources_json: plan.sourcesJson, model: TREND_BRIEF_MODEL, expires_at: plan.expiresAt }) }
             )
             const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
             if (updatedCount === 0) {
-              await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
+              await fetch(`${SUPABASE_URL}/rest/v1/user_trend_briefs`, {
                 method: 'POST',
                 headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
                 body: JSON.stringify({
-                  anchor_date, step_days,
+                  user_id: auth.user.id, anchor_date, step_days, date_range: plan.dateRangeLabel,
                   synthesis_en: secondaryLang === 'en' ? secondaryText : null,
                   synthesis_zh: secondaryLang === 'zh' ? secondaryText : null,
                   sources_json: plan.sourcesJson, model: TREND_BRIEF_MODEL, expires_at: plan.expiresAt,
@@ -888,18 +1176,18 @@ serve(async (req) => {
 
         // PATCH first — updates only changed fields on existing row, leaves other lang intact
         const patchRes = await fetch(
-          `${SUPABASE_URL}/rest/v1/trend_briefs?anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
+          `${SUPABASE_URL}/rest/v1/user_trend_briefs?user_id=eq.${auth.user.id}&anchor_date=eq.${anchor_date}&step_days=eq.${step_days}`,
           { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal,count=exact' }, body: JSON.stringify(writePayload) }
         )
         const updatedCount = parseInt(patchRes.headers.get('content-range')?.split('/')[1] ?? '0')
 
         // INSERT if no row existed
         if (updatedCount === 0) {
-          await fetch(`${SUPABASE_URL}/rest/v1/trend_briefs`, {
+          await fetch(`${SUPABASE_URL}/rest/v1/user_trend_briefs`, {
             method: 'POST',
             headers: { ...sbHeaders, 'Prefer': 'resolution=ignore-duplicates' },
             body: JSON.stringify({
-              anchor_date, step_days, date_range: plan.dateRangeLabel,
+              user_id: auth.user.id, anchor_date, step_days, date_range: plan.dateRangeLabel,
               synthesis_en: resolvedLang === 'en' ? synthesisAccum : (secondaryText ?? null),
               synthesis_zh: resolvedLang === 'zh' ? synthesisAccum : (secondaryText ?? null),
               sources_json: plan.sourcesJson,

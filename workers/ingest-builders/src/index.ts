@@ -463,7 +463,7 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env) {
     // 1. Get source rows for both builder tweets and podcasts (1 subrequest)
     const sourcesRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(github_feed,podcast,github_trending,producthunt,nowcoder,arxiv,reddit,aihot)&select=id,name,source_type,metadata`,
+      `${env.SUPABASE_URL}/rest/v1/sources?is_active=eq.true&source_type=in.(github_feed,podcast,github_trending,producthunt,nowcoder,arxiv,aihot)&select=id,name,source_type,metadata`,
       { headers: SB(env) }
     )
     const sources: { id: string; name: string; source_type: string; metadata?: Record<string, unknown> }[] = await sourcesRes.json()
@@ -474,7 +474,6 @@ export default {
     const productHuntSource    = sources.find(s => s.source_type === 'producthunt')
     const nowcoderSource       = sources.find(s => s.source_type === 'nowcoder')
     const arxivSources         = sources.filter(s => s.source_type === 'arxiv')
-    const redditSources        = sources.filter(s => s.source_type === 'reddit')
     const aihotSource          = sources.find(s => s.source_type === 'aihot')
 
     // ── Builder tweets ──────────────────────────────────────────────────────
@@ -761,47 +760,6 @@ export default {
         newRows.push({ source_id: src.id, url, raw_content, status: 'pending', metadata: { category }, published_at })
       }
       console.log(`arXiv ${category}: ${newRows.length - countBefore} papers queued`)
-    }
-
-    // ── Reddit — public JSON API, one call per subreddit ─────────────────────
-    // UA must include a real user handle per Reddit's API guidelines —
-    // a generic UA gets rate-limited (429) or blocked (403). /u/huiq777 is the
-    // user's actual Reddit handle.
-    // top.json?t=day gives the day's most upvoted posts (signal-rich) instead of
-    // hot.json's recency-biased mix. selftext is the full post body for text
-    // posts; link posts (is_self=false) only carry a title.
-    for (const src of redditSources) {
-      const subreddit = src.name.replace('Reddit r/', '')
-      const rdRes = await fetch(
-        `https://www.reddit.com/r/${subreddit}/top.json?t=day&limit=25`,
-        { headers: { 'User-Agent': 'web:NewsProject:v1.0 (by /u/huiq777)' } }
-      )
-      if (!rdRes.ok) {
-        console.error(`Reddit r/${subreddit} fetch failed: ${rdRes.status}`)
-        continue
-      }
-      const rdData = await rdRes.json() as {
-        data?: { children?: { data: { title: string; url: string; permalink: string; score: number; num_comments: number; is_self: boolean; selftext?: string; subreddit: string; created_utc: number } }[] }
-      }
-      const posts = rdData?.data?.children ?? []
-      const countBefore = newRows.length
-      for (const { data: post } of posts) {
-        if (!post.title) continue
-        const url = post.is_self
-          ? `https://reddit.com${post.permalink}`
-          : post.url
-        const titleLine = `r/${post.subreddit}: ${post.title}`
-        const bodyLine  = post.is_self && post.selftext ? `\n\n${post.selftext}` : ''
-        newRows.push({
-          source_id: src.id,
-          url,
-          raw_content: titleLine + bodyLine,
-          status: 'pending',
-          metadata: { score: post.score, num_comments: post.num_comments, subreddit: post.subreddit },
-          published_at: new Date(post.created_utc * 1000).toISOString(),
-        })
-      }
-      console.log(`Reddit r/${subreddit}: ${newRows.length - countBefore} posts queued`)
     }
 
     // ── AIHot ───────────────────────────────────────────────────────────────────

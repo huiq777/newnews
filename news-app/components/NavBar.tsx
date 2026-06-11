@@ -1,25 +1,65 @@
 import { useEffect, useRef, useState } from 'react'
-import { Animated, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
-import { Category } from '../lib/config'
+import { Animated, Linking, Pressable, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { AuthStatus } from '../lib/auth'
+import { Category, GITHUB_REPO_URL, GITHUB_STARS_LABEL } from '../lib/config'
 import { colors, typography, spacing } from '../theme/tokens'
+import LoginActionButton from './LoginActionButton'
+import WebHTML from './WebHTML'
 import WhatsNewPopover from './WhatsNewPopover'
+
+function parseGithubRepo(url: string): { owner: string; repo: string } | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname !== 'github.com' && parsed.hostname !== 'www.github.com') return null
+    const [owner, rawRepo] = parsed.pathname.split('/').filter(Boolean)
+    if (!owner || !rawRepo) return null
+    return { owner, repo: rawRepo.replace(/\.git$/, '') }
+  } catch {
+    return null
+  }
+}
+
+function formatStars(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`
+  if (count >= 1000) return `${(count / 1000).toFixed(1)}K`
+  return String(count)
+}
 
 export default function NavBar({
   lang,
   activeCategory,
   onLangChange,
   onCategoryChange,
+  authStatus,
+  authDisplayName,
+  authError,
+  onLoginPress,
+  onSignOut,
 }: {
   lang: 'en' | 'zh'
   activeCategory: Category
   onLangChange: (l: 'en' | 'zh') => void
   onCategoryChange: (cat: Category) => void
+  authStatus: AuthStatus
+  authDisplayName: string | null
+  authError: string | null
+  onLoginPress: () => void
+  onSignOut: () => void
 }) {
   const langAnim = useRef(new Animated.Value(0)).current
   const langVisAnim = useRef(new Animated.Value(1)).current
   const langVisible = useRef(true)
   const [whatsNewOpen, setWhatsNewOpen] = useState(false)
   const [whatsNewHovered, setWhatsNewHovered] = useState(false)
+  const [githubHovered, setGithubHovered] = useState(false)
+  const [githubStarsLabel, setGithubStarsLabel] = useState(
+    GITHUB_STARS_LABEL === 'Star' ? '...' : GITHUB_STARS_LABEL,
+  )
+  const [signOutHovered, setSignOutHovered] = useState(false)
+
+  const openGithub = () => {
+    void Linking.openURL(GITHUB_REPO_URL)
+  }
 
   useEffect(() => {
     Animated.spring(langAnim, {
@@ -29,6 +69,24 @@ export default function NavBar({
       friction: 30,
     }).start()
   }, [lang])
+
+  useEffect(() => {
+    const repo = parseGithubRepo(GITHUB_REPO_URL)
+    if (!repo) return
+    const controller = new AbortController()
+    fetch(`https://api.github.com/repos/${repo.owner}/${repo.repo}`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/vnd.github+json' },
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then((json: { stargazers_count?: number } | null) => {
+        if (typeof json?.stargazers_count === 'number') {
+          setGithubStarsLabel(formatStars(json.stargazers_count))
+        }
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
 
   // Close popover on outside interaction (wheel, touch, click)
   // We use capture phase so we can detect the event before it reaches React,
@@ -103,7 +161,37 @@ function onNavLayout(e: any) {
       </View>
       <Animated.View style={[styles.navLangCol, { opacity: langVisAnim }]}
         pointerEvents={langVisible.current ? 'auto' : 'none'}>
-        {/* What's New button — popover rendered at nav root to avoid stacking context issues */}
+        {authStatus !== 'authed' ? (
+          <LoginActionButton label="Login" compact onPress={onLoginPress} />
+        ) : (
+          <Pressable
+            nativeID="logout-btn"
+            accessibilityRole="button"
+            accessibilityLabel={`Sign out${authDisplayName ? ` ${authDisplayName}` : ''}`}
+            onPress={onSignOut}
+            onHoverIn={() => setSignOutHovered(true)}
+            onHoverOut={() => setSignOutHovered(false)}
+            style={[styles.loginBtn, signOutHovered && styles.whatsNewBtnHovered]}
+          >
+            <Text style={styles.loginBtnText}>Sign out</Text>
+          </Pressable>
+        )}
+        {!!authError && authStatus === 'auth_error' && (
+          <Text style={styles.authErrorText} numberOfLines={1}>{authError}</Text>
+        )}
+        <Pressable
+          nativeID="github-repo-btn"
+          accessibilityRole="link"
+          accessibilityLabel="Open GitHub repository"
+          onPress={openGithub}
+          onHoverIn={() => setGithubHovered(true)}
+          onHoverOut={() => setGithubHovered(false)}
+          style={[styles.githubBtn, githubHovered && styles.whatsNewBtnHovered]}
+        >
+          <WebHTML html={'<i class="fa-brands fa-github" style="font-size: 14px;"></i>'} />
+          <Text style={styles.githubStarsText}>{githubStarsLabel}</Text>
+          <WebHTML html={'<i class="fa-solid fa-star" style="color: rgb(255, 203, 44); font-size: 11px;"></i>'} />
+        </Pressable>
         <View style={styles.whatsNewWrap}>
           <Pressable
             nativeID="whats-new-btn"
@@ -169,6 +257,45 @@ const styles = StyleSheet.create({
     height: 2, backgroundColor: colors.text.primary,
   },
   navLangCol: { paddingHorizontal: spacing[8], flexDirection: 'row', alignItems: 'center', gap: spacing[2] },
+  loginBtn: {
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border.default,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+    paddingHorizontal: spacing[2],
+  },
+  loginBtnText: {
+    fontSize: typography.size.sm,
+    color: colors.text.secondary,
+    fontFamily: typography.family.body,
+    fontWeight: typography.weight.bold,
+  },
+  authErrorText: {
+    maxWidth: 120,
+    fontSize: typography.size.sm,
+    color: '#A33A2B',
+  },
+  githubBtn: {
+    minHeight: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border.default,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing[1],
+    backgroundColor: 'transparent',
+    paddingHorizontal: spacing[2],
+  },
+  githubStarsText: {
+    fontSize: typography.size.sm,
+    color: colors.text.secondary,
+    fontFamily: typography.family.body,
+    fontWeight: typography.weight.bold,
+  },
   whatsNewWrap: { position: 'relative' },
   whatsNewBtn: {
     width: 28, height: 28, borderRadius: 999,
