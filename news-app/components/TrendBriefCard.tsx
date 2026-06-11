@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Pressable, StyleSheet, Text, TouchableOpacity, View, Platform } from 'react-native'
 import { colors, typography, spacing } from '../theme/tokens'
-import { BriefSource, BriefState, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/config'
+import { BriefSource, BriefState, SUPABASE_URL, supabase } from '../lib/config'
 import WebHTML from './WebHTML'
 import TrendBriefFeedback from './TrendBriefFeedback'
+import LoginRequiredInline from './LoginRequiredInline'
 
 const isWeb = Platform.OS === 'web'
 const userAgent = isWeb ? navigator.userAgent : ''
@@ -54,12 +55,16 @@ export default function TrendBriefCard({
   stepDays,
   hasArticles,
   onOpenManual,
+  isAuthed,
+  onLoginPress,
 }: {
   lang: 'en' | 'zh'
   dateRange: { start: Date; end: Date } | null
   stepDays: number
   hasArticles: boolean
   onOpenManual: () => void
+  isAuthed: boolean
+  onLoginPress: () => void
 }) {
   const [briefState, setBriefState] = useState<BriefState>('idle')
   const [generateHovered, setGenerateHovered] = useState(false)
@@ -73,6 +78,11 @@ export default function TrendBriefCard({
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const abortRef = useRef<AbortController | null>(null)
   const startTimeRef = useRef<number>(0)
+
+  async function getAccessToken(): Promise<string | null> {
+    const { data: { session } } = await supabase.auth.getSession()
+    return session?.access_token ?? null
+  }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function fmtAge(iso: string): string {
@@ -121,6 +131,7 @@ export default function TrendBriefCard({
 
   // ── Generate ───────────────────────────────────────────────────────────────
   async function generate(forceRefresh = false) {
+    if (!isAuthed) return
     if (!dateRange) return
     abortRef.current?.abort()
     const ctrl = new AbortController()
@@ -136,6 +147,12 @@ export default function TrendBriefCard({
     const anchorDate = anchor.toISOString().slice(0, 10)
 
     try {
+      const accessToken = await getAccessToken()
+      if (!accessToken) {
+        onLoginPress()
+        setBriefState('idle_ready')
+        return
+      }
       const res = await fetch(
         `${SUPABASE_URL}/functions/v1/generate-trend-brief`,
         {
@@ -143,7 +160,7 @@ export default function TrendBriefCard({
           signal: ctrl.signal,
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Authorization': `Bearer ${accessToken}`,
           },
           body: JSON.stringify({
             category: 'all',
@@ -181,7 +198,6 @@ export default function TrendBriefCard({
             const now = new Date().toISOString()
             setGeneratedAt(prev => prev ?? now)
             setBriefState('loaded')
-            void fetchFullBriefRow(anchorDate, ctrl.signal).then(row => { if (row) setCachedRow(row) })
             break
           }
           try {
@@ -190,8 +206,14 @@ export default function TrendBriefCard({
               setSynthesis(msg.synthesis)
               setSourcesJson(msg.sources_json)
               setGeneratedAt(msg.generated_at)
+              setCachedRow({
+                id: msg.id ?? `${anchorDate}-${stepDays}`,
+                synthesis_en: msg.synthesis_en ?? (lang === 'en' ? msg.synthesis : null),
+                synthesis_zh: msg.synthesis_zh ?? (lang === 'zh' ? msg.synthesis : null),
+                sources_json: msg.sources_json,
+                generated_at: msg.generated_at,
+              })
               setBriefState('loaded')
-              void fetchFullBriefRow(anchorDate, ctrl.signal).then(row => { if (row) setCachedRow(row) })
             } else if (msg.type === 'sources') {
               setSourcesJson(msg.sources_json)
             } else if (msg.type === 'content') {
@@ -209,6 +231,7 @@ export default function TrendBriefCard({
 
   // ── Show Cached ────────────────────────────────────────────────────────────
   async function showCached() {
+    if (!isAuthed) return
     if (!dateRange) return
     abortRef.current?.abort()
     const ctrl = new AbortController()
@@ -223,45 +246,13 @@ export default function TrendBriefCard({
     anchor.setDate(anchor.getDate() - 1)
     const anchorDate = anchor.toISOString().slice(0, 10)
 
-    const row = await fetchFullBriefRow(anchorDate, ctrl.signal)
-    if (ctrl.signal.aborted) return
-    if (!row) { setBriefState('idle_ready'); return }
-
-    const text = row[lang === 'en' ? 'synthesis_en' : 'synthesis_zh'] ?? null
-    if (text) {
-      setCachedRow(row)
-      setSynthesis(text)
-      setSourcesJson(row.sources_json ?? [])
-      setGeneratedAt(row.generated_at)
-      setBriefState('loaded')
-    } else {
-      setBriefState('idle_ready')
-    }
-  }
-
-  // ── Fetch Full Brief Row (shared by showCached + generate hydration) ────────
-  async function fetchFullBriefRow(anchorDate: string, signal: AbortSignal): Promise<CachedBriefRow | null> {
-    try {
-      const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/trend_briefs` +
-        `?anchor_date=eq.${anchorDate}` +
-        `&step_days=eq.${stepDays}` +
-        `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
-        `&select=id,synthesis_en,synthesis_zh,sources_json,generated_at` +
-        `&order=generated_at.desc&limit=1`,
-        { signal, headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
-      )
-      if (!res.ok) return null
-      const rows: CachedBriefRow[] = await res.json()
-      return rows[0] ?? null
-    } catch {
-      return null
-    }
+    await generate(false)
   }
 
   // ── Effect A: window/articles change → lightweight existence check ─────────
   useEffect(() => {
     abortRef.current?.abort()
+    if (!isAuthed) return
     if (!hasArticles || !dateRange) {
       setBriefState('idle')
       return
@@ -272,37 +263,8 @@ export default function TrendBriefCard({
     setSourcesExpanded(false)
     setCachedRow(null)
 
-    const ctrl = new AbortController()
-    abortRef.current = ctrl
-
-    const anchor = new Date(dateRange.end)
-    anchor.setDate(anchor.getDate() - 1)
-    const anchorDate = anchor.toISOString().slice(0, 10)
-
-    ;(async () => {
-      try {
-        const res = await fetch(
-          `${SUPABASE_URL}/rest/v1/trend_briefs` +
-          `?anchor_date=eq.${anchorDate}` +
-          `&step_days=eq.${stepDays}` +
-          `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
-          `&select=id&limit=1`,
-          { signal: ctrl.signal, headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
-        )
-        if (ctrl.signal.aborted) return
-        if (res.ok) {
-          const rows = await res.json()
-          setBriefState(rows.length > 0 ? 'idle_cached' : 'idle_ready')
-        } else {
-          setBriefState('idle_ready')
-        }
-      } catch {
-        if (!ctrl.signal.aborted) setBriefState('idle_ready')
-      }
-    })()
-
-    return () => { ctrl.abort() }
-  }, [dateRange, stepDays, hasArticles]) // eslint-disable-line react-hooks/exhaustive-deps
+    setBriefState('idle_ready')
+  }, [dateRange, stepDays, hasArticles, isAuthed]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Effect B: lang toggle → memory-first, DB fallback ─────────────────────
   useEffect(() => {
@@ -321,54 +283,9 @@ export default function TrendBriefCard({
         setBriefState('loaded')
         return
       }
-      // Target lang missing in cache — fall through to DB (it may have it now)
+      setBriefState('idle_ready')
+      return
     }
-
-    // Slow path: DB query
-    const anchor = new Date(dateRange.end)
-    anchor.setDate(anchor.getDate() - 1)
-    const anchorDate = anchor.toISOString().slice(0, 10)
-    const ctrl = new AbortController()
-
-    ;(async () => {
-      try {
-        const res = await fetch(
-          `${SUPABASE_URL}/rest/v1/trend_briefs` +
-          `?anchor_date=eq.${anchorDate}` +
-          `&step_days=eq.${stepDays}` +
-          `&expires_at=gt.${encodeURIComponent(new Date().toISOString())}` +
-          `&select=id,synthesis_en,synthesis_zh,sources_json,generated_at` +
-          `&order=generated_at.desc&limit=1`,
-          {
-            signal: ctrl.signal,
-            headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-          }
-        )
-        if (!res.ok) { setBriefState('idle_ready'); return }
-
-        const rows: CachedBriefRow[] = await res.json()
-        const row = rows[0]
-        const text = row?.[lang === 'en' ? 'synthesis_en' : 'synthesis_zh'] ?? null
-
-        if (text) {
-          setCachedRow(row)
-          setSynthesis(text)
-          setSourcesJson(row.sources_json ?? [])
-          setGeneratedAt(row.generated_at)
-          setBriefState('loaded')
-        } else {
-          setSynthesis('')
-          setSourcesJson([])
-          setGeneratedAt(null)
-          setBriefState('idle_ready')
-        }
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') return
-        setBriefState('idle_ready')
-      }
-    })()
-
-    return () => ctrl.abort()
   }, [lang]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Timer: monotonic clock across loading→streaming transition ────────────
@@ -385,7 +302,7 @@ export default function TrendBriefCard({
   }, [briefState])
 
   // ── Don't render if no articles or initial idle ────────────────────────────
-  if (!hasArticles || briefState === 'idle') return null
+  if (!hasArticles) return null
 
   // ── Window label ───────────────────────────────────────────────────────────
   const windowLabel = (() => {
@@ -430,6 +347,25 @@ export default function TrendBriefCard({
       </Text>
     </Pressable>
   )
+
+  if (!isAuthed) {
+    return (
+      <View style={styles.briefCard}>
+        <View style={styles.titleCronCol}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.briefHeaderText, styles.briefHeaderTextInline]}>{headerLabel}</Text>
+            {renderHelpButton('left')}
+          </View>
+          <Text style={[styles.briefCronLabel, getCronLabelStyle(lang)]}>{cronTimeLabel(lang)}</Text>
+        </View>
+        <LoginRequiredInline
+          message={lang === 'en' ? 'Please log in to view Trend Brief.' : '请登录查看趋势简报。'}
+          onLoginPress={onLoginPress}
+        />
+      </View>
+    )
+  }
+  if (briefState === 'idle') return null
 
   // ── idle_cached — cached brief exists, not yet revealed ───────────────────
   // Layout: a content-sized column wraps the title + cron label; the column's

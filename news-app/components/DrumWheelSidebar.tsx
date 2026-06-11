@@ -190,11 +190,12 @@ export default function DrumWheelSidebar({
       track = document.createElement('div')
       track.className = 'wheel-track'
       track.style.cssText = 'position:absolute;top:0;right:0;bottom:0;left:0;scrollbar-width:none;-ms-overflow-style:none;overflow-y:scroll;'
-      wrapDom.appendChild(track)
+      const currentTrack = track
+      wrapDom.appendChild(currentTrack)
 
       const padTop = document.createElement('div')
       padTop.style.height = PAD_H + 'px'
-      track.appendChild(padTop)
+      currentTrack.appendChild(padTop)
 
       anchors.forEach((_, i) => {
         const el = document.createElement('div')
@@ -202,16 +203,16 @@ export default function DrumWheelSidebar({
         el.dataset.idx = String(i)
         el.innerHTML = itemInnerHTML(i)
         el.addEventListener('click', () => snapToIdx(i))
-        track.appendChild(el)
+        currentTrack.appendChild(el)
       })
 
       const padBot = document.createElement('div')
       padBot.style.height = PAD_H + 'px'
-      track.appendChild(padBot)
+      currentTrack.appendChild(padBot)
 
       wrapDom.style.height = (ITEM_H * 5) + 'px'
-      track.scrollTop = activeIdx * ITEM_H
-      track.addEventListener('scroll', onWheelScroll)
+      currentTrack.scrollTop = activeIdx * ITEM_H
+      currentTrack.addEventListener('scroll', onWheelScroll)
       updateFilterTag()
     }
 
@@ -271,14 +272,15 @@ export default function DrumWheelSidebar({
     function scrollToAnimated(targetTop: number) {
       if (!track || Math.abs(track.scrollTop - targetTop) < 1) return
       if (scrollAnimId) cancelAnimationFrame(scrollAnimId)
+      const currentTrack = track
 
       const startT = performance.now()
-      const startY = track.scrollTop
+      const startY = currentTrack.scrollTop
       const dist = targetTop - startY
 
       // Distance-based duration mimicking native physics (min 400ms, max 800ms)
       const duration = Math.max(400, Math.min(800, Math.abs(dist) * 0.8))
-      track.style.scrollSnapType = 'none'
+      currentTrack.style.scrollSnapType = 'none'
 
       function step(now: number) {
         const elapsed = Math.max(0, now - startT)
@@ -289,14 +291,14 @@ export default function DrumWheelSidebar({
           ? 4 * progress * progress * progress
           : 1 - Math.pow(-2 * progress + 2, 3) / 2
 
-        track.scrollTop = startY + dist * ease
+        currentTrack.scrollTop = startY + dist * ease
 
         if (progress < 1) {
           scrollAnimId = requestAnimationFrame(step)
         } else {
-          track.style.scrollSnapType = 'y mandatory'
+          currentTrack.style.scrollSnapType = 'y mandatory'
           scrollAnimId = null
-          track.scrollTop = targetTop
+          currentTrack.scrollTop = targetTop
         }
       }
 
@@ -313,6 +315,7 @@ export default function DrumWheelSidebar({
       scrollTimer = setTimeout(() => {
         if (rafId) { cancelAnimationFrame(rafId); rafId = null }
         wrapDom.classList.remove('is-scrolling')
+        if (!track) return
         const idx = Math.round(track.scrollTop / ITEM_H)
         activeIdx = Math.max(0, Math.min(idx, anchors.length - 1))
         stateRef.current.activeIdx = activeIdx

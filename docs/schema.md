@@ -1,6 +1,6 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-05-11. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-06-03. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
@@ -9,7 +9,8 @@ The schema is organized into four layers:
 - **Ingestion layer** (`sources`, `raw_ingestion`) — managed exclusively by Cloudflare Workers. Never written to by the frontend client.
 - **Product layer** (`daily_news`) — read by the frontend, written by Cloudflare Workers and Supabase Edge Functions via the service role.
 - **Cache layer** (`trend_briefs`) — written by the `generate-trend-brief` Edge Function; read directly by the frontend via anon key. TTL-based invalidation.
-- **Observability layer** (`pipeline_events`, `qa_logs`) — service-role only. `pipeline_events` traces every article through the pipeline; `qa_logs` traces every Q&A request.
+- **Observability layer** (`pipeline_events`, `qa_logs`, `rag_retrieval_*`) — service-role only. `pipeline_events` traces every article through the pipeline; `qa_logs` traces every Q&A request; `rag_retrieval_*` records retriever inputs, ranked candidates, scores, drop reasons, and injected prompt context.
+- **RAG eval layer** (`rag_eval_*`, `article_chunks`) — service-role/admin analysis only. Golden dataset labels, offline replay results, aggregate retrieval metrics, and eval-only chunk retrieval scaffolding. Production retrieval does not read `article_chunks` yet.
 - **Auth layer** (`beta_invites` + `is_beta_user()` helper) — service-role only. The `redeem-invite` Edge Function writes; the helper function is referenced indirectly from RLS policies of future user-scoped tables (e.g. `qa_logs`).
 - **User feedback layer** (`trend_brief_feedback`) — per-user brief ratings.
 - **Email layer** (`email_subscribers`, `email_digest_sent`) — digest opt-in and delivery accounting.
@@ -48,7 +49,36 @@ Statuses: `ok` | `skip` | `error`
 ### `qa_logs`
 Full Q&A trace per `answer-question` invocation. Written by `orchestrateAnswer()` on completion or abort. `request_id` UUID is generated at entry and appears in every structured log line for that request. User feedback (👍 = 1, 👎 = -1) is written back by the `AnswerFeedback` component.
 
-Key columns: `request_id UUID`, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids UUID[]`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`.
+Key columns: `request_id UUID`, `user_id`, `article_id`, `question`, `response_text`, `lang`, `deep_think`, `related_article_ids UUID[]`, `context_main_chars`, `total_tokens`, `ttft_ms`, `total_ms`, `aborted`, `feedback` (-1/0/1), `error_message`, `asked_at`, `rag_retrieval_run_id`.
+
+### `rag_retrieval_runs`
+Service-role RAG trace header table. One row per retrieval surface invocation, including `answer_question_related_articles` and `trend_brief_historical_enrichment`. It records request identifiers, links back to `qa_logs` or trend brief keys, retriever input/version metadata, observed candidate/injected counts, context size/hash, and retrieval latency.
+
+This table is observability-only. Do not use it to drive production answer behavior.
+
+### `rag_retrieval_candidates`
+Ranked retrieval candidate audit rows linked to `rag_retrieval_runs`. Each row records rank, candidate type (`article`, `chunk`, `deep_analysis`), article/chunk/analysis ids, title/excerpt, dense/lexical/rerank/final scores, `embedding_source`, `injected`, `drop_reason`, and JSON metadata.
+
+For trace completeness, candidates should exist whenever the retriever returns candidates. Empty candidate sets are meaningful and should be investigated with the trace verification SQL.
+
+### `rag_injected_contexts`
+Prompt-context snapshots linked to `rag_retrieval_runs`. Records the exact context text sent to the model, source ids when available, `context_hash`, char count, role, ordinal, and metadata. These rows can contain internal prompt context, so RLS is enabled with no anon/authenticated policies.
+
+### `rag_eval_sets`, `rag_eval_cases`, `rag_eval_gold_evidence`
+Golden dataset v1 tables. `rag_eval_cases` stores fixed questions and their primary article. `rag_eval_gold_evidence` stores candidate article labels with `relevance_grade` and `review_status`.
+
+Important invariant: `review_status` is whether the human trusts the label, not whether the article is relevant. A correct grade `0` or `1` should be `approved`; use `rejected` only for an unusable/wrong label row. Official eval runs should use approved labels only.
+
+### `rag_eval_runs`, `rag_eval_case_results`, `rag_eval_retrieval_metrics`
+Offline replay result tables. `rag_eval_runs` records runner/version/retrieval strategy. `rag_eval_case_results` stores per-case Recall/MRR/NDCG/latency and the linked `rag_retrieval_run_id`. `rag_eval_retrieval_metrics` stores aggregate metrics such as Recall@3/5/10, MRR, NDCG@10, Hit@5, p50, and p95.
+
+Current replay strategies are eval-only:
+- `dense`: production-like article-level dense retrieval.
+- `lexical`: eval-only lexical article retrieval through `match_articles_lexical_eval`.
+- `hybrid`: eval-only dense + lexical reciprocal-rank fusion.
+
+### `article_chunks`
+Eval-only chunk retrieval scaffold. Stores chunk text, hash, chunking version/params, source offsets, embedding vector, and embedding model metadata. The early scaffold was Cohere-compatible; the current eval track backfills and gates chunk coverage with `@cf/baai/bge-m3`. The current production `answer-question` function does not read this table; chunk retrieval needs a later metric-gated production plan.
 
 ### `trend_brief_feedback`
 Per-user thumbs up/down on trend briefs. Keyed on `(user_id, anchor_date, step_days)` — the time window, not the specific brief row — so a user's vote persists even after a force-refresh generates a new `trend_briefs` row. The `TrendBriefFeedback` component upserts on vote, deletes on toggle-off. RLS: authenticated users read and write only their own rows.

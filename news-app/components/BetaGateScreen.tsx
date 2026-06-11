@@ -3,11 +3,19 @@
 
 import { useMemo } from 'react'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
-import type { GateStatus, RedeemError } from '../lib/auth'
 import { getDeviceLang } from '../lib/config'
 import { colors, typography, spacing } from '../theme/tokens'
 
 type Lang = 'en' | 'zh'
+type GateStatus =
+  | 'checking'
+  | 'redeeming'
+  | 'gated'
+  | 'desktop_required_no_invite'
+  | 'desktop_required_with_invite'
+  | 'redeem_failed'
+  | 'authed'
+type RedeemError = 'invalid' | 'used' | 'expired' | 'network' | null
 
 type Strings = {
   brand: string

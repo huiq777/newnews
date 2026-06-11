@@ -9,7 +9,7 @@ Supabase Edge Functions serve as the secure bridge between the frontend and AI p
 ## `answer-question` — Inline RAG Q&A
 
 ### Purpose
-Takes a user's question about a specific article, embeds the question with Cohere, finds related articles via `match_articles` RPC, and streams the answer back. Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Every call writes a `qa_logs` row with full trace (`request_id`, timing, tokens, abort flag) and accepts user 👍/👎 feedback written back by the `AnswerFeedback` component.
+Takes a user's question about a specific article, embeds the question with Cohere, finds related articles via `match_articles_prefer_analysis` RPC, and streams the answer back. Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Every call writes a `qa_logs` row and a linked RAG trace (`rag_retrieval_runs`, candidate rows when available, injected-context rows) with `request_id`, timings, tokens, abort flag, retriever inputs, ranked candidates/scores, and exact prompt context. User 👍/👎 feedback is written back by the `AnswerFeedback` component.
 
 ### Request
 
@@ -47,11 +47,16 @@ data: [DONE]
 ```
 1. route()    — resolve article, check cache, select LLM model (deep_think vs default)
 2. retrieve() — Cohere embed question (input_type='search_query' ← ASYMMETRIC, load-bearing)
-               → match_articles(query_embedding, match_count=4) → top 3 related (excluding primary)
+               → match_articles_prefer_analysis(query_embedding, match_count=4) → top 3 related (excluding primary)
+               → write trace rows for retriever input, candidates, scores, and injected context
 3. generate() — TokenRouter streaming SSE (primary → OpenRouter → Groq fallback)
                — deep_think: stream type:thinking chunks before type:content
-4. orchestrateAnswer() — wire abort propagation, persist qa_logs row with request_id + timing
+4. orchestrateAnswer() — wire abort propagation, persist qa_logs row with request_id + timing + rag_retrieval_run_id
 ```
+
+### Retrieval Behavior Guardrail
+
+The 2026-05-31 trace completeness work did not change retrieval or model behavior. Production `answer-question` still uses article-level dense `match_articles_prefer_analysis`, preferring ready Deep Analysis vectors and falling back to article embeddings. Dense/lexical/hybrid/chunk experiments live in offline eval scripts only until a later metric-gated production plan.
 
 ### Required Secrets
 - `TOKENROUTER_API_KEY`

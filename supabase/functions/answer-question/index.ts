@@ -12,6 +12,11 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import {
+  requireAuthenticatedUser,
+  requireRateLimit,
+  securityOptions,
+} from '../_shared/security.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,13 +40,22 @@ function combineSignals(...signals: AbortSignal[]): AbortSignal {
 
 type RouteDecision =
   | { action: 'serve_cache'; cachedText: string; cachedFeedback: number | null; qaLogId: string }
-  | { action: 'generate'; userId: string | null; articleId: string; question: string; lang: string; article: { title: string; summary_en: string | null; summary_zh: string | null; article_content: string | null }; deepThink: boolean; forceRefresh: boolean }
+  | { action: 'generate'; userId: string | null; articleId: string; question: string; lang: string; article: { title: string; summary_en: string | null; summary_zh: string | null; article_content: string | null; questions: { en?: string[]; zh?: string[] } | null }; deepThink: boolean; forceRefresh: boolean }
 
 type RetrievalContext = {
   mainContext: string
   relatedContext: string
   injectedRelatedIds: string[]
+  retrievalRunId: string | null
   ragSuccess: boolean
+}
+
+type RelatedArticleCandidate = {
+  id: string
+  title: string
+  summary: string
+  score?: number | null
+  embedding_source?: string | null
 }
 
 async function route(
@@ -89,10 +103,10 @@ async function route(
   // Fetch article
   const sbHeaders = { 'apikey': env.serviceKey, 'Authorization': `Bearer ${env.serviceKey}`, 'Content-Type': 'application/json' }
   const artRes = await fetch(
-    `${env.supabaseUrl}/rest/v1/daily_news?id=eq.${params.articleId}&select=title,summary_en,summary_zh,article_content&limit=1`,
+    `${env.supabaseUrl}/rest/v1/daily_news?id=eq.${params.articleId}&select=title,summary_en,summary_zh,article_content,questions&limit=1`,
     { headers: sbHeaders }
   )
-  const rows: { title: string; summary_en: string | null; summary_zh: string | null; article_content: string | null }[] = artRes.ok ? await artRes.json() : []
+  const rows: { title: string; summary_en: string | null; summary_zh: string | null; article_content: string | null; questions: { en?: string[]; zh?: string[] } | null }[] = artRes.ok ? await artRes.json() : []
   const article = rows[0]
   if (!article) throw new Error(`Article ${params.articleId} not found`)
 
@@ -108,26 +122,190 @@ async function route(
   }
 }
 
+function formatDeepAnalysisForPrompt(analysis: any, lang: string): string {
+  if (!analysis || typeof analysis !== 'object') return ''
+  const block = lang === 'zh' ? analysis.zh : analysis.en
+  if (!block || typeof block !== 'object') return ''
+
+  const facts = Array.isArray(block.facts)
+    ? block.facts.map((f: any, i: number) => {
+        const text = typeof f?.text === 'string' ? f.text : ''
+        const evidence = typeof f?.evidence === 'string' ? f.evidence : ''
+        return text ? `${i + 1}. ${text}${evidence ? ` (${evidence})` : ''}` : ''
+      }).filter(Boolean).join('\n')
+    : ''
+  const limitations = Array.isArray(block.limitations_or_uncertainties)
+    ? block.limitations_or_uncertainties.map((x: unknown, i: number) => `${i + 1}. ${String(x)}`).join('\n')
+    : ''
+
+  const label = lang === 'zh' ? '深度分析' : 'Deep Analysis'
+  const why = lang === 'zh' ? '为什么重要' : 'Why it matters'
+  const interp = lang === 'zh' ? '更深层解读' : 'Deeper interpretation'
+  const caveats = lang === 'zh' ? '限制与不确定性' : 'Limitations and uncertainties'
+
+  return `[${label}]\nFacts:\n${facts}\n\n${why}:\n${block.why_it_matters || ''}\n\n${interp}:\n${block.deeper_interpretation || ''}\n\n${caveats}:\n${limitations}`
+}
+
+function formatCompactContext(article: { summary_en: string | null; summary_zh: string | null; questions: { en?: string[]; zh?: string[] } | null }, lang: string): string {
+  const summary = lang === 'zh' ? article.summary_zh : article.summary_en
+  const questions = lang === 'zh' ? article.questions?.zh : article.questions?.en
+  const qText = Array.isArray(questions) && questions.length > 0
+    ? questions.map((q, i) => `${i + 1}. ${q}`).join('\n')
+    : ''
+  return `[Compact summary]\n${summary || ''}${qText ? `\n\n[Reader questions]\n${qText}` : ''}`
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+async function recordAnswerQuestionTrace(params: {
+  supabaseUrl: string
+  serviceKey: string
+  requestId: string
+  articleId: string
+  question: string
+  lang: string
+  candidates: RelatedArticleCandidate[]
+  injectedRelatedIds: string[]
+  mainContext: string
+  relatedContext: string
+  matchCount: number
+  latencyMs: number
+}): Promise<string | null> {
+  try {
+    const sbService = createClient(params.supabaseUrl, params.serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+    const injectedIds = new Set(params.injectedRelatedIds)
+    const promptContext = `${params.mainContext}${params.relatedContext}`
+    const { data: run, error: runError } = await sbService
+      .from('rag_retrieval_runs')
+      .insert({
+        surface: 'answer_question_related_articles',
+        request_id: params.requestId,
+        query_text: params.question,
+        query_input: {
+          article_id: params.articleId,
+          lang: params.lang,
+        },
+        query_embedding_model: 'embed-english-v3.0',
+        embedding_input_type: 'search_query',
+        retrieval_strategy: 'dense_article_similarity_prefer_deep_analysis',
+        retrieval_version: 'answer-question-related-v1-2026-05-31',
+        retriever_name: 'match_articles_prefer_analysis',
+        match_count: params.matchCount,
+        candidate_count: params.candidates.length,
+        injected_count: params.injectedRelatedIds.length,
+        context_total_chars: promptContext.length,
+        prompt_context_hash: await sha256Hex(promptContext),
+        latency_ms: params.latencyMs,
+      })
+      .select('id')
+      .single()
+
+    if (runError || !run?.id) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: params.requestId, event: 'rag_trace_run_insert_failed', error: runError?.message }))
+      return null
+    }
+
+    if (params.candidates.length > 0) {
+      const candidateRows = params.candidates.map((candidate, index) => {
+        const injected = injectedIds.has(candidate.id)
+        return {
+          retrieval_run_id: run.id,
+          rank: index + 1,
+          candidate_type: 'article',
+          article_id: candidate.id,
+          title: candidate.title,
+          summary_excerpt: (candidate.summary || '').slice(0, 1000),
+          score_dense: typeof candidate.score === 'number' ? candidate.score : null,
+          score_final: typeof candidate.score === 'number' ? candidate.score : null,
+          embedding_source: candidate.embedding_source ?? null,
+          injected,
+          drop_reason: injected ? null : candidate.id === params.articleId ? 'primary_article_excluded' : 'rank_beyond_context_cap',
+          metadata: { lang: params.lang },
+        }
+      })
+      const { error } = await sbService.from('rag_retrieval_candidates').insert(candidateRows)
+      if (error) {
+        console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: params.requestId, event: 'rag_trace_candidates_insert_failed', error: error.message }))
+      }
+    }
+
+    const contexts = [
+      {
+        retrieval_run_id: run.id,
+        ordinal: 1,
+        context_role: 'answer_question_main_context',
+        article_id: params.articleId,
+        context_text: params.mainContext,
+        context_hash: await sha256Hex(params.mainContext),
+        context_chars: params.mainContext.length,
+        metadata: { lang: params.lang },
+      },
+      ...(params.relatedContext ? [{
+        retrieval_run_id: run.id,
+        ordinal: 2,
+        context_role: 'answer_question_related_context',
+        context_text: params.relatedContext,
+        context_hash: await sha256Hex(params.relatedContext),
+        context_chars: params.relatedContext.length,
+        metadata: { lang: params.lang, related_article_ids: params.injectedRelatedIds },
+      }] : []),
+    ]
+    const { error: contextError } = await sbService.from('rag_injected_contexts').insert(contexts)
+    if (contextError) {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: params.requestId, event: 'rag_trace_contexts_insert_failed', error: contextError.message }))
+    }
+
+    return run.id
+  } catch (e) {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: params.requestId, event: 'rag_trace_insert_threw', error: (e as Error).message }))
+    return null
+  }
+}
+
 async function retrieve(
   articleId: string,
   question: string,
   lang: string,
-  article: { article_content: string | null; summary_en: string | null; summary_zh: string | null },
+  article: { article_content: string | null; summary_en: string | null; summary_zh: string | null; questions: { en?: string[]; zh?: string[] } | null },
   env: { supabaseUrl: string; serviceKey: string; cohereApiKey: string },
-  caps: { mainContextCap: number; relatedContextCap: number; maxRelated: number }
+  caps: { mainContextCap: number; relatedContextCap: number; maxRelated: number },
+  requestId: string
 ): Promise<RetrievalContext> {
   const sbHeaders = { 'apikey': env.serviceKey, 'Authorization': `Bearer ${env.serviceKey}`, 'Content-Type': 'application/json' }
+  const retrievalStart = Date.now()
 
   // Build main context
   const summary = lang === 'zh' ? article.summary_zh : article.summary_en
   const fullContent = article.article_content || summary || ''
-  const mainContext = fullContent.length > caps.mainContextCap
+  const rawContext = fullContent.length > caps.mainContextCap
     ? fullContent.slice(0, caps.mainContextCap)
     : fullContent
+
+  let deepAnalysisContext = ''
+  try {
+    const analysisRes = await fetch(
+      `${env.supabaseUrl}/rest/v1/article_deep_analysis?article_id=eq.${articleId}&status=eq.ready&select=analysis&limit=1`,
+      { headers: sbHeaders }
+    )
+    const rows: { analysis: unknown }[] = analysisRes.ok ? await analysisRes.json() : []
+    deepAnalysisContext = formatDeepAnalysisForPrompt(rows[0]?.analysis, lang)
+  } catch { /* best-effort context upgrade */ }
+
+  const contextParts = []
+  if (deepAnalysisContext) contextParts.push(deepAnalysisContext)
+  contextParts.push(formatCompactContext(article, lang))
+  contextParts.push(`[Raw article content]\n${rawContext}`)
+  const mainContext = contextParts.filter(Boolean).join('\n\n')
 
   // RAG
   let relatedContext = ''
   let injectedRelatedIds: string[] = []
+  let relatedCandidates: RelatedArticleCandidate[] = []
   let ragSuccess = false
   try {
     const cohereRes = await fetch('https://api.cohere.com/v1/embed', {
@@ -138,13 +316,14 @@ async function retrieve(
     if (cohereRes.ok) {
       const cohereData: { embeddings: number[][] } = await cohereRes.json()
       const queryEmbedding = cohereData.embeddings[0]
-      const rpcRes = await fetch(`${env.supabaseUrl}/rest/v1/rpc/match_articles`, {
+      const rpcRes = await fetch(`${env.supabaseUrl}/rest/v1/rpc/match_articles_prefer_analysis`, {
         method: 'POST',
         headers: sbHeaders,
         body: JSON.stringify({ query_embedding: queryEmbedding, match_count: caps.maxRelated + 1 }),
       })
       if (rpcRes.ok) {
-        const related: { id: string; title: string; summary: string }[] = await rpcRes.json()
+        const related: RelatedArticleCandidate[] = await rpcRes.json()
+        relatedCandidates = related
         const filtered = related.filter(r => r.id !== articleId).slice(0, caps.maxRelated)
         injectedRelatedIds = filtered.map(r => r.id)
         if (filtered.length > 0) {
@@ -155,11 +334,33 @@ async function retrieve(
           }).join('\n\n')
         }
         ragSuccess = true
+      } else {
+        console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'rag_rpc_failed', status: rpcRes.status, body: await rpcRes.text().catch(() => '') }))
       }
+    } else {
+      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'cohere_embed_failed', status: cohereRes.status, body: await cohereRes.text().catch(() => '') }))
     }
-  } catch { /* non-blocking */ }
+  } catch (e) {
+    console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'rag_retrieval_failed', error: (e as Error).message }))
+  }
 
-  return { mainContext, relatedContext, injectedRelatedIds, ragSuccess }
+  const retrievalLatencyMs = Date.now() - retrievalStart
+  const retrievalRunId = await recordAnswerQuestionTrace({
+    supabaseUrl: env.supabaseUrl,
+    serviceKey: env.serviceKey,
+    requestId,
+    articleId,
+    question,
+    lang,
+    candidates: relatedCandidates,
+    injectedRelatedIds,
+    mainContext,
+    relatedContext,
+    matchCount: caps.maxRelated + 1,
+    latencyMs: retrievalLatencyMs,
+  })
+
+  return { mainContext, relatedContext, injectedRelatedIds, retrievalRunId, ragSuccess }
 }
 
 async function generate(
@@ -201,12 +402,13 @@ async function generate(
       const sbService = createClient(env.supabaseUrl, env.serviceKey, {
         auth: { persistSession: false, autoRefreshToken: false },
       })
-      const { data, error } = await sbService.from('qa_logs').insert({
+      const qaLogPayload = {
         user_id: decision.userId,
         request_id: requestId,
         article_id: decision.articleId,
         question: decision.question,
         lang: decision.lang,
+        rag_retrieval_run_id: context.retrievalRunId,
         related_article_ids: context.injectedRelatedIds,
         context_main_chars: contextMainChars,
         context_related_chars: contextRelatedChars,
@@ -220,10 +422,21 @@ async function generate(
         total_ms: opts.aborted ? Date.now() - t0 : totalMs,
         aborted: opts.aborted,
         error_message: opts.errorMessage,
-      }).select('id').single()
+      }
+      let { data, error } = await sbService.from('qa_logs').insert(qaLogPayload).select('id').single()
+      if (error && context.retrievalRunId && error.message.includes('rag_retrieval_run_id')) {
+        const { rag_retrieval_run_id: _missingColumn, ...fallbackPayload } = qaLogPayload
+        ;({ data, error } = await sbService.from('qa_logs').insert(fallbackPayload).select('id').single())
+      }
       if (error) {
         log('qa_logs_insert_failed', { error: error.message })
         return null
+      }
+      if (data?.id && context.retrievalRunId) {
+        await sbService
+          .from('rag_retrieval_runs')
+          .update({ qa_log_id: data.id })
+          .eq('id', context.retrievalRunId)
       }
       return data?.id ?? null
     } catch (e) {
@@ -473,7 +686,8 @@ async function orchestrateAnswer(req: Request): Promise<Response> {
   const retrieval = await retrieve(
     decision.articleId, decision.question, decision.lang, decision.article,
     { supabaseUrl: SUPABASE_URL, serviceKey: SERVICE_KEY, cohereApiKey: COHERE_API_KEY },
-    { mainContextCap: MAIN_CONTEXT_CAP, relatedContextCap: RELATED_CONTEXT_CAP, maxRelated: MAX_RELATED }
+    { mainContextCap: MAIN_CONTEXT_CAP, relatedContextCap: RELATED_CONTEXT_CAP, maxRelated: MAX_RELATED },
+    requestId
   )
   log('retrieved', { rag_success: retrieval.ragSuccess, related_count: retrieval.injectedRelatedIds.length })
 
@@ -486,7 +700,24 @@ async function orchestrateAnswer(req: Request): Promise<Response> {
 }
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  if (req.method === 'OPTIONS') return securityOptions(req)
+  const auth = await requireAuthenticatedUser(req)
+  if (!auth.ok) return auth.response
+  const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+  const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const sbService = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  const rate = await requireRateLimit({
+    req,
+    serviceRoleClient: sbService,
+    userId: auth.user.id,
+    surface: 'answer-question',
+    limit: 60,
+    windowSeconds: 3600,
+  })
+  if (!rate.ok) return rate.response
+  // route(...) is reached inside orchestrateAnswer after auth_required/rate-limit checks.
   return orchestrateAnswer(req).catch(err => {
     console.error(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', event: 'unhandled_error', error: (err as Error).message }))
     return new Response('Internal error', { status: 500, headers: corsHeaders })

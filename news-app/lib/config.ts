@@ -2,10 +2,6 @@ import { createClient } from '@supabase/supabase-js'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { Platform } from 'react-native'
 
-// Web auto-uses localStorage; native uses AsyncStorage. detectSessionInUrl
-// is OFF — Round 1 has no email magic-link flow, and we parse `?invite=`
-// ourselves in useAuthGate. Leaving it ON would risk Supabase consuming
-// the query string before our parser can read it.
 const isWeb = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
 
 export const supabase = createClient(
@@ -16,7 +12,7 @@ export const supabase = createClient(
       storage: isWeb ? undefined : AsyncStorage,
       autoRefreshToken: true,
       persistSession: true,
-      detectSessionInUrl: false,
+      detectSessionInUrl: true,
     },
   }
 )
@@ -24,6 +20,10 @@ export const supabase = createClient(
 export const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!
 export const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!
 export const FEED_PAGE_SIZE = 10
+export const GITHUB_REPO_URL =
+  process.env.EXPO_PUBLIC_GITHUB_REPO_URL || 'https://github.com/huiq777/news-app'
+export const GITHUB_STARS_LABEL =
+  process.env.EXPO_PUBLIC_GITHUB_STARS_LABEL || 'Star'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type AnswerState = {
@@ -39,6 +39,10 @@ export type Article = {
   id: string
   source_id: string
   source_type?: string
+  source_name?: string | null
+  source_category?: string | null
+  thread_group?: string | null
+  thread_bio?: string | null
   title: string
   summary: string
   title_en: string | null
@@ -51,6 +55,25 @@ export type Article = {
   questions: { en: string[]; zh: string[] } | null
   engagement?: { likes?: number; retweets?: number; hn_score?: number; hn_comments?: number; stars?: number; show_name?: string } | null
   metadata?: Record<string, unknown> | null
+  deep_analysis_id?: string | null
+  deep_analysis_status?: 'pending' | 'processing' | 'ready' | 'error' | 'ineligible' | null
+  deep_analysis?: {
+    article_type?: string
+    en?: {
+      facts?: { text: string; evidence: string }[]
+      why_it_matters?: string
+      deeper_interpretation?: string
+      limitations_or_uncertainties?: string[]
+    }
+    zh?: {
+      facts?: { text: string; evidence: string }[]
+      why_it_matters?: string
+      deeper_interpretation?: string
+      limitations_or_uncertainties?: string[]
+    }
+  } | null
+  deep_analysis_feedback_up_count?: number | null
+  deep_analysis_feedback_down_count?: number | null
 }
 
 export function formatPublishedDate(dateStr: string | undefined | null, lang: 'en' | 'zh'): string {

@@ -1,9 +1,11 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, content-type',
-}
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0'
+import {
+  requireAuthenticatedUser,
+  requireRateLimit,
+  securityJson,
+  securityOptions,
+} from '../_shared/security.ts'
 
 // Three-tier provider: TokenRouter → OpenRouter → Groq (parallel EN+ZH)
 async function generateQuestions(
@@ -145,7 +147,11 @@ async function callGroq(prompt: string, systemMsg: string, apiKey: string): Prom
 }
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  if (req.method === 'OPTIONS') return securityOptions(req)
+
+  // auth_required: manual question refresh is a premium action.
+  const auth = await requireAuthenticatedUser(req)
+  if (!auth.ok) return auth.response
 
   const { article_id } = await req.json()
   const TOKENROUTER_API_KEY = Deno.env.get('TOKENROUTER_API_KEY') ?? ''
@@ -155,6 +161,19 @@ serve(async (req) => {
   const GROQ_API_KEY = Deno.env.get('GROQ_API_KEY')!
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
   const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+  const sbService = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  const rate = await requireRateLimit({
+    req,
+    serviceRoleClient: sbService,
+    userId: auth.user.id,
+    surface: 'refresh-questions',
+    limit: 20,
+    windowSeconds: 3600,
+  })
+  if (!rate.ok) return rate.response
+
   const sbHeaders = { 'apikey': SERVICE_KEY, 'Authorization': `Bearer ${SERVICE_KEY}`, 'Content-Type': 'application/json' }
 
   // Fetch article summaries
@@ -164,7 +183,7 @@ serve(async (req) => {
   )
   const rows: { summary_en?: string; summary_zh?: string }[] = await sbRes.json()
   const article = rows[0]
-  if (!article) return new Response('Not found', { status: 404, headers: corsHeaders })
+  if (!article) return securityJson(req, { error: 'not_found' }, 404)
 
   const questions = await generateQuestions(
     article.summary_en ?? '',
@@ -176,16 +195,18 @@ serve(async (req) => {
     GROQ_API_KEY,
   )
 
-  if (!questions) return new Response('Failed to generate questions', { status: 500, headers: corsHeaders })
+  if (!questions) return securityJson(req, { error: 'generation_failed' }, 500)
 
-  // Persist new questions to DB
-  await fetch(`${SUPABASE_URL}/rest/v1/daily_news?id=eq.${article_id}`, {
-    method: 'PATCH',
-    headers: sbHeaders,
-    body: JSON.stringify({ questions }),
+  const { error: upsertError } = await sbService.from('user_article_questions').upsert({
+    user_id: auth.user.id,
+    article_id,
+    questions,
+    model: LLM_MODEL,
+    generated_at: new Date().toISOString(),
+  }, {
+    onConflict: 'user_id,article_id',
   })
+  if (upsertError) return securityJson(req, { error: 'persist_failed' }, 500)
 
-  return new Response(JSON.stringify(questions), {
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
+  return securityJson(req, questions)
 })

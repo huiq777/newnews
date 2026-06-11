@@ -1,4 +1,8 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import {
+  normalizeSocialSourceUrl,
+  youtubeSourceAliases,
+} from '../_shared/social-source.js'
 
 type ApifyItem = {
   url: string
@@ -71,34 +75,46 @@ serve(async (req) => {
 
   // Build inputChannelUrl → source_id map (matches rss_url exactly)
   const sourceRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/sources?source_type=eq.youtube&is_active=eq.true&select=id,name,rss_url`,
+    `${SUPABASE_URL}/rest/v1/sources?source_type=eq.youtube&is_active=eq.true&select=id,name,rss_url,metadata`,
     { headers: sbHeaders },
   )
   if (!sourceRes.ok) return new Response('Source lookup failed', { status: 500 })
-  const sources: { id: string; name: string; rss_url: string }[] = await sourceRes.json()
-  console.log(`Known sources (${sources.length}): ${sources.map(s => s.rss_url).join(' | ')}`)
-  const sourceByUrl = new Map(sources.map(s => [s.rss_url, s.id]))
-  const sourceNameByUrl = new Map(sources.map(s => [s.rss_url, s.name]))
+  const sources: { id: string; name: string; rss_url: string; metadata?: Record<string, unknown> | null }[] = await sourceRes.json()
+  console.log(`Known YouTube sources (${sources.length}): ${sources.map(s => `${s.name}=${s.rss_url}`).join(' | ')}`)
+  const sourceByAlias = new Map<string, { id: string; name: string; canonicalUrl: string }>()
+  for (const source of sources) {
+    for (const alias of youtubeSourceAliases(source)) {
+      sourceByAlias.set(alias, { id: source.id, name: source.name, canonicalUrl: source.rss_url })
+    }
+  }
 
   // Filter to video items with a mapped source.
   // No code-side date cutoff — Apify's dateFilter config is the recency gate.
   const typeOk   = items.filter(i => i.type === 'video')
   const urlOk    = typeOk.filter(i => i.url && i.inputChannelUrl)
-  const sourceOk = urlOk.filter(i => sourceByUrl.has(i.inputChannelUrl!))
+  const sourceOk = urlOk
+    .map(item => ({ item, source: sourceByAlias.get(normalizeSocialSourceUrl(item.inputChannelUrl!)) }))
+    .filter((row): row is { item: ApifyItem; source: { id: string; name: string; canonicalUrl: string } } => Boolean(row.source))
+  const unmatched = urlOk
+    .filter(item => !sourceByAlias.has(normalizeSocialSourceUrl(item.inputChannelUrl!)))
+    .map(item => item.inputChannelUrl)
   console.log(`Filter stages: total=${items.length} type=video:${typeOk.length} hasUrl:${urlOk.length} knownSource:${sourceOk.length}`)
+  if (unmatched.length > 0) {
+    console.log(`Unmatched YouTube inputChannelUrls: ${[...new Set(unmatched)].slice(0, 10).join(' | ')}`)
+  }
   const validItems = sourceOk
 
   // Dedup against raw_ingestion
-  const allUrls    = validItems.map(item => item.url)
+  const allUrls    = validItems.map(row => row.item.url)
   const knownUrls  = await fetchKnownUrls(allUrls, SUPABASE_URL, sbHeaders)
-  const newItems   = validItems.filter(item => !knownUrls.has(item.url))
+  const newItems   = validItems.filter(row => !knownUrls.has(row.item.url))
 
   if (newItems.length === 0) {
     console.log('No new YouTube videos to insert.')
     return new Response(JSON.stringify({ inserted: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }
 
-  const rows = newItems.map(item => {
+  const rows = newItems.map(({ item, source }) => {
     // Apify returns subtitles as [{srt: "<SRT format string>", ...}].
     // Parse SRT: strip sequence numbers and timestamps, join text lines.
     const srtTimestamp = /^\d{2}:\d{2}:\d{1,2},\d{3} --> /
@@ -113,14 +129,18 @@ serve(async (req) => {
           .trim()
       : ''
 
-    const channelUrl = item.inputChannelUrl!
     return {
-      source_id:   sourceByUrl.get(channelUrl)!,
+      source_id:   source.id,
       url:         item.url,
       raw_content: transcript,
       fetched_at:  new Date().toISOString(),
       status:      'pending',
-      metadata:    { likes: item.likes ?? 0, show_name: sourceNameByUrl.get(channelUrl) ?? item.channelName ?? '' },
+      metadata:    {
+        likes: item.likes ?? 0,
+        show_name: source.name || item.channelName || '',
+        input_channel_url: item.inputChannelUrl ?? null,
+        source_page: source.canonicalUrl,
+      },
       published_at: item.date ?? null,
     }
   }).filter(row => row.raw_content.length >= 200)  // skip videos with no usable transcript
