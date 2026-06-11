@@ -359,6 +359,7 @@ export default function TrendBriefCard({
           <Text style={[styles.briefCronLabel, getCronLabelStyle(lang)]}>{cronTimeLabel(lang)}</Text>
         </View>
         <LoginRequiredInline
+          lang={lang}
           message={lang === 'en' ? 'Please log in to view Trend Brief.' : '请登录查看趋势简报。'}
           onLoginPress={onLoginPress}
         />

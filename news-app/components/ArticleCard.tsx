@@ -285,7 +285,8 @@ export default function ArticleCard({
                 <DeepAnalysisSection item={item} lang={lang} />
               ) : (
                 <LoginRequiredInline
-                  message="Please log in to view Deep Analysis and Q&A."
+                  lang={lang}
+                  message={lang === 'en' ? 'Please log in to view Deep Analysis and Q&A.' : '请登录后查看深度分析和问答。'}
                   onLoginPress={onRequireAuth}
                 />
               )}
@@ -309,7 +310,8 @@ export default function ArticleCard({
 
           {questionsOpen && !isAuthed && (
             <LoginRequiredInline
-              message="Please log in to view Deep Analysis and Q&A."
+              lang={lang}
+              message={lang === 'en' ? 'Please log in to view Deep Analysis and Q&A.' : '请登录后查看深度分析和问答。'}
               onLoginPress={onRequireAuth}
             />
           )}

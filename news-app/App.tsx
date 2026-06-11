@@ -498,10 +498,11 @@ export default function App() {
         onClose={() => setShowManual(false)}
       />
       {!isAuthed && showManual && (
-        <LoginRequiredInline onLoginPress={requireAuth} />
+        <LoginRequiredInline lang={lang} onLoginPress={requireAuth} />
       )}
       <AuthPrompt
         visible={authPromptOpen}
+        lang={lang}
         authError={authError}
         onDismiss={() => setAuthPromptOpen(false)}
         onSignIn={signInWithProvider}

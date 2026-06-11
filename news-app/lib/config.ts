@@ -19,6 +19,8 @@ export const supabase = createClient(
 
 export const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!
 export const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!
+export const APP_URL =
+  process.env.EXPO_PUBLIC_APP_URL || 'https://newnews.dev'
 export const FEED_PAGE_SIZE = 10
 export const GITHUB_REPO_URL =
   process.env.EXPO_PUBLIC_GITHUB_REPO_URL || 'https://github.com/huiq777/news-app'
