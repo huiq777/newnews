@@ -55,16 +55,19 @@ Supabase Auth setup:
   - Authorized JavaScript origins: production origin and local dev origin, e.g. `http://localhost:8081`.
   - Authorized redirect URIs: the Supabase callback URL above. Do not use localhost as Google's redirect URI when Supabase Auth brokers the OAuth flow.
 - Supabase Auth URL Configuration:
-  - Site URL: production app URL.
-  - Redirect URLs: production URL(s) plus local dev URL(s), e.g. `http://localhost:8081`.
+  - Site URL: `https://newnews.dev`.
+  - Redirect URLs: `https://newnews.dev` plus local dev URL(s), e.g. `http://localhost:8081`, only if intentionally testing local OAuth returns.
 - Disable email/password, email OTP, and email sign-up for this release.
 
-Frontend env for the nav GitHub action:
+Frontend env for OAuth redirect and the nav GitHub action:
 
 ```bash
+EXPO_PUBLIC_APP_URL=https://newnews.dev
 EXPO_PUBLIC_GITHUB_REPO_URL=https://github.com/<owner>/<repo>
 EXPO_PUBLIC_GITHUB_STARS_LABEL=Star
 ```
+
+`EXPO_PUBLIC_APP_URL` controls Supabase OAuth `redirectTo`. If omitted, the app defaults to `https://newnews.dev`; it does not use localhost automatically.
 
 Post-deploy smoke:
 

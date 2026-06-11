@@ -4,28 +4,32 @@ import { colors, typography, spacing } from '../theme/tokens'
 import LoginActionButton from './LoginActionButton'
 
 export type LoginRequiredInlineProps = {
+  lang?: 'en' | 'zh'
   message?: string
   onLoginPress: () => void
 }
 
-const DEFAULT_MESSAGE = 'Please log in to view this.'
+const defaultMessage = (lang: 'en' | 'zh') =>
+  lang === 'en' ? 'Please log in to view this.' : '请登录后查看。'
 
 export default function LoginRequiredInline({
+  lang = 'en',
   message,
   onLoginPress,
 }: LoginRequiredInlineProps) {
   const [hovered, setHovered] = useState(false)
+  const resolvedMessage = message ?? defaultMessage(lang)
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={message ?? DEFAULT_MESSAGE}
+      accessibilityLabel={resolvedMessage}
       onPress={onLoginPress}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
       style={[styles.lockedRow, hovered && styles.lockedRowHovered]}
     >
-      <Text style={styles.lockedText}>{message ?? DEFAULT_MESSAGE}</Text>
-      <LoginActionButton label="Login" compact onPress={onLoginPress} hoveredOverride={hovered} />
+      <Text style={styles.lockedText}>{resolvedMessage}</Text>
+      <LoginActionButton label={lang === 'en' ? 'Login' : '登录'} compact onPress={onLoginPress} hoveredOverride={hovered} />
     </Pressable>
   )
 }

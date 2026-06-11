@@ -250,7 +250,8 @@ function TweetRow({
       {/* Questions Section */}
       {isCardExpanded && questionsOpen && !isAuthed && (
         <LoginRequiredInline
-          message="Please log in to ask questions about this thread."
+          lang={lang}
+          message={lang === 'en' ? 'Please log in to ask questions about this thread.' : '请登录后提问这条动态串。'}
           onLoginPress={onRequireAuth}
         />
       )}

@@ -20,9 +20,16 @@ function serveEntry(source) {
 
 test('auth uses GitHub and Google OAuth only', () => {
   const auth = read('news-app/lib/auth.ts')
+  const config = read('news-app/lib/config.ts')
 
   assert.match(auth, /signInWithOAuth\(\{\s*provider:\s*'github'/s)
   assert.match(auth, /signInWithOAuth\(\{\s*provider:\s*'google'/s)
+  assert.match(config, /APP_URL\s*=\s*\n\s*process\.env\.EXPO_PUBLIC_APP_URL\s*\|\|\s*'https:\/\/newnews\.dev'/)
+  assert.match(auth, /redirectTo \? \{ redirectTo \} : undefined/)
+  assert.match(auth, /return APP_URL/)
+  assert.match(auth, /exchangeCodeForSession\(code\)/)
+  assert.match(auth, /url\.searchParams\.delete\('code'\)/)
+  assert.doesNotMatch(auth, /window\.location\.origin/)
   assert.doesNotMatch(auth, /signInAnonymously/)
   assert.doesNotMatch(auth, /redeem-invite/)
   assert.doesNotMatch(auth, /signUp\(/)
@@ -44,6 +51,10 @@ test('premium article and thread actions render login-required rows when anonymo
   const articleCard = read('news-app/components/ArticleCard.tsx')
   const xThreadCard = read('news-app/components/XThreadCard.tsx')
   const trendBrief = read('news-app/components/TrendBriefCard.tsx')
+  const loginRequired = read('news-app/components/LoginRequiredInline.tsx')
+  const authPrompt = read('news-app/components/AuthPrompt.tsx')
+  const navBar = read('news-app/components/NavBar.tsx')
+  const app = read('news-app/App.tsx')
 
   assert.match(articleCard, /isAuthed:\s*boolean/)
   assert.match(articleCard, /onRequireAuth:\s*\(\)\s*=>\s*void/)
@@ -57,6 +68,15 @@ test('premium article and thread actions render login-required rows when anonymo
   assert.match(trendBrief, /if\s*\(!isAuthed\)/)
   assert.match(trendBrief, /LoginRequiredInline/)
   assert.doesNotMatch(trendBrief, /SUPABASE_ANON_KEY/)
+  assert.match(loginRequired, /lang\?: 'en' \| 'zh'/)
+  assert.match(loginRequired, /请登录后查看。/)
+  assert.match(loginRequired, /lang === 'en' \? 'Login' : '登录'/)
+  assert.match(articleCard, /请登录后查看深度分析和问答。/)
+  assert.match(xThreadCard, /请登录后提问这条动态串。/)
+  assert.match(trendBrief, /请登录查看趋势简报。/)
+  assert.match(authPrompt, /登录后继续/)
+  assert.match(navBar, /lang === 'en' \? 'Login' : '登录'/)
+  assert.match(app, /<AuthPrompt\s*\n\s*visible=\{authPromptOpen\}\s*\n\s*lang=\{lang\}/)
 })
 
 test('public feed rpc nulls premium fields for anonymous callers', () => {

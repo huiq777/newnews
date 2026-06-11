@@ -4,6 +4,7 @@ import { colors, typography, spacing } from '../theme/tokens'
 
 export type AuthPromptProps = {
   visible: boolean
+  lang: 'en' | 'zh'
   authError?: string | null
   onDismiss: () => void
   onSignIn: (provider: OAuthProvider) => void
@@ -11,6 +12,7 @@ export type AuthPromptProps = {
 
 export default function AuthPrompt({
   visible,
+  lang,
   authError,
   onDismiss,
   onSignIn,
@@ -20,12 +22,16 @@ export default function AuthPrompt({
       <Pressable style={styles.backdrop} onPress={onDismiss}>
         <Pressable style={styles.panel}>
           <View style={styles.headerRow}>
-            <Text style={styles.title}>Sign in to continue</Text>
-            <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel="Close">
+            <Text style={styles.title}>{lang === 'en' ? 'Sign in to continue' : '登录后继续'}</Text>
+            <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel={lang === 'en' ? 'Close' : '关闭'}>
               <Text style={styles.closeText}>x</Text>
             </Pressable>
           </View>
-          <Text style={styles.body}>Daily news is public. Analysis tools require an account.</Text>
+          <Text style={styles.body}>
+            {lang === 'en'
+              ? 'Daily news is public. Analysis tools require an account.'
+              : '每日新闻可公开浏览，分析工具需要登录账号。'}
+          </Text>
           {!!authError && <Text style={styles.errorText}>{authError}</Text>}
           <View style={styles.actions}>
             <Pressable style={styles.providerButton} onPress={() => onSignIn('github')}>

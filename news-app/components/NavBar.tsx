@@ -162,18 +162,18 @@ function onNavLayout(e: any) {
       <Animated.View style={[styles.navLangCol, { opacity: langVisAnim }]}
         pointerEvents={langVisible.current ? 'auto' : 'none'}>
         {authStatus !== 'authed' ? (
-          <LoginActionButton label="Login" compact onPress={onLoginPress} />
+          <LoginActionButton label={lang === 'en' ? 'Login' : '登录'} compact onPress={onLoginPress} />
         ) : (
           <Pressable
             nativeID="logout-btn"
             accessibilityRole="button"
-            accessibilityLabel={`Sign out${authDisplayName ? ` ${authDisplayName}` : ''}`}
+            accessibilityLabel={`${lang === 'en' ? 'Sign out' : '退出登录'}${authDisplayName ? ` ${authDisplayName}` : ''}`}
             onPress={onSignOut}
             onHoverIn={() => setSignOutHovered(true)}
             onHoverOut={() => setSignOutHovered(false)}
             style={[styles.loginBtn, signOutHovered && styles.whatsNewBtnHovered]}
           >
-            <Text style={styles.loginBtnText}>Sign out</Text>
+            <Text style={styles.loginBtnText}>{lang === 'en' ? 'Sign out' : '退出'}</Text>
           </Pressable>
         )}
         {!!authError && authStatus === 'auth_error' && (

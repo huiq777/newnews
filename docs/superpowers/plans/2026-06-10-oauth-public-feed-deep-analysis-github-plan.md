@@ -244,7 +244,7 @@ Target shape:
 ```ts
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Platform } from 'react-native'
-import { supabase } from './config'
+import { APP_URL, supabase } from './config'
 
 export type OAuthProvider = 'github' | 'google'
 export type AuthStatus = 'checking' | 'anonymous' | 'authed' | 'auth_error'
@@ -282,8 +282,8 @@ export function useAuthGate() {
   }, [syncSession])
 
   const redirectTo = useMemo(() => {
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      return window.location.origin
+    if (Platform.OS === 'web') {
+      return APP_URL
     }
     return undefined
   }, [])
@@ -327,7 +327,7 @@ export function useAuthGate() {
 
 OAuth redirect scope decision:
 
-- This implementation plan is web-first. The current `redirectTo` contract uses `window.location.origin` and is correct for React Native Web.
+- Superseded 2026-06-11: web OAuth `redirectTo` should use `APP_URL` / `EXPO_PUBLIC_APP_URL`, defaulting to `https://newnews.dev`, not `window.location.origin`. This prevents local dev from accidentally sending provider callbacks to `http://localhost:8081`.
 - Do not ship native iOS/Android OAuth from this plan with `redirectTo` undefined.
 - If native Expo builds are in scope for the same release, add `expo-auth-session` and a configured app scheme before implementation:
 
@@ -335,7 +335,7 @@ OAuth redirect scope decision:
 import * as AuthSession from 'expo-auth-session'
 
 const redirectTo = Platform.OS === 'web'
-  ? window.location.origin
+  ? APP_URL
   : AuthSession.makeRedirectUri({ scheme: 'newsapp' })
 ```
 
