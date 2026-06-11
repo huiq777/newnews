@@ -1,14 +1,26 @@
 # News Project Interview And Resume Brief
 
-Last updated: 2026-06-09
+Last updated: 2026-06-11
 
 ## One-Line Pitch
 
-Built a production AI news intelligence app with automated ingestion, bilingual summarization, streaming RAG Q&A, trend briefs, observability, and an eval-gated RAG refinement pipeline.
+Built a production AI news intelligence app with public bilingual feeds, OAuth-gated analysis, automated ingestion, bilingual summarization, streaming RAG Q&A, trend briefs, observability, and an eval-gated RAG refinement pipeline.
+
+## Background
+
+The product started as a private AI news digest and evolved into an Open Beta intelligence app. Anonymous users can browse the daily feed, while GitHub or Google OAuth unlocks premium generated surfaces: Deep Analysis, inline RAG Q&A, regenerated questions, and Trend Brief generation. The system is designed to keep broad article discovery public while protecting expensive LLM and analysis paths behind authenticated Edge Functions, rate limits, and user-scoped caches.
+
+## Current Product State
+
+- Open Beta access model is live: public feed first, OAuth for analysis.
+- Closed-beta invite redemption remains in the repo as legacy/rollback code, but it is no longer the primary access model.
+- Anonymous feed rows intentionally show login prompts for Deep Analysis, Q&A, and Trend Brief content instead of leaking generated analysis through direct table reads.
+- GitHub stars are fetched for the nav action from the configured repository URL; the fallback label remains configurable.
 
 ## Resume Bullets
 
 - Built an end-to-end AI news pipeline across Cloudflare Workers, Supabase Edge Functions, Postgres/pgvector, and Expo: source ingestion, AI relevance filtering, bilingual summaries, generated questions, embeddings, streaming RAG answers, trend briefs, feedback, and email digest delivery.
+- Reworked access from invite-only beta to Open Beta: public daily feed, GitHub/Google OAuth, authenticated Deep Analysis/Q&A/Trend Briefs, per-user question and brief overrides, and rate-limited Edge Function access for premium generation.
 - Implemented RAG observability with request-level traces across retriever inputs, ranked candidates, injected prompt context, `qa_logs`, and trend brief generation, enabling per-case debugging instead of black-box answer checking.
 - Designed and shipped an offline RAG evaluation harness with human-reviewed gold evidence, replayable dense/lexical/hybrid/chunk strategies, per-case metrics, aggregate leaderboards, and historical baseline preservation.
 - Improved offline retrieval from early article-level dense baselines to a corpus-health-valid chunk retrieval candidate with `@cf/baai/bge-m3`: Recall@5 `0.895`, Recall@10 `0.943`, MRR `0.739`, NDCG@10 `0.764`, Hit@5 `0.952`, p50/p95 as low as `1179/3425ms` on 21 approved cases.
@@ -37,6 +49,17 @@ Historical baselines:
 Safe claim: "improved offline retrieval and measured generation quality in an eval-gated pipeline."  
 Do not claim: "production answer accuracy improved" until the selected retriever is rolled out and measured on production traffic.
 
+Scope note: these metrics are for the Q&A RAG eval track. Deep Analysis eval and Trend Brief eval are planned as separate quality gates because their outputs are structured article analysis and cross-window synthesis, not ranked answer retrieval.
+
+## How It Was Achieved
+
+- Split ingestion from processing with `raw_ingestion` as a durable queue, so fetch failures, LLM failures, and embedding failures are separately recoverable.
+- Centralized user-facing generation behind Supabase Edge Functions, where service-role reads, OAuth user checks, rate limits, and streaming responses can be enforced.
+- Made the feed RPC auth-aware: anonymous callers receive public article fields, while authenticated callers can receive bounded Deep Analysis fields.
+- Moved user-triggered generated content to user-scoped tables: `user_article_questions` for refreshed questions and `user_trend_briefs` for manual trend brief generations.
+- Added corpus-health gates before trusting RAG eval metrics: source freshness, approved-gold chunk coverage, and BGE embedding coverage must pass before strategy selection.
+- Preserved production safety by staging RAG upgrades in eval-only scripts first, then requiring trace, latency, generation-quality, and rollback gates before production rollout.
+
 ## Architecture Talking Points
 
 ### Production Pipeline
@@ -47,6 +70,7 @@ Do not claim: "production answer accuracy improved" until the selected retriever
 - `embed-batch`: Cohere `embed-english-v3.0`, 1024-dim article embeddings for current production retrieval.
 - `answer-question`: decomposed into route, retrieve, generate, orchestrate; streaming SSE; `qa_logs`; user feedback.
 - `generate-trend-brief`: planned trend brief generation with historical enrichment and RAG trace logging.
+- Open Beta access: `fetch_grouped_feed` serves public feed data; OAuth-gated analysis routes through `answer-question`, `refresh-questions`, and `generate-trend-brief`.
 
 ### RAG Observability
 
@@ -80,6 +104,10 @@ Good interview phrasing:
 
 > I treated Agentic RAG as orchestration above a strong retriever, not as a replacement for retrieval. The baseline path stays fast for simple questions; the agentic path only triggers for ambiguous, comparison, multi-hop, or low-context questions. Every planning and critique step has trace metadata and loop limits.
 
+### GraphRAG Position
+
+GraphRAG is not the current retrieval architecture. It is a deferred candidate for relation-heavy failures where chunk retrieval, lexical/entity hybrid retrieval, rerank, and bounded Agentic RAG still cannot recover the needed evidence. The project moved from traditional article-level RAG toward chunk/eval-gated RAG and an Agentic RAG harness first; GraphRAG should only be introduced after eval cases prove that explicit entity-relation structure is the missing piece.
+
 ## What I Would Say In An Interview
 
 **Why chunk retrieval?**  
@@ -104,7 +132,7 @@ The production path did not change just because offline metrics improved. The pl
 - Historical taxonomy output had impossible NDCG slices before the 2026-06-08 metric fix; quote only rows that carry valid corpus-health metadata after the fix.
 - Generation quality has a strong `chunk_dense` aggregate, but the current 24-row table should be grouped by `eval_run_id` before being treated as a locked benchmark because it exceeds the 21-case retrieval set.
 - Agentic RAG has an eval-only runtime/harness, but no production rollout and no recorded multi-hop win should be quoted yet.
-- GraphRAG and compiled knowledge are deferred until multi-hop/entity-relation cases justify the added complexity.
+- GraphRAG and compiled knowledge are deferred until multi-hop/entity-relation eval misses justify the added complexity.
 
 ## Short Version For Resume
 

@@ -38,8 +38,8 @@ The pipeline is split: **Cloudflare Workers** handle all scheduled, internal pro
 | Use case | Where it runs | Why |
 |---|---|---|
 | Apify webhook receiver (`ingest-apify-tweets`) | Supabase Edge Function | Workers have no inbound HTTP trigger; cron limit already at 5/5 free tier |
-| Streaming Q&A (`answer-question`) | Supabase Edge Function | Requires POST from frontend; Workers don't expose inbound endpoints without a paid plan |
-| Question regeneration (`refresh-questions`) | Supabase Edge Function | Same — user-triggered, requires HTTP |
+| Streaming Q&A (`answer-question`) | Supabase Edge Function | Requires authenticated POST from frontend, service-role retrieval, rate limits, and streaming response |
+| Question regeneration (`refresh-questions`) | Supabase Edge Function | Authenticated user-triggered generation that writes user-scoped overrides |
 | RSS ingestion, summarization, embedding | Cloudflare Workers | Cron-scheduled; no inbound HTTP needed |
 
 **Critical gotcha for external webhooks:** Supabase Edge Functions validate the `Authorization` header as a Supabase JWT by default. External services (Apify, Stripe, GitHub) send their own Bearer token — Supabase rejects it as an invalid JWT and returns 401 before your code runs. Always deploy external-facing webhook receivers with:
@@ -48,7 +48,7 @@ supabase functions deploy <function-name> --no-verify-jwt
 ```
 
 ### LLM routing: TokenRouter (primary) → OpenRouter → Groq
-`process-queue` routes all LLM summarization through a three-tier chain: TokenRouter (`qwen/qwen3.6-plus`) is primary (120s AbortController timeout), OpenRouter is secondary (model set via `OPENROUTER_MODEL` secret), and Groq `llama-3.3-70b-versatile` is tertiary fallback. Fallback triggers on AbortError, TCP rejection, or 429. Non-2xx non-429 responses throw immediately without falling back. TokenRouter and OpenRouter model IDs are set as secrets and can be swapped without redeployment.
+`process-queue`, user-facing Q&A, and Trend Brief generation route LLM work through provider secrets rather than frontend code. `process-queue` uses a three-tier chain: TokenRouter (`qwen/qwen3.6-plus`) is primary (120s AbortController timeout), OpenRouter is secondary (model set via `OPENROUTER_MODEL` secret), and Groq `llama-3.3-70b-versatile` is tertiary fallback. User-facing Edge Functions use their own model secrets (`QA_LLM_MODEL`, `TREND_BRIEF_MODEL`, etc.) and require a Supabase user JWT before starting expensive model work. Fallback triggers on AbortError, TCP rejection, or 429. Non-2xx non-429 responses throw immediately without falling back. TokenRouter and OpenRouter model IDs are set as secrets and can be swapped without redeployment.
 
 ### Cohere embed-english-v3.0 for embeddings
 The model produces 1024-dimensional embeddings, which directly defines the `vector(1024)` column in `daily_news`. The model supports an `input_type` parameter that distinguishes between indexing and querying — this distinction is load-bearing for retrieval quality (see below). It is available from both Cloudflare Workers (for indexing) and Supabase Edge Functions (for query-time embedding), keeping the embedding symmetric.
@@ -59,8 +59,8 @@ All LLM work falls into two categories:
 
 - **Summarization + questions (`process-queue`):** 1 call per article. Routes through TokenRouter first, then OpenRouter, then Groq `llama-3.3-70b-versatile` as tertiary fallback. The single response includes bilingual title, 3-bullet summary, and QUESTIONS_EN/ZH arrays — parsed by `parseSection()` (text) and `parseJsonSection()` (JSON arrays).
 - **Bio extraction (`ingest-builders`):** 1 batch Groq call per run using `llama-3.3-70b-versatile` directly (no OpenRouter routing).
-- **Q&A (`answer-question`):** Groq `llama-3.3-70b-versatile` streaming SSE; only `type: "content"` events emitted. `reasoning_content` dead code exists for DeepSeek-R1 (decommissioned by Groq) — do not remove until a reasoning model replaces it.
-- **Upgrade path for reasoning:** DeepSeek API directly (`deepseek-reasoner`) or any model that emits `reasoning_content`. Same API format — one model name change in `answer-question`.
+- **Q&A (`answer-question`):** OAuth-gated streaming SSE. TokenRouter is primary, OpenRouter/Groq are fallback paths, and deep-think mode can emit `type: "thinking"` before `type: "content"`.
+- **Trend Brief (`generate-trend-brief`):** Cron/service mode writes shared `trend_briefs`; browser/user mode is OAuth-gated, rate-limited, and writes manual generations to `user_trend_briefs`.
 
 Groq free tier: 12K TPM, 100K TPD.
 
@@ -76,7 +76,7 @@ Workflow 1 (daily)        Workflow 2 (every 5 min)
 RSS feeds                 raw_ingestion (pending rows)
     │                              │
     ▼                              ▼
-raw_ingestion              Groq summarization
+raw_ingestion              LLM summarization
 (status: pending)                  │
                                    ▼
                              daily_news

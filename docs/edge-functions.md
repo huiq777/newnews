@@ -1,6 +1,6 @@
 # Edge Functions
 
-Supabase Edge Functions serve as the secure bridge between the frontend and AI providers. They are stateless and operate on public article data accessible via the anon key. The `ingest-apify-tweets` function is the exception — it is webhook-triggered (not called by the frontend) and requires a custom Bearer token.
+Supabase Edge Functions serve as the secure bridge between the frontend, Supabase Auth, service-role data access, and AI providers. Public feed data is available anonymously through bounded RPCs; generated analysis surfaces require a Supabase user JWT unless explicitly marked as a webhook or cron/service path. The `ingest-apify-tweets` function is webhook-triggered and requires a custom Bearer token.
 
 **No `supabase.functions.invoke()` for streaming.** It buffers the full response. Use native `fetch` with `ReadableStream` instead — see the streaming pattern below.
 
@@ -45,13 +45,14 @@ data: [DONE]
 ### Internal Flow
 
 ```
-1. route()    — resolve article, check cache, select LLM model (deep_think vs default)
-2. retrieve() — Cohere embed question (input_type='search_query' ← ASYMMETRIC, load-bearing)
+1. requireAuthenticatedUser() + requireRateLimit() — reject anonymous/generated-analysis abuse before model work
+2. route()    — resolve article, check cache, select LLM model (deep_think vs default)
+3. retrieve() — Cohere embed question (input_type='search_query' ← ASYMMETRIC, load-bearing)
                → match_articles_prefer_analysis(query_embedding, match_count=4) → top 3 related (excluding primary)
                → write trace rows for retriever input, candidates, scores, and injected context
-3. generate() — TokenRouter streaming SSE (primary → OpenRouter → Groq fallback)
+4. generate() — TokenRouter streaming SSE (primary → OpenRouter → Groq fallback)
                — deep_think: stream type:thinking chunks before type:content
-4. orchestrateAnswer() — wire abort propagation, persist qa_logs row with request_id + timing + rag_retrieval_run_id
+5. orchestrateAnswer() — wire abort propagation, persist qa_logs row with request_id + timing + rag_retrieval_run_id
 ```
 
 ### Retrieval Behavior Guardrail
@@ -76,13 +77,14 @@ supabase secrets set TOKENROUTER_API_KEY=... COHERE_API_KEY=... QA_LLM_MODEL=qwe
 ## `refresh-questions` — On-Demand Question Regeneration
 
 ### Purpose
-Regenerates 3 EN + 3 ZH questions for an article on demand. Called when the user taps `↻` on an article card (or when `questions` is null).
+Regenerates 3 EN + 3 ZH questions for an article on demand. Called when an authenticated user taps `↻` on an article card. Anonymous users see a login row instead.
 
 ### Request
 
 ```
 POST /functions/v1/refresh-questions
-Authorization: Bearer <supabase_anon_key>
+Authorization: Bearer <user_jwt>
+apikey: <supabase_anon_key>
 Content-Type: application/json
 
 {
@@ -104,17 +106,20 @@ Non-streaming JSON response. Fast enough that streaming isn't needed.
 ### Internal Flow
 
 ```
-1. Fetch article's summary_en and summary_zh from daily_news
-2. Groq llama-3.3-70b-versatile → 3 EN questions (2 parallel Groq calls: EN + ZH)
-3. Groq llama-3.3-70b-versatile → 3 ZH questions (parallel with step 2)
-4. PATCH daily_news SET questions = {en: [...], zh: [...]} WHERE id = article_id
-5. Return the new questions as JSON
+1. Verify the caller's Supabase user JWT and rate-limit the request.
+2. Fetch article's summary_en and summary_zh from daily_news.
+3. Generate 3 EN and 3 ZH questions through the configured LLM routing path.
+4. Upsert `{en: [...], zh: [...]}` into `user_article_questions` for `(user_id, article_id)`.
+5. Return the new questions as JSON.
 ```
 
-Note: `refresh-questions` still uses 2 separate Groq calls (EN + ZH parallel). Only `process-queue` was consolidated to 1 call. This is intentional — refresh-questions operates on existing summaries and the 2-call approach keeps question quality high for on-demand regeneration.
+Note: manual refresh is user-scoped. It must not patch shared `daily_news.questions`.
 
 ### Required Secrets
-- `GROQ_API_KEY`
+- `TOKENROUTER_API_KEY`
+- `QUESTION_REFRESH_MODEL` or fallback model secrets used by the function
+- `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` when using the fallback route
+- `GROQ_API_KEY` when using the fallback route
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
@@ -175,10 +180,10 @@ supabase functions logs ingest-apify-tweets --tail
 
 ---
 
-## `redeem-invite` — Closed-Beta Auth Gate (Round 1)
+## `redeem-invite` — Legacy Closed-Beta Auth Gate
 
 ### Purpose
-Atomically claims a [`beta_invites`](schema.md#beta_invites) row, ties it to the caller's `auth.uid()`, and writes server-only `app_metadata.is_beta_user = true` so the frontend gate can let the user through. The companion of [news-app/lib/auth.ts](../news-app/lib/auth.ts)'s `useAuthGate` hook.
+Legacy invite redemption for the old closed-beta model. It is retained for history/rollback, but current production access is Open Beta public feed plus GitHub/Google OAuth-gated analysis.
 
 This is the only Edge Function in the project that needs both a per-request user-bound client AND a service-role client in the same request — the design exists to keep the privileged write (metadata) strictly server-side while still attributing the action to the verified caller.
 
@@ -320,7 +325,8 @@ const response = await fetch(
   {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${supabaseAnonKey}`,
+      'Authorization': `Bearer ${session.access_token}`,
+      'apikey': supabaseAnonKey,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ article_id, question, lang }),
@@ -422,7 +428,8 @@ Fetches all articles in a selected time window (ALL categories), clusters them b
 
 ```
 GET /functions/v1/generate-trend-brief?anchor_date=2026-03-28&step_days=7
-Authorization: Bearer <supabase_anon_key>
+Authorization: Bearer <user_jwt>
+apikey: <supabase_anon_key>
 ```
 
 Query params:
@@ -439,43 +446,48 @@ data: {"type": "content", "content": " is accelerating faster..."}
 data: [DONE]
 ```
 
-Frontend AbortController fires on window change — `req.signal` is propagated to the upstream Groq fetch, killing generation within ~1s. Returns HTTP 499 on abort; writes to `trend_briefs` only on full completion.
+Frontend AbortController fires on window change — `req.signal` is propagated to the upstream provider fetch, killing generation within ~1s. Returns HTTP 499 on abort. Cron/service mode writes shared `trend_briefs`; user-mode manual generation writes `user_trend_briefs` only on full completion.
 
 ### Internal Flow
 
 ```
-1. Check trend_briefs cache (anchor_date, step_days, expires_at > now())
+1. Browser/user mode: verify Supabase user JWT and apply rate limit.
+   Cron/service mode: require service-role JWT or `CRON_SECRET`.
+
+2. Check cache:
+   User mode → current user's `user_trend_briefs`, then shared `trend_briefs`.
+   Cron/service mode → shared `trend_briefs`.
    → HIT: return synthesis directly (no generation)
    → MISS: proceed
 
-2. Fetch all daily_news rows in window (published_at BETWEEN anchor_date-step_days AND anchor_date)
+3. Fetch all daily_news rows in window (published_at BETWEEN anchor_date-step_days AND anchor_date)
    Include: id, title, summary_en, published_at, embedding, engagement JSONB
 
-3. Two-pass clustering in Deno memory (effectiveTarget = min(totalArticles, 12)):
+4. Two-pass clustering in Deno memory (effectiveTarget = min(totalArticles, 12)):
    PASS 1 — cosine_similarity > 0.82 grouping; engagement DESC tiebreak (likes→votes→score→0)
    PASS 2 — proportional slot allocation:
      dominantCap (≥20% of total) = ceil(effectiveTarget × 0.40)
      mediumCap   (≥5% of total)  = ceil(effectiveTarget × 0.20)
      smallCap    (all others)    = 1
 
-4. Historical enrichment: for each selected article WITH embedding:
+5. Historical enrichment: for each selected article WITH embedding:
    → match_articles(embedding, match_count=5)
    → post-query filter: exclude published_at within current window, score < 0.82
    → deduplicate across seeds
    → result: 5–10 historical articles (title + published_at + bullet 1 only)
    Articles WITHOUT embedding: included in prompt as text, skip historical retrieval
 
-5. Compress articles for prompt:
+6. Compress articles for prompt:
    Current:    [N] title | date | bullet1 | bullet2 | bullet3
    Historical: [N] title | date | bullet1
 
-6. Primary language: TokenRouter streaming SSE with TREND_BRIEF_MODEL; secondary language: TokenRouter non-streaming (parallel, 25s timeout) — both written to DB on completion
+7. Primary language: TokenRouter streaming SSE with TREND_BRIEF_MODEL; secondary language: TokenRouter non-streaming (parallel, 25s timeout) — both written to DB on completion
    System prompt: ruthless senior tech analyst; structural shift + blast radius + weak signals + citations + catalyst
 
-7. On full completion: INSERT into trend_briefs (synthesis, sources_json, tokens_used, expires_at = now() + 6h)
+8. On full completion: INSERT into `trend_briefs` for cron/service mode or `user_trend_briefs` for user mode (synthesis, sources_json, tokens_used, expires_at = now() + 6h)
    On abort (AbortError): log { event: 'client_disconnected', ... }, return 499; do NOT write to DB
 
-8. Stream SSE back to frontend
+9. Stream SSE back to frontend
 ```
 
 ### Structured Logging

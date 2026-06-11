@@ -45,7 +45,18 @@ supabase functions deploy generate-trend-brief
 
 Supabase Auth setup:
 - Enable GitHub and Google providers.
-- Add the production site origin and local dev origin to Auth redirect URLs.
+- Provider callback URL for both GitHub and Google:
+  `https://exjbwdcxyrkxsmzaowkx.supabase.co/auth/v1/callback`
+- GitHub OAuth App:
+  - Homepage URL: production app URL.
+  - Authorization callback URL: the Supabase callback URL above.
+- Google OAuth Client:
+  - Application type: Web application.
+  - Authorized JavaScript origins: production origin and local dev origin, e.g. `http://localhost:8081`.
+  - Authorized redirect URIs: the Supabase callback URL above. Do not use localhost as Google's redirect URI when Supabase Auth brokers the OAuth flow.
+- Supabase Auth URL Configuration:
+  - Site URL: production app URL.
+  - Redirect URLs: production URL(s) plus local dev URL(s), e.g. `http://localhost:8081`.
 - Disable email/password, email OTP, and email sign-up for this release.
 
 Frontend env for the nav GitHub action:
@@ -363,18 +374,20 @@ supabase functions deploy process-queue
 supabase functions deploy generate-deep-analysis
 supabase functions deploy generate-trend-brief
 supabase functions deploy ingest-apify-tweets  # --no-verify-jwt required
-supabase functions deploy redeem-invite        # closed-beta auth gate (Round 1)
+supabase functions deploy redeem-invite        # legacy closed-beta rollback path only
 supabase functions deploy unsubscribe-email --no-verify-jwt
 
 # Test answer-question (streaming)
 curl -X POST https://<project>.supabase.co/functions/v1/answer-question \
-  -H "Authorization: Bearer <anon-key>" \
+  -H "Authorization: Bearer <user-jwt>" \
+  -H "apikey: <anon-key>" \
   -H "Content-Type: application/json" \
   -d '{"article_id":"<uuid>","question":"What is this about?","lang":"en","deep_think":false}'
 
 # Test refresh-questions (non-streaming JSON)
 curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
-  -H "Authorization: Bearer <anon-key>" \
+  -H "Authorization: Bearer <user-jwt>" \
+  -H "apikey: <anon-key>" \
   -H "Content-Type: application/json" \
   -d '{"article_id":"<uuid>"}'
 
@@ -397,23 +410,23 @@ Run each file in the Supabase SQL Editor (all idempotent — safe to re-run):
 
 ---
 
-## Beta Invite Link Format
+## Legacy Beta Invite Link Format
 
 ```
 https://<host>/?invite=<code>
 ```
 
-Share this URL with invitees (e.g. over WeChat). The first click signs them in anonymously and ties them to the invite row. Subsequent reloads skip the gate entirely.
+Legacy only. The current app uses Open Beta public feed plus GitHub/Google OAuth. Keep this path for rollback/history unless explicitly removing closed-beta support.
 
 - `<host>` — your Cloudflare Pages domain (e.g. `news-app.pages.dev`) or custom domain
 - `<code>` — the random URL-safe slug from the `beta_invites.code` column
 
 ---
 
-## Generate a beta invite (Round 1)
+## Generate a legacy beta invite
 
 Apply migration once: paste `supabase/sql/20260426_beta_invites.sql` into the
-Supabase SQL Editor (idempotent — safe to re-run). Then mint an invite:
+Supabase SQL Editor (idempotent — safe to re-run). Then mint an invite only if testing the legacy path:
 
 ```sql
 INSERT INTO beta_invites (code, display_name, default_lang)

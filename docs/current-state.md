@@ -1,4 +1,4 @@
-# Current State — 2026-06-09
+# Current State — 2026-06-11
 
 This document is the single source of truth for where the project stands. Read this first in every new session before touching any code.
 
@@ -8,7 +8,7 @@ This document is the single source of truth for where the project stands. Read t
 
 **All pipeline stages through Stage 5 (Trend Brief) are complete. Stage 4 (web deployment via Cloudflare Pages) and Stage 4.5 (Apify tweet ingestion) are live. Architecture alignment (observability, keyword gate centralization, answer-question decomposition, Plan-and-Execute for trend brief, client-side decoupling) shipped 2026-05-03.**
 
-All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix). Closed-beta auth gate live (Round 1 — invite codes via `/?invite=<code>`).
+All Cloudflare Workers, Supabase Edge Functions, and RAG are live. The pipeline runs fully automatically. Frontend has been fully redesigned (warm editorial aesthetic, MarkdownText, answer Markdown rendering, scroll position fix). The app is now Open Beta: anonymous users can browse the public daily feed, and GitHub/Google OAuth unlocks Deep Analysis, inline RAG Q&A, question refresh, and Trend Brief generation.
 
 Trend brief per-user feedback, copy-to-clipboard, email subscription modal + email digest delivery via Resend, and `unsubscribe-email` Edge Function shipped 2026-05-06. New-articles banner false-positive bug fixed.
 
@@ -19,6 +19,8 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 **2026-06-05:** `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3` produced the strongest historical pre-remediation chunk baseline on 21 approved cases: Recall@5 0.710, Recall@10 0.757, MRR 0.620, NDCG@10 0.658, Hit@5 0.810, p50 1843ms, p95 4429ms. This was superseded by the 2026-06-09 corpus-health-valid replay. Production `answer-question` remained unchanged.
 
 **2026-06-09:** Corpus-health remediation passed for eval set `qa-v1-2026-06` with run `54dcd974-2fa2-4fb7-bb62-6eae9f3880c0`: zero chunk blockers, missing BGE embeddings, and stale-source blockers are all `0`. Fresh valid replay selects `chunk_dense @cf/baai/bge-m3` as the practical production candidate on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. `rerank_hybrid` is quality-best but latency-fails at p95 68056ms. Generation eval for `chunk_dense` is strong in aggregate: faithfulness 0.994, answer relevancy 0.950, context precision 0.785, context recall 0.819 across 24 judged rows. Production `answer-question` is still unchanged; next work is feature-flagged rollout planning and per-run generation grouping.
+
+**2026-06-11:** OAuth public-feed release shipped. Closed-beta invite logic is legacy/rollback only. `fetch_grouped_feed` is auth-aware and strips premium generated fields for anonymous callers. `answer-question`, `refresh-questions`, and user-mode `generate-trend-brief` require a Supabase user JWT and rate-limit authenticated generation. Manual question refreshes write `user_article_questions`; manual Trend Brief generations write `user_trend_briefs`; direct client reads from `article_deep_analysis`, `trend_briefs`, `user_article_questions`, and `user_trend_briefs` are intentionally denied.
 
 ---
 
@@ -39,12 +41,12 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 
 | Function | Status | Notes |
 |---|---|---|
-| `answer-question` | ✅ Deployed | Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Cohere query embed → `match_articles_prefer_analysis` RPC → top 3 related. The RPC is still article-level dense retrieval, but it prefers ready Deep Analysis vectors when available and falls back to article embeddings. LLM routing: TokenRouter `qwen/qwen3.6-plus` (deep_think) or `qwen/qwen3.5-flash` (default) → OpenRouter → Groq. SSE streaming. `request_id` UUID on every `qa_logs` row. **RAG trace completeness live:** each retrieval writes `rag_retrieval_runs`, candidate rows when present, injected-context rows, and `qa_logs.rag_retrieval_run_id`. User 👍/👎 feedback written back to `qa_logs`. |
-| `refresh-questions` | ✅ Deployed | On-demand question regeneration; no RAG dependency |
+| `answer-question` | ✅ Deployed | OAuth-gated user analysis. Decomposed into `route()` → `retrieve()` → `generate()` → `orchestrateAnswer()` stages. Cohere query embed → `match_articles_prefer_analysis` RPC → top 3 related. The RPC is still article-level dense retrieval, but it prefers ready Deep Analysis vectors when available and falls back to article embeddings. LLM routing: TokenRouter `qwen/qwen3.6-plus` (deep_think) or `qwen/qwen3.5-flash` (default) → OpenRouter → Groq. SSE streaming. `request_id` UUID on every `qa_logs` row. **RAG trace completeness live:** each retrieval writes `rag_retrieval_runs`, candidate rows when present, injected-context rows, and `qa_logs.rag_retrieval_run_id`. User 👍/👎 feedback written back to `qa_logs`. |
+| `refresh-questions` | ✅ Deployed | OAuth-gated on-demand question regeneration; no RAG dependency. Writes user-specific overrides to `user_article_questions` instead of mutating shared `daily_news.questions`. |
 | `ingest-apify-tweets` | ✅ Deployed | Webhook receiver for Apify `RUN_SUCCEEDED`; `--no-verify-jwt` required; per-author grading: top-3 net-new AI-relevant tweets per author (sorted by likes+retweets); bulk dedup via `raw_ingestion` URL check; keyword gate via `is_ai_relevant` RPC (parallel, fail-open) |
-| `generate-trend-brief` | ✅ Deployed | `buildBriefPlan()` pure data-prep + `triggerSecondaryGeneration()` explicit Plan-and-Execute pattern. TokenRouter `TREND_BRIEF_MODEL` primary (streaming); secondary language via non-streaming call. `trend_briefs` 6h TTL cache. Historical enrichment via `match_articles`. **RAG trace completeness live:** historical enrichment runs write retriever inputs, candidates, and injected prompt context linked by `trend_brief_key`. **pg_cron pre-warm at 00:25 UTC** via `pg_net.http_post`, 5 min before `send-digest`. **2026-05-11:** ZH_SYSTEM_PROMPT fixed — removed "这一周期" echo phrase; "no single thread" fallback changed to `今日没有单一主线`. |
+| `generate-trend-brief` | ✅ Deployed | Cron/service mode still writes shared `trend_briefs` defaults. User/browser mode is OAuth-gated and rate-limited: it checks `user_trend_briefs`, then shared `trend_briefs`, and writes manual generations to `user_trend_briefs`. `buildBriefPlan()` pure data-prep + `triggerSecondaryGeneration()` explicit Plan-and-Execute pattern. TokenRouter `TREND_BRIEF_MODEL` primary (streaming); secondary language via non-streaming call. Historical enrichment via `match_articles`. **RAG trace completeness live:** historical enrichment runs write retriever inputs, candidates, and injected prompt context linked by `trend_brief_key`. |
 | `process-queue` | ✅ Deployed | **1 LLM call per article (TokenRouter `qwen/qwen3.6-plus` primary 120s → OpenRouter secondary → Groq tertiary)**; atomic `claim_pending_batch` RPC; pre-LLM keyword gate via `is_ai_relevant` RPC (fail-open); `run_id` UUID stamps every batch for full pipeline trace; writes `pipeline_events` at every step (keyword_gate, llm, insert, llm_category_mismatch); triggered by pg_cron `*/5 * * * *` via Vault service_role key |
-| `redeem-invite` | ✅ Deployed | Closed-beta auth gate (Round 1); `verify_jwt = true` (default); CORS allowlist includes `apikey, x-client-info`; atomic claim + idempotent recovery branch for network-partition retries; writes `app_metadata.is_beta_user` via service-role `auth.admin.updateUserById` |
+| `redeem-invite` | 🟡 Legacy | Closed-beta invite gate retained for rollback/history only. Current user access is Supabase OAuth with GitHub/Google providers. |
 | `unsubscribe-email` | ✅ Deployed | GET `?id=<uuid>`; PATCHes `email_subscribers.unsubscribed_at`; returns HTML confirmation page. Deploy with `--no-verify-jwt` (unauthenticated link). |
 
 ### Supabase Tables & RPC
@@ -67,13 +69,16 @@ Trend brief per-user feedback, copy-to-clipboard, email subscription modal + ema
 | `fetch_grouped_feed` RPC | ✅ Live | Server-side feed with cursor (keyset) pagination and tweet thread grouping. Params: `p_date_start`, `p_date_end`, `p_category`, `p_limit`, `p_cursor`. Returns `thread_group` (handle for x_api/apify_tweet, NULL otherwise), `next_cursor` for stateless pagination, and **`metadata JSONB`** (added 2026-05-11). Replaces client-side `displayArticles` useMemo + offset pagination. |
 | `raw_ingestion.metadata` JSONB | ✅ Live | Stores `{likes, retweets}` for builder tweets; NULL for RSS/WeChat |
 | `daily_news.engagement` JSONB | ✅ Live | `{likes, retweets}` for tweets; NULL for RSS (HN source disabled); NULL for WeChat |
-| `trend_briefs` | ✅ Live | TTL cache for Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL; index on (anchor_date, step_days, expires_at); columns `synthesis_en` + `synthesis_zh` |
+| `trend_briefs` | ✅ Live | Service-owned shared TTL cache for cron/pre-warmed Trend Brief synthesis; key: (anchor_date, step_days); 6h TTL; direct anon/authenticated REST reads are revoked. Browser reads go through `generate-trend-brief`. |
+| `user_article_questions` | ✅ Live | Per-user question-refresh overrides. Authenticated browser requests go through `refresh-questions`; direct client table access is denied. |
+| `user_trend_briefs` | ✅ Live | Per-user manual Trend Brief cache. User-mode `generate-trend-brief` writes here; direct client table access is denied. |
+| `edge_rate_limits` | ✅ Live | Service-owned rate-limit buckets for authenticated analysis Edge Functions. |
 | `digest_sent` | ✅ Live | Per-channel per-day delivery accounting for `send-digest`. UNIQUE (channel, anchor_date) gives idempotent claim via `ON CONFLICT DO NOTHING RETURNING`. Statuses: `pending | sent | failed | skipped_empty_brief`. |
 | `trend_brief_feedback` | ✅ Live | Per-user thumbs up/down on trend briefs. PK: `(user_id, anchor_date, step_days)` — keyed on the time window, not brief row, so feedback survives brief refreshes. RLS: authenticated users read/write only their own rows. Columns: `user_id`, `anchor_date`, `step_days`, `feedback` (smallint, -1 or 1), `feedback_at`. |
 | `email_subscribers` | ✅ Live | Email digest opt-in list. Columns: `id` UUID PK, `email` (unique), `lang` ('en'\|'zh'), `created_at`, `unsubscribed_at` (null = active). RLS: anon + authenticated can INSERT; no read policy (service-role only for reads). |
 | `email_digest_sent` | ✅ Live | Per-subscriber per-day delivery accounting for email channel. UNIQUE `(subscriber_id, anchor_date, step_days)`. Statuses: `pending | sent | failed | skipped_empty_brief`. |
-| `beta_invites` | ✅ Live | Round 1 closed-beta invite-link redemption table. RLS enabled with **no anon/authenticated policies** — only `redeem-invite` (service role) reads/writes. Columns: `code` PK, `display_name`, `default_lang`, `email` (nullable, reserved for Round 2 magic-link), `expires_at`, `used_at`, `user_id` FK to `auth.users` (`on delete set null`). Operator mints rows via Supabase SQL Editor. |
-| `is_beta_user()` | ✅ Live | `security definer` SQL helper (returns boolean). Queries `beta_invites` for the current `auth.uid()`. One-line gate for future user-scoped table RLS: `using (is_beta_user() and user_id = auth.uid())`. |
+| `beta_invites` | 🟡 Legacy | Closed-beta invite-link redemption table retained for history/rollback. Not the current access model. |
+| `is_beta_user()` | 🟡 Legacy | Helper for the old invite model. Current access checks use Supabase OAuth user JWTs and Edge Function authorization. |
 
 ### Expo Frontend (`news-app/App.tsx`)
 
@@ -105,7 +110,7 @@ Working features:
 - **New-articles banner bug fix:** `checkMissedArticles` now uses `max(created_at)` across all loaded articles (was `articles[0].created_at` which could lag behind recently-ingested articles with older `published_at`)
 - Favicon: new brand icon with rounded corners; served at `/favicon.ico` via Expo FaviconMiddleware
 - **AIHot source display (2026-05-11):** `ArticleCard` reads `item.metadata?.source` for `source_type === 'aihot'` and shows the original outlet name (e.g., "Hugging Face") instead of "AIHot". **Frontend redeploy to Cloudflare Pages pending** — change is in code but not yet live in production bundle.
-- **Closed-beta auth gate** at app root ([news-app/lib/auth.ts](../news-app/lib/auth.ts), [news-app/components/BetaGateScreen.tsx](../news-app/components/BetaGateScreen.tsx)). Blocks every data effect in `App.tsx` until `app_metadata.is_beta_user === true`. Bilingual gate UI; default language carries over from invite metadata. Anonymous Supabase user under the hood — Round 2 will upgrade to email-bound via `updateUser({ email })` while preserving `auth.uid()`.
+- **Open Beta auth model:** public feed loads without login. Login rows appear in Deep Analysis, Q&A, and Trend Brief slots for anonymous users; hovering/clicking the row triggers OAuth login affordances. GitHub/Google OAuth unlocks authenticated analysis paths. Closed-beta gate components/functions are legacy only.
 
 ---
 
@@ -187,7 +192,7 @@ Edge Function `ingest-apify-tweets` deployed. Receives `RUN_SUCCEEDED` webhook f
 
 ### Stage 5 — Trend Brief ✅ COMPLETE
 
-**Trend Brief feature is live.** `generate-trend-brief` Edge Function deployed; `trend_briefs` table live; `TrendBriefCard` in `App.tsx`; `embed-batch` already has recency sort.
+**Trend Brief feature is live.** `generate-trend-brief` Edge Function deployed; shared `trend_briefs` and per-user `user_trend_briefs` tables live; `TrendBriefCard` in `App.tsx`; `embed-batch` already has recency sort. Anonymous users see a bilingual Trend Brief login row instead of generated content.
 
 **Note:** "Today" returns 204 (no articles) when zero articles have `created_at` in the UTC calendar day. This is correct — articles from the morning ET ingest land at Apr 1 UTC. Next UTC day's articles will populate Today correctly. Use 3D/7D to see the card in action.
 
@@ -255,7 +260,10 @@ WeChat RSS bridges (wewe-rss, wechat2rss) return the RSS envelope but content qu
 - **rag_retrieval_* columns:** trace headers, candidate ranks/scores/drop reasons, and injected prompt contexts. Service-role only; created by `20260531_rag_trace_completeness.sql`.
 - **rag_eval_* columns:** eval sets, cases, gold evidence labels, replay runs, per-case retrieval metrics, and aggregate retrieval metrics. Service-role/admin analysis only; created by `20260601_rag_eval_dataset.sql`.
 - **article_chunks columns:** eval-only article chunk text, hashes, chunking version/params, embeddings, and indexes. Created by `20260602_article_chunks_eval_scaffold.sql`; not production retrieval.
-- **trend_briefs columns:** `id, anchor_date, step_days, synthesis_en, synthesis_zh, sources_json JSONB, model, tokens_used, generated_at, expires_at`
+- **trend_briefs columns:** `id, anchor_date, step_days, synthesis_en, synthesis_zh, sources_json JSONB, model, tokens_used, generated_at, expires_at` — service-owned shared cache
+- **user_article_questions columns:** user-scoped article question overrides written by `refresh-questions`
+- **user_trend_briefs columns:** user-scoped manual trend brief cache written by `generate-trend-brief`
+- **edge_rate_limits columns:** authenticated Edge Function rate-limit buckets
 - **digest_sent columns:** `id, channel, anchor_date, status, last_error, created_at, updated_at` — UNIQUE (channel, anchor_date) for idempotent claim
 - **trend_brief_feedback columns:** `user_id UUID FK`, `anchor_date date`, `step_days int`, `feedback smallint (-1|1)`, `feedback_at timestamptz`
 - **email_subscribers columns:** `id UUID PK`, `email text UNIQUE`, `lang text`, `created_at timestamptz`, `unsubscribed_at timestamptz`
