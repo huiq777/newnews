@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Platform } from 'react-native'
-import { APP_URL, supabase } from './config'
+import { supabase } from './config'
 
 export type OAuthProvider = 'github' | 'google'
 export type AuthStatus = 'checking' | 'anonymous' | 'authed' | 'auth_error'
@@ -18,47 +18,7 @@ export function useAuthGate() {
   const [displayName, setDisplayName] = useState<string | null>(null)
   const [authError, setAuthError] = useState<string | null>(null)
 
-  const consumeOAuthRedirect = useCallback(async (): Promise<boolean> => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return true
-
-    const url = new URL(window.location.href)
-    const code = url.searchParams.get('code')
-    const errorDescription = url.searchParams.get('error_description') ?? url.searchParams.get('error')
-    if (!code && !errorDescription) return true
-
-    const cleanUrl = () => {
-      url.searchParams.delete('code')
-      url.searchParams.delete('state')
-      url.searchParams.delete('error')
-      url.searchParams.delete('error_code')
-      url.searchParams.delete('error_description')
-      window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`)
-    }
-
-    if (errorDescription) {
-      cleanUrl()
-      setAuthError(friendlyAuthError(errorDescription))
-      setStatus('auth_error')
-      return false
-    }
-
-    if (!code) return true
-
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
-    cleanUrl()
-    if (error) {
-      setAuthError(friendlyAuthError(error.message))
-      setStatus('auth_error')
-      return false
-    }
-
-    return true
-  }, [])
-
   const syncSession = useCallback(async () => {
-    const canContinue = await consumeOAuthRedirect()
-    if (!canContinue) return
-
     const { data, error } = await supabase.auth.getSession()
     if (error) {
       setAuthError(friendlyAuthError(error.message))
@@ -75,7 +35,7 @@ export function useAuthGate() {
     )
     setAuthError(null)
     setStatus(user ? 'authed' : 'anonymous')
-  }, [consumeOAuthRedirect])
+  }, [])
 
   useEffect(() => {
     void syncSession()
@@ -86,8 +46,8 @@ export function useAuthGate() {
   }, [syncSession])
 
   const redirectTo = useMemo(() => {
-    if (Platform.OS === 'web') {
-      return APP_URL
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      return window.location.origin
     }
     return undefined
   }, [])
