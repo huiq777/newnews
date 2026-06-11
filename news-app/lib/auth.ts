@@ -10,6 +10,12 @@ function friendlyAuthError(message: string): string {
   if (lower.includes('unsupported provider') || lower.includes('provider is not enabled')) {
     return 'This sign-in provider is not enabled in Supabase yet. Enable GitHub and Google in Authentication > Providers.'
   }
+  if (lower.includes('database error saving new user') || lower.includes('database error creating') || lower.includes('unexpected_failure')) {
+    return 'Supabase could not create this user because a database trigger failed. Check Auth Logs and auth.users triggers, especially public.handle_new_user().'
+  }
+  if (lower.includes('pkce') || lower.includes('code verifier')) {
+    return 'Sign-in callback could not be completed. Clear site data for this domain, then try again. If it keeps happening, verify the Supabase redirect URL exactly matches this domain.'
+  }
   return message
 }
 
@@ -17,6 +23,18 @@ export function useAuthGate() {
   const [status, setStatus] = useState<AuthStatus>('checking')
   const [displayName, setDisplayName] = useState<string | null>(null)
   const [authError, setAuthError] = useState<string | null>(null)
+
+  const hasOAuthCallbackParams = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return false
+    const url = new URL(window.location.href)
+    return (
+      url.searchParams.has('code') ||
+      url.searchParams.has('error') ||
+      url.searchParams.has('error_description') ||
+      window.location.hash.includes('access_token') ||
+      window.location.hash.includes('error_description')
+    )
+  }, [])
 
   const syncSession = useCallback(async () => {
     const { data, error } = await supabase.auth.getSession()
@@ -34,8 +52,21 @@ export function useAuthGate() {
         null,
     )
     setAuthError(null)
-    setStatus(user ? 'authed' : 'anonymous')
-  }, [])
+    if (user) {
+      setStatus('authed')
+      return
+    }
+
+    if (hasOAuthCallbackParams()) {
+      setAuthError(
+        'Sign-in returned to the app, but no session was stored. Clear site data for this domain and try again. If it still happens, the deployed app and Supabase redirect URL are not using the same OAuth flow/origin.',
+      )
+      setStatus('auth_error')
+      return
+    }
+
+    setStatus('anonymous')
+  }, [hasOAuthCallbackParams])
 
   useEffect(() => {
     void syncSession()
