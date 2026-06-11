@@ -1,144 +1,127 @@
 # News Project
 
-An AI-powered bilingual (EN + ZH) news aggregator with daily Feishu digest and inline RAG Q&A. Everything runs on free tiers.
+Language: [English](#english) | [中文](#中文) | [Agent/LLM Orientation](#agentllm-orientation)
 
----
+## English
 
-## System Architecture
+Open Beta AI news intelligence app for bilingual AI/tech coverage. The public daily feed is readable without login; GitHub or Google OAuth unlocks Deep Analysis, streaming RAG Q&A, question refresh, and Trend Brief generation.
 
-```
-Sources
-  ├── RSS feeds (TechCrunch, Ars Technica, The Verge)
-  ├── WeChat via wechat2rss bridge (Founder Park, GeekPark, 36氪, etc.)
-  ├── Builder tweets via follow-builders/feed-x.json (GitHub, no X API cost)
-  └── AI podcasts via follow-builders/feed-podcasts.json (YouTube transcripts)
-          │
-          ▼
-  [ingest-rss]       hourly — RSS + Atom + WeChat + Reddit
-  [ingest-builders]  daily 6am UTC — tweets + podcast episodes; bio extraction
-          │
-          ▼
-    raw_ingestion  (Supabase, status=pending)
-          │
-          ▼
-    [process-queue]  Supabase Edge Function, pg_cron */5 * * * *
-    • scrape full article content (node-html-parser on Deno; 8s timeout)
-    • bilingual summarize + 3 EN + 3 ZH questions in one combined LLM call
-    • LLM routing: TokenRouter `qwen/qwen3.6-plus` (120s) → OpenRouter → Groq fallback
-    • engagement metadata (tweet likes/retweets from raw_ingestion.metadata)
-          │
-          ▼
-      daily_news  (bilingual titles + summaries + questions + engagement)
-          │
-          ▼
-    [embed-batch]  every 5min
-    • Cohere embed-english-v3.0, 1024-dim
-          │
-          ▼
-    daily_news.embedding  (pgvector HNSW index)
-          │
-          ▼
-    [answer-question]  Supabase Edge Function (authenticated user tap)
-    • Cohere query embed → match_articles RPC → top 3 related
-    • Groq streaming SSE → inline answer on article card
-          │
-    [generate-trend-brief]  pg_cron 00:25 UTC
-    • cross-window trend synthesis → trend_briefs (synthesis_en + synthesis_zh)
-          │
-          ▼
-    [send-digest]  daily 00:30 UTC
-    • today's trend brief → Feishu (ZH), Slack/Discord/Telegram (EN)
-    • per-day per-channel idempotency via digest_sent
-```
+For the interview-ready background, metrics, and implementation story, read [docs/project-interview-resume-brief.md](docs/project-interview-resume-brief.md).
 
----
+### What It Does
 
-## Tech Stack
+- Ingests RSS, WeChat, Reddit, YouTube fallback feeds, builder tweets, podcasts, AIHot, official sources, Product Hunt, Nowcoder, GitHub Trending, and arXiv.
+- Filters for AI relevance, generates bilingual titles/summaries/questions, embeds articles, and serves a grouped public feed.
+- Streams article-grounded Q&A through Supabase Edge Functions, with RAG traces for retriever inputs, ranked candidates, injected context, answer logs, and feedback.
+- Generates cross-window Trend Briefs with historical enrichment, copy/feedback controls, and digest delivery.
+- Keeps premium generated content behind OAuth and Edge Function rate limits instead of broad direct table reads.
 
-| Layer | Technology | Notes |
-|---|---|---|
-| Database | Supabase (PostgreSQL + pgvector) | RLS; REST API; HNSW cosine index |
-| Ingestion | Cloudflare Workers (cron-triggered) + Supabase Edge Functions (pg_cron) | Free tier; secrets stay server-side; 50 subreq/invocation on CF |
-| LLM (primary) | TokenRouter `qwen/qwen3.6-plus` | 120s timeout; summarization + questions in one call; model-flexible without redeploy |
-| LLM (fallback) | OpenRouter → Groq `llama-3.3-70b-versatile` | AbortError / TCP / 429 fallback chain |
-| Embeddings | Cohere `embed-english-v3.0` | 1024-dim; asymmetric input_type (search_document vs search_query) |
-| Q&A | Supabase Edge Functions | `answer-question` (streaming RAG), `refresh-questions` (on-demand), both OAuth-gated |
-| Frontend | React Native / Expo | Public daily feed; GitHub/Google OAuth unlocks Deep Analysis, Q&A, and Trend Briefs |
-| Delivery | Feishu / Slack / Discord / Telegram webhooks | Daily trend brief at 00:30 UTC (8:30 PM EDT); Feishu = ZH, others = EN |
+### Current Results
 
----
+Latest valid offline RAG eval uses corpus-health run `54dcd974-2fa2-4fb7-bb62-6eae9f3880c0` on eval set `qa-v1-2026-06`.
 
-## Data Pipeline
+| Track | Result |
+|---|---|
+| Selected retrieval candidate | `chunk_dense @cf/baai/bge-m3` |
+| Retrieval eval, 21 approved cases | Recall@5 `0.895`, Recall@10 `0.943`, MRR `0.739`, NDCG@10 `0.764`, Hit@5 `0.952` |
+| Latency for selected candidate | p50/p95 as low as `1179/3425ms` |
+| Generation eval, latest aggregate | Faithfulness `0.994`, answer relevancy `0.950`, context precision `0.785`, context recall `0.819` |
+| Quality ceiling | `rerank_hybrid` reached Recall@10 `1.000`, but p95 `68056ms`, so it stays eval-only |
 
-### 1. Ingestion
-- `ingest-rss` (hourly): RSS + Atom + WeChat + Reddit → `raw_ingestion`
-- `ingest-builders` (daily 6am UTC): builder tweets + podcast episodes → `raw_ingestion`; bio extraction via OpenRouter
-- `ingest-apify-tweets` (Edge Function webhook): Apify `RUN_SUCCEEDED` → `raw_ingestion`
+Production `answer-question` still uses the existing article-level retriever until a feature-flagged rollout plan is executed. The chunk, hybrid, rerank, generation, and agentic paths are eval-gated.
 
-### 2. Processing (`process-queue` — Supabase Edge Function, pg_cron `*/5 * * * *`)
-For each pending article (5 in parallel via atomic `claim_pending_batch` RPC):
-- node-html-parser scraping (8s timeout; `stripHtml()` fallback)
-- One combined LLM call → bilingual title + 3-bullet summary + 3 EN + 3 ZH questions
-- LLM routing: TokenRouter `qwen/qwen3.6-plus` (primary, 120s) → OpenRouter → Groq `llama-3.3-70b-versatile`
-- Pre-LLM AI keyword gate for tweets (token efficiency)
-- Propagate engagement: tweet likes/retweets from `raw_ingestion.metadata`
-- Insert into `daily_news`
+These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief need separate surface-specific evals before their quality can be quoted. Agentic RAG is an eval-only orchestration path for harder multi-hop/comparison questions; GraphRAG is deferred until relation-based failures justify a graph layer.
 
-### 3. Embedding (`embed-batch` — every 5 min)
-- Up to 45 articles per run; prefers `article_content`; falls back to `summary`
-- Cohere `embed-english-v3.0` batch call → `daily_news.embedding`
+### How It Is Built
 
-### 4. Q&A (`answer-question` Edge Function — authenticated user tap)
-- Cohere query embedding (`search_query`) → `match_articles` RPC → top 3 related
-- Groq streaming SSE → inline answer rendered word-by-word on article card
+- **Frontend:** Expo/React Native web app, deployed through Cloudflare Pages.
+- **Data + Auth:** Supabase Postgres, pgvector, RLS, Auth OAuth providers.
+- **Ingestion:** Cloudflare Workers cron jobs plus Supabase Edge Function webhooks.
+- **AI:** TokenRouter primary LLM path, OpenRouter/Groq fallback, Cohere article embeddings, Cloudflare Workers AI BGE for eval chunk embeddings.
+- **Observability:** `pipeline_events`, `qa_logs`, `rag_retrieval_*`, and `rag_eval_*` tables.
+- **Access model:** anonymous public feed; OAuth-gated analysis; `user_article_questions` and `user_trend_briefs` for user-scoped overrides.
 
-### 5. Public Feed + OAuth-Gated Analysis
-- Anonymous visitors can read the daily feed through `fetch_grouped_feed`.
-- Premium generated content is nulled for anonymous callers by the feed RPC and replaced in the UI with inline login rows.
-- GitHub and Google OAuth unlock Deep Analysis, Q&A, question refresh, and browser-triggered trend briefs.
-- Manual question refreshes write `user_article_questions`; manual trend brief generations write `user_trend_briefs`, leaving shared defaults untouched.
+## 中文
 
----
+这是一个面向 Open Beta 的双语 AI 新闻智能应用。用户无需登录即可浏览每日新闻流；通过 GitHub 或 Google OAuth 登录后，可以使用 Deep Analysis、流式 RAG 问答、问题刷新和 Trend Brief 生成。
 
-## Project Structure
+如果需要面试/简历视角的背景、指标和实现说明，请阅读 [docs/project-interview-resume-brief.md](docs/project-interview-resume-brief.md)。
 
-```
-News Project/
-├── AI-SWE-skill.md              ← Technical reference (read before any code change)
-├── AI-PM-skill.md               ← Product strategy + roadmap
-├── current-state.md             ← Live deployment status
-├── keep-in-mind.md              ← Hard-won lessons
-├── docs/
-│   ├── architecture.md          ← Technical decisions + rationale
-│   ├── schema.md                ← DB schema, indexes, RLS
-│   ├── ingestion-pipeline.md    ← Worker-by-worker deployment guide
-│   ├── edge-functions.md        ← answer-question + refresh-questions API
-│   ├── api-keys-and-env.md      ← Every secret and where it lives
-│   └── frontend.md              ← Expo setup + Cloudflare Pages deployment
-├── workers/
-│   ├── ingest-rss/              ← RSS/Atom ingestion
-│   ├── ingest-builders/         ← Tweets + podcasts + bio extraction
-│   ├── process-queue/           ← Scrape + summarize + questions + engagement
-│   ├── embed-batch/             ← Cohere embeddings
-│   └── send-digest/             ← Daily trend-brief delivery (Feishu/Slack/Discord/Telegram)
-├── supabase/
-│   └── functions/
-│       ├── answer-question/     ← Authenticated streaming RAG Q&A
-│       └── refresh-questions/   ← Authenticated user-scoped question regeneration
-└── news-app/
-    └── App.tsx                  ← Full frontend
+### 功能概览
+
+- 自动采集 RSS、微信公众号、Reddit、YouTube 轻量 fallback、开发者推文、播客、AIHot、官方来源、Product Hunt、Nowcoder、GitHub Trending 和 arXiv。
+- 过滤 AI 相关内容，生成中英文标题、摘要和问题，写入向量，并通过分组 feed 提供公开阅读。
+- 通过 Supabase Edge Functions 提供基于文章证据的流式 RAG 问答，并记录检索输入、候选排序、注入上下文、回答日志和反馈。
+- 生成跨时间窗口 Trend Brief，包含历史相关文章补充、复制/反馈交互和摘要分发。
+- 将高成本的生成式分析放在 OAuth 和 Edge Function rate limit 后面，而不是让前端直接读取大范围分析表。
+
+### 当前结果
+
+最新有效离线 RAG 评估使用 corpus-health run `54dcd974-2fa2-4fb7-bb62-6eae9f3880c0`，评估集为 `qa-v1-2026-06`。
+
+| 项目 | 结果 |
+|---|---|
+| 当前选择的检索候选 | `chunk_dense @cf/baai/bge-m3` |
+| 21 个 approved case 检索评估 | Recall@5 `0.895`，Recall@10 `0.943`，MRR `0.739`，NDCG@10 `0.764`，Hit@5 `0.952` |
+| 候选方案延迟 | p50/p95 最好达到 `1179/3425ms` |
+| 最新 generation eval 聚合 | Faithfulness `0.994`，Answer relevancy `0.950`，Context precision `0.785`，Context recall `0.819` |
+| 质量上限参考 | `rerank_hybrid` Recall@10 达到 `1.000`，但 p95 `68056ms`，因此仍保留为 eval-only |
+
+生产环境的 `answer-question` 仍使用现有 article-level retriever。chunk、hybrid、rerank、generation eval 和 agentic 路径都必须先通过评估、延迟和回滚门槛，才能进入生产 rollout。
+
+这些指标描述的是 **Q&A RAG eval track**。Deep Analysis 和 Trend Brief 需要单独的 surface-specific eval，不能直接套用 Q&A 的 Recall/MRR/NDCG。Agentic RAG 目前是 eval-only 的编排层，用于未来更复杂的 multi-hop/comparison 问题；GraphRAG 暂缓，直到评估证明 chunk/hybrid/rerank 无法解决关系型证据问题。
+
+### 技术实现
+
+- **前端:** Expo/React Native Web，通过 Cloudflare Pages 部署。
+- **数据与认证:** Supabase Postgres、pgvector、RLS、Supabase Auth OAuth providers。
+- **采集:** Cloudflare Workers 定时任务 + Supabase Edge Function webhook。
+- **AI:** TokenRouter 主路径，OpenRouter/Groq fallback，Cohere 文章向量，Cloudflare Workers AI BGE 用于 eval chunk embedding。
+- **可观测性:** `pipeline_events`、`qa_logs`、`rag_retrieval_*`、`rag_eval_*`。
+- **访问模型:** 匿名用户可看公开 feed；OAuth 用户可用生成式分析；`user_article_questions` 和 `user_trend_briefs` 保存用户级 override。
+
+## Agent/LLM Orientation
+
+If you are an agent or LLM working in this repo, read these first:
+
+- [docs/current-state.md](docs/current-state.md) — live deployment state, active architecture, and next steps.
+- [docs/project-interview-resume-brief.md](docs/project-interview-resume-brief.md) — concise background, metrics, and implementation narrative.
+- [docs/instructions.md](docs/instructions.md) — commands for deployment, RAG eval, smoke checks, and local dev.
+- [docs/schema.md](docs/schema.md) — database tables, RLS model, eval stores, and service-owned analysis caches.
+- [docs/edge-functions.md](docs/edge-functions.md) — authenticated analysis APIs, webhooks, streaming patterns, and required secrets.
+- [docs/api-keys-and-env.md](docs/api-keys-and-env.md) — where secrets live and how OAuth callback URLs are configured.
+- [docs/architecture.md](docs/architecture.md) — rationale for Supabase, Cloudflare Workers, queueing, LLM routing, and retrieval design.
+
+Core invariants:
+
+- The public feed is anonymous; generated analysis is OAuth-gated.
+- Closed-beta invite auth is legacy/rollback only.
+- Do not expose `SUPABASE_SERVICE_ROLE_KEY` or AI provider keys to the frontend.
+- Browser analysis should go through Edge Functions, not direct broad reads from `article_deep_analysis`, `trend_briefs`, `user_article_questions`, or `user_trend_briefs`.
+- Production `answer-question` has not yet switched to chunk retrieval; chunk/hybrid/rerank/agentic work is eval-gated until a rollout plan lands.
+- When quoting RAG results, use corpus-health-valid runs only and preserve the offline-vs-production distinction.
+- Q&A RAG, Deep Analysis eval, Trend Brief eval, Agentic RAG, and GraphRAG are separate terms. Do not transfer metrics from one surface to another.
+- Future plan: [Deep Analysis and Trend Brief RAG eval refinement](docs/superpowers/plans/2026-06-11-deep-analysis-trend-brief-rag-eval-refinement-plan.md).
+
+## Useful Docs
+
+- [Project interview/resume brief](docs/project-interview-resume-brief.md) — background, results/metrics, and how the system was achieved.
+- [Current state](docs/current-state.md) — live component status and next steps.
+- [Command reference](docs/instructions.md) — deploy, smoke, and eval commands.
+- [Schema](docs/schema.md) — tables, RLS, and eval stores.
+- [Edge functions](docs/edge-functions.md) — user-facing and webhook APIs.
+- [API keys and env](docs/api-keys-and-env.md) — secrets, OAuth setup, and deployment env.
+
+## Local Dev
+
+```bash
+cd news-app
+npm install
+npx expo start --web
 ```
 
----
+Run the core verification from the repo root:
 
-## Key Design Decisions
-
-Full rationale in [`docs/architecture.md`](docs/architecture.md). Summary:
-
-- **Supabase over Firebase** — pgvector is native to PostgreSQL; no separate vector DB needed
-- **Cloudflare Workers over Lambda** — free cron triggers; secrets stay server-side; TypeScript native
-- **Decoupled queue** — `raw_ingestion` as buffer between fetching and summarization enables retry logic + audit trail
-- **follow-builders for tweets** — reads public GitHub-hosted JSON feeds; zero X API cost; no scraping
-- **Single `ingest-builders` worker for tweets + podcasts** — all 5 cron slots are in use; merging avoids needing a 6th
-- **Polling for embeddings** — database triggers cause fan-out and rate limit spikes; a cron worker batches cleanly
-- **Asymmetric Cohere input_type** — `search_document` at index time, `search_query` at retrieval time; swapping silently degrades recall
+```bash
+npm test
+```

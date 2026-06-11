@@ -1,17 +1,17 @@
 # Database Schema
 
-> **Note:** This document reflects the schema as of 2026-06-03. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
+> **Note:** This document reflects the schema as of 2026-06-11. Verify against deployed Supabase DB if in doubt — migrations may have been applied after this was last updated.
 
 ## Overview
 
 The schema is organized into four layers:
 
 - **Ingestion layer** (`sources`, `raw_ingestion`) — managed exclusively by Cloudflare Workers. Never written to by the frontend client.
-- **Product layer** (`daily_news`) — read by the frontend, written by Cloudflare Workers and Supabase Edge Functions via the service role.
-- **Cache layer** (`trend_briefs`) — written by the `generate-trend-brief` Edge Function; read directly by the frontend via anon key. TTL-based invalidation.
+- **Product layer** (`daily_news`) — public feed data is read through the `fetch_grouped_feed` RPC; written by Cloudflare Workers and Supabase Edge Functions via the service role.
+- **Analysis cache layer** (`trend_briefs`, `user_article_questions`, `user_trend_briefs`) — shared and per-user generated analysis caches. Browser access goes through authenticated Edge Functions, not broad direct REST reads.
 - **Observability layer** (`pipeline_events`, `qa_logs`, `rag_retrieval_*`) — service-role only. `pipeline_events` traces every article through the pipeline; `qa_logs` traces every Q&A request; `rag_retrieval_*` records retriever inputs, ranked candidates, scores, drop reasons, and injected prompt context.
 - **RAG eval layer** (`rag_eval_*`, `article_chunks`) — service-role/admin analysis only. Golden dataset labels, offline replay results, aggregate retrieval metrics, and eval-only chunk retrieval scaffolding. Production retrieval does not read `article_chunks` yet.
-- **Auth layer** (`beta_invites` + `is_beta_user()` helper) — service-role only. The `redeem-invite` Edge Function writes; the helper function is referenced indirectly from RLS policies of future user-scoped tables (e.g. `qa_logs`).
+- **Auth/rate-limit layer** (`auth.users`, OAuth providers, `edge_rate_limits`) — current access model is Open Beta public feed plus GitHub/Google OAuth-gated analysis. `beta_invites` + `is_beta_user()` remain legacy closed-beta artifacts.
 - **User feedback layer** (`trend_brief_feedback`) — per-user brief ratings.
 - **Email layer** (`email_subscribers`, `email_digest_sent`) — digest opt-in and delivery accounting.
 
@@ -31,7 +31,20 @@ The ingestion queue. Cloudflare Workers write raw article content here and track
 The clean, production-ready article store. Contains AI-generated bilingual summaries, pre-generated questions, scraped full article content, and Cohere vector embeddings. This is what the frontend reads and what the RAG chatbot searches. Linked back to `raw_ingestion` via `raw_ingestion_id` for audit traceability. The `engagement` JSONB column stores platform engagement data: `{likes, retweets}` for tweets (propagated from `raw_ingestion.metadata`), or `{hn_score, hn_comments}` for RSS articles enriched via the HN Algolia API. The `metadata` JSONB column (added 2026-05-11) stores source-specific article-level data: for `aihot` rows it holds `{source, title_en, category, aihot_id}` where `source` is the original outlet name (e.g. "Hugging Face"); propagated by `process-queue` from `raw_ingestion.metadata` at insert time.
 
 ### `trend_briefs`
-Cache table for cross-window trend synthesis. One row per `(anchor_date, step_days)` time window; covers ALL content categories in a single brief. The `generate-trend-brief` Edge Function writes here on successful completion; the frontend reads via anon key and renders the Trend Brief card only when the "All" tab is active. TTL is 6 hours — no automated invalidation beyond that; a Refresh button gives the user manual control. Feishu does NOT read from this table.
+Service-owned shared cache table for cross-window trend synthesis. One row per `(anchor_date, step_days)` time window; covers ALL content categories in a single brief. Cron/service-mode `generate-trend-brief` writes here on successful completion, and `send-digest` reads it for delivery. Direct anon/authenticated REST reads are revoked; the browser reaches shared cached briefs only through the bounded `generate-trend-brief` Edge Function.
+
+### `user_article_questions`
+Per-user question-refresh override table. Authenticated `refresh-questions` calls generate 3 EN + 3 ZH questions for the requested article and upsert the result for the current user. This avoids mutating shared `daily_news.questions` when a single user manually refreshes.
+
+Direct client table access is denied; the Edge Function owns reads and writes with the service role after verifying the caller's Supabase user JWT.
+
+### `user_trend_briefs`
+Per-user manual Trend Brief cache. User-mode `generate-trend-brief` checks the current user's row first, then shared `trend_briefs`, and writes forced/manual generations here instead of mutating shared cron defaults.
+
+Direct client table access is denied; browser reads and writes go through `generate-trend-brief` so auth checks, response bounds, and rate limits stay centralized.
+
+### `edge_rate_limits`
+Service-owned rate-limit buckets for authenticated Edge Functions. Used to bound user-triggered generated analysis such as Q&A, question refresh, and Trend Brief generation. No direct client access.
 
 ### `channel_invites`
 Subscription manual routing table. Feishu, Slack, and other channel invite URLs rotate or expire; this table lets the operator update invite URLs without redeploying the frontend bundle. The frontend reads this table lazily when the Subscription Manual modal opens. A channel is hidden from the UI if its `invite_url` is null.
@@ -80,6 +93,9 @@ Current replay strategies are eval-only:
 ### `article_chunks`
 Eval-only chunk retrieval scaffold. Stores chunk text, hash, chunking version/params, source offsets, embedding vector, and embedding model metadata. The early scaffold was Cohere-compatible; the current eval track backfills and gates chunk coverage with `@cf/baai/bge-m3`. The current production `answer-question` function does not read this table; chunk retrieval needs a later metric-gated production plan.
 
+### `rag_eval_corpus_health_runs`
+Persisted preflight gate for retrieval/generation/agentic eval validity. Each run records the eval set, chunking version, embedding model, readiness flags, and JSON summary counts for zero-chunk gold articles, missing BGE embeddings, stale sources, and Deep Analysis backlog. Strategy-selection replay must reference a passing health run id.
+
 ### `trend_brief_feedback`
 Per-user thumbs up/down on trend briefs. Keyed on `(user_id, anchor_date, step_days)` — the time window, not the specific brief row — so a user's vote persists even after a force-refresh generates a new `trend_briefs` row. The `TrendBriefFeedback` component upserts on vote, deletes on toggle-off. RLS: authenticated users read and write only their own rows.
 
@@ -96,7 +112,7 @@ Per-subscriber per-day delivery accounting for the email channel, mirroring the 
 Columns: `id` (uuid PK), `subscriber_id` (uuid FK to email_subscribers, cascade delete), `anchor_date` (date), `step_days` (int), `status` (pending|sent|failed|skipped_empty_brief), `last_error` (text), `created_at`, `updated_at`.
 
 ### `beta_invites`
-Round 1 closed-beta invite-link redemption table. Operator mints rows via the Supabase SQL Editor and shares `https://<host>/?invite=<code>` over WeChat; the user's first click signs them in anonymously and the `redeem-invite` Edge Function ties the row to their `auth.uid()`.
+Legacy Round 1 closed-beta invite-link redemption table. It is retained for history/rollback but is no longer the primary access model. Current production access is Open Beta public feed plus GitHub/Google OAuth-gated analysis.
 
 Columns:
 - `code` (text PK) — random URL-safe slug, admin-generated.
@@ -110,7 +126,7 @@ Columns:
 
 RLS is enabled with **no anon/authenticated policies** — only `redeem-invite` (running as service role) reads or writes. Direct PostgREST `select * from beta_invites` from any logged-in user returns zero rows. This is the access-control invariant: the table never leaks invite codes to client callers.
 
-The companion helper function `public.is_beta_user()` (`security definer`) returns `true` iff the current `auth.uid()` owns a redeemed-and-non-expired row. Future user-scoped tables (e.g. `qa_logs`) use it for one-line RLS: `using (is_beta_user() and user_id = auth.uid())`.
+The companion helper function `public.is_beta_user()` (`security definer`) returns `true` iff the current `auth.uid()` owns a redeemed-and-non-expired row. Treat this as legacy closed-beta support; new authenticated analysis paths use verified Supabase user JWTs in Edge Functions.
 
 ---
 
@@ -323,11 +339,10 @@ CREATE INDEX ON trend_briefs (anchor_date, step_days, expires_at);
 
 -- Cache key: (anchor_date, step_days) WHERE expires_at > now()
 -- No category column — one brief covers all categories for a given window.
--- RLS: anon key may read; only service role may insert/update.
+-- RLS: browser reads go through generate-trend-brief; only service role reads/writes directly.
 ALTER TABLE trend_briefs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "public_read_trend_briefs"
-    ON trend_briefs FOR SELECT
-    USING (true);
+REVOKE SELECT ON trend_briefs FROM anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON trend_briefs TO service_role;
 
 -- ============================================================
 -- DELIVERY ACCOUNTING
