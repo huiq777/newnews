@@ -263,7 +263,7 @@ function TweetRow({
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>{lang === 'en' ? 'Questions' : '问题'}</Text>
             <Text style={styles.questionsHint}>
-              {lang === 'en' ? 'Click a question to generate an answer.' : '点击问题即可生成回答。'}
+              {lang === 'en' ? 'Click a question to generate an answer' : '点击问题即可生成回答'}
             </Text>
             <Pressable
               onPress={() => { innerPressed.current = true; handleRefresh() }}
