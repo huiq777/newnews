@@ -24,8 +24,8 @@ The product started as a private AI news digest and evolved into an Open Beta in
 - Implemented RAG observability with request-level traces across retriever inputs, ranked candidates, injected prompt context, `qa_logs`, and trend brief generation, enabling per-case debugging instead of black-box answer checking.
 - Designed and shipped an offline RAG evaluation harness with human-reviewed gold evidence, replayable dense/lexical/hybrid/chunk strategies, per-case metrics, aggregate leaderboards, and historical baseline preservation.
 - Improved offline retrieval from early article-level dense baselines to a corpus-health-valid chunk retrieval candidate with `@cf/baai/bge-m3`: Recall@5 `0.895`, Recall@10 `0.943`, MRR `0.739`, NDCG@10 `0.764`, Hit@5 `0.952`, p50/p95 as low as `1179/3425ms` on 21 approved cases.
-- Added generation-side eval for the selected retrieval candidate, measuring faithfulness `0.994`, answer relevancy `0.950`, context precision `0.785`, and context recall `0.819` across the latest aggregated `chunk_dense` corpus-retrieval generation results.
-- Preserved production safety by keeping `answer-question` on the existing article-level retriever while keeping chunk retrieval, hybrid retrieval, rerank, generation eval, and Agentic RAG upgrades behind corpus-health, latency, trace, and quality gates before rollout.
+- Added generation-side eval for the selected chunk-level dense retrieval candidate, measuring faithfulness `0.994`, answer relevancy `0.950`, context precision `0.785`, and context recall `0.819` across the latest aggregated `chunk_dense` corpus-retrieval generation results.
+- Promoted the corpus-health-valid `chunk_dense @cf/baai/bge-m3` candidate to the production `answer-question` default, while keeping article-level dense retrieval as explicit rollback/fallback and keeping hybrid, rerank, generation eval, and Agentic RAG upgrades behind trace and quality gates.
 
 ## Real Metrics To Quote
 
@@ -34,7 +34,7 @@ Current approved-gold eval set: `qa-v1-2026-06`, 21 runnable cases, 21 with appr
 | Strategy | Cases | Recall@5 | Recall@10 | MRR | NDCG@10 | Hit@5 | p50 | p95 | Status |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `rerank_hybrid` | 21 | 0.990 | 1.000 | 0.944 | 0.935 | 1.000 | 40932ms | 68056ms | Quality-best, latency fails gate |
-| `chunk_dense @cf/baai/bge-m3` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179ms | 3425ms | Selected retrieval candidate after passing corpus-health and metric-bound checks |
+| `chunk_dense @cf/baai/bge-m3` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179ms | 3425ms | Selected chunk-level dense retrieval candidate after passing corpus-health and metric-bound checks |
 | `chunk_hybrid` | 21 | 0.848 | 0.905 | 0.744 | 0.762 | 0.905 | 6753ms | 12447ms | Eval-only; slower and lower recall than dense |
 
 Historical baselines:
@@ -81,8 +81,8 @@ Scope note: these metrics are for the Q&A RAG eval track. Deep Analysis eval and
 
 ### Retrieval Refinement
 
-- Production `answer-question` still uses article-level dense retrieval through `match_articles_prefer_analysis`; refinement is eval-only.
-- Latest selected eval candidate is `chunk_dense @cf/baai/bge-m3`, after corpus-health repair, valid replay metadata, and metric-bound checks.
+- Production `answer-question` now defaults to `chunk_dense @cf/baai/bge-m3`, which is chunk-level dense retrieval rather than article-level retrieval, after corpus-health repair, valid replay metadata, and metric-bound checks.
+- Article-level dense retrieval through `match_articles_prefer_analysis` remains available as explicit rollback/fallback.
 - Rerank improved quality materially but failed latency gates, so it remains an offline research/audit path.
 - Corpus-health, taxonomy, hard-negative, query rewrite, Cloudflare BGE rerank, and generation-eval scaffolding are implemented as eval-only layers.
 - Rerank prefers Cloudflare Workers AI `@cf/baai/bge-reranker-base`, with LLM judge rerank as fallback/audit.

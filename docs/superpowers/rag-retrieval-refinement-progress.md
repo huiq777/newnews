@@ -1,14 +1,14 @@
 # RAG Retrieval Refinement Progress
 
-Last updated: 2026-06-09
+Last updated: 2026-06-13
 
 This is the working handoff for RAG retrieval refinement. It records what has shipped, what is eval-only, the latest measured baseline, and the next safe steps.
 
 ## Current Rule
 
-Production retrieval behavior has not changed. `answer-question` still uses article-level dense retrieval through `match_articles_prefer_analysis`, which prefers ready Deep Analysis vectors when available and falls back to article embeddings. `generate-trend-brief` still uses its existing historical enrichment path.
+Production `answer-question` now uses chunk-level dense retrieval by default through `match_answer_question_chunks` with `@cf/baai/bge-m3` query embeddings and `paragraph-window-v1-2026-06-02` chunks. The prior article-level dense path, `match_articles_prefer_analysis`, is retained as an explicit rollback baseline and optional emergency fallback, not as the normal live retriever.
 
-All dense/lexical/hybrid/chunk work below is offline evaluation only until a later metric-gated production plan explicitly changes production functions.
+Lexical, hybrid, entity, rerank, and agentic variants remain offline evaluation only. `generate-trend-brief` still uses its existing historical enrichment path.
 
 As of 2026-06-08, replay runs must carry `rag-eval-run-notes-v1` metadata in `rag_eval_runs.notes`. Unless `valid_for_strategy_selection = true` is explicitly written from a passing corpus-health preflight, legacy and new replay rows are interpreted as diagnostics only.
 
@@ -180,14 +180,14 @@ Remediation status as of 2026-06-09:
 - Fresh metric-fixed, corpus-health-valid replay exists for `chunk_dense`, `chunk_hybrid`, and `rerank_hybrid`.
 - Current corpus-health run id for strategy-valid rows: `54dcd974-2fa2-4fb7-bb62-6eae9f3880c0`.
 - Valid-only metric-bound checks return no rows, so the old `ndcg_at_10 > 1` issue is resolved for strategy-valid replay rows.
-- `chunk_dense` is the deployable retrieval candidate: rerank has much stronger quality but fails the latency gate, while chunk hybrid is slower and lower-quality than dense.
+- `chunk_dense @cf/baai/bge-m3` is the deployable retrieval candidate: this is chunk-level dense retrieval, not article-level retrieval. Rerank has much stronger quality but fails the latency gate, while chunk hybrid is slower and lower-quality than dense.
 
 Valid replay comparison:
 
 | strategy | eval run id | total_cases | Recall@5 | Recall@10 | MRR | NDCG@10 | Hit@5 | p50 ms | p95 ms | interpretation |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `rerank_hybrid` | `c24ad51f-13ca-4adc-a2e8-8b843cd3c08f` | 21 | 0.990 | 1.000 | 0.944 | 0.935 | 1.000 | 40932 | 68056 | quality-best, latency-fails gate |
-| `chunk_dense @cf/baai/bge-m3` | `8ba5bdac-88a7-4f7b-8058-1648c734cc33` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179 | 3425 | selected production candidate |
+| `chunk_dense @cf/baai/bge-m3` | `8ba5bdac-88a7-4f7b-8058-1648c734cc33` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179 | 3425 | selected chunk-level dense retrieval candidate |
 | `chunk_dense @cf/baai/bge-m3` | `e5f6d233-6908-4b89-a02d-ace206e43a36` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1112 | 7221 | repeat run; same quality, higher p95 |
 | `chunk_hybrid` | `9a265197-b101-4a4d-9302-d7791e95c0fd` | 21 | 0.848 | 0.905 | 0.744 | 0.762 | 0.905 | 6753 | 12447 | eval-only; slower and lower recall |
 

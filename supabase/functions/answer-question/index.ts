@@ -48,6 +48,9 @@ type RetrievalContext = {
   injectedRelatedIds: string[]
   retrievalRunId: string | null
   ragSuccess: boolean
+  retrieverMode: RetrieverMode
+  retrieverSelectionReason: string
+  fallbackReason: string | null
 }
 
 type RelatedArticleCandidate = {
@@ -56,6 +59,34 @@ type RelatedArticleCandidate = {
   summary: string
   score?: number | null
   embedding_source?: string | null
+  candidateType?: 'article' | 'chunk'
+  chunkId?: string | null
+  chunkText?: string | null
+  metadata?: Record<string, unknown>
+}
+
+type RetrieverMode = 'chunk_dense_bge_m3' | 'article_dense_prefer_analysis'
+
+type RetrieverSelection = {
+  mode: RetrieverMode
+  reason: string
+  allowArticleDenseFallback: boolean
+}
+
+function envBool(value: string | undefined, defaultValue: boolean): boolean {
+  if (value == null || value === '') return defaultValue
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase())
+}
+
+function selectRetrieverMode(): RetrieverSelection {
+  const rawMode = (Deno.env.get('ANSWER_QUESTION_RETRIEVER_MODE') || '').trim()
+  const allowArticleDenseFallback = envBool(Deno.env.get('ANSWER_QUESTION_ALLOW_ARTICLE_DENSE_FALLBACK'), true)
+
+  if (rawMode === 'article_dense_prefer_analysis') {
+    return { mode: 'article_dense_prefer_analysis', reason: 'explicit_rollback_env', allowArticleDenseFallback }
+  }
+
+  return { mode: 'chunk_dense_bge_m3', reason: rawMode === 'chunk_dense_bge_m3' ? 'explicit_chunk_env' : 'default_chunk_dense_gold_set', allowArticleDenseFallback }
 }
 
 async function route(
@@ -160,6 +191,54 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+const BGE_EMBEDDING_MODEL = '@cf/baai/bge-m3'
+
+function env(name: string, fallback = ''): string {
+  return Deno.env.get(name) ?? fallback
+}
+
+function bgeEmbeddingsUrl(): string {
+  const baseUrl = env('BGE_EMBEDDING_BASE_URL')
+  if (baseUrl) return `${baseUrl.replace(/\/$/, '')}/v1/embeddings`
+
+  const accountId = env('CLOUDFLARE_ACCOUNT_ID')
+  if (!accountId) throw new Error('Missing CLOUDFLARE_ACCOUNT_ID')
+  return `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/embeddings`
+}
+
+function bgeApiToken(): string {
+  const token = env('BGE_EMBEDDING_API_KEY') || env('CLOUDFLARE_API_TOKEN')
+  if (!token) throw new Error('Missing CLOUDFLARE_API_TOKEN')
+  return token
+}
+
+async function embedQueryWithBgeM3(question: string): Promise<number[]> {
+  const res = await fetch(bgeEmbeddingsUrl(), {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${bgeApiToken()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: BGE_EMBEDDING_MODEL,
+      input_type: 'search_query',
+      input: [question],
+    }),
+  })
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '')
+    throw new Error(`Cloudflare BGE query ${res.status}: ${errBody.substring(0, 300)}`)
+  }
+  const data = await res.json() as { data?: Array<{ embedding?: number[] }>; embeddings?: number[][] }
+  const embedding = Array.isArray(data.data)
+    ? data.data[0]?.embedding
+    : data.embeddings?.[0]
+  if (!Array.isArray(embedding) || embedding.length !== 1024) {
+    throw new Error(`Cloudflare BGE returned invalid query embedding length=${embedding?.length ?? 'null'}`)
+  }
+  return embedding
+}
+
 async function recordAnswerQuestionTrace(params: {
   supabaseUrl: string
   serviceKey: string
@@ -173,6 +252,10 @@ async function recordAnswerQuestionTrace(params: {
   relatedContext: string
   matchCount: number
   latencyMs: number
+  requestedRetrieverMode: RetrieverMode
+  actualRetrieverMode: RetrieverMode
+  retrieverSelectionReason: string
+  fallbackReason: string | null
 }): Promise<string | null> {
   try {
     const sbService = createClient(params.supabaseUrl, params.serviceKey, {
@@ -189,12 +272,19 @@ async function recordAnswerQuestionTrace(params: {
         query_input: {
           article_id: params.articleId,
           lang: params.lang,
+          requested_retriever_mode: params.requestedRetrieverMode,
+          actual_retriever_mode: params.actualRetrieverMode,
+          retriever_selection_reason: params.retrieverSelectionReason,
+          fallback_reason: params.fallbackReason,
+          selected_eval_run_id: '8ba5bdac-88a7-4f7b-8058-1648c734cc33',
+          corpus_health_run_id: '54dcd974-2fa2-4fb7-bb62-6eae9f3880c0',
+          eval_set: 'qa-v1-2026-06',
         },
-        query_embedding_model: 'embed-english-v3.0',
+        query_embedding_model: params.actualRetrieverMode === 'chunk_dense_bge_m3' ? BGE_EMBEDDING_MODEL : 'embed-english-v3.0',
         embedding_input_type: 'search_query',
-        retrieval_strategy: 'dense_article_similarity_prefer_deep_analysis',
-        retrieval_version: 'answer-question-related-v1-2026-05-31',
-        retriever_name: 'match_articles_prefer_analysis',
+        retrieval_strategy: params.actualRetrieverMode === 'chunk_dense_bge_m3' ? 'chunk_dense_bge_m3' : 'dense_article_similarity_prefer_deep_analysis',
+        retrieval_version: params.actualRetrieverMode === 'chunk_dense_bge_m3' ? 'answer-question-chunk-dense-bge-m3-v1-2026-06-13' : 'answer-question-related-v1-2026-05-31',
+        retriever_name: params.actualRetrieverMode === 'chunk_dense_bge_m3' ? 'match_answer_question_chunks' : 'match_articles_prefer_analysis',
         match_count: params.matchCount,
         candidate_count: params.candidates.length,
         injected_count: params.injectedRelatedIds.length,
@@ -216,16 +306,26 @@ async function recordAnswerQuestionTrace(params: {
         return {
           retrieval_run_id: run.id,
           rank: index + 1,
-          candidate_type: 'article',
+          candidate_type: candidate.candidateType || 'article',
           article_id: candidate.id,
+          chunk_id: candidate.chunkId || null,
           title: candidate.title,
-          summary_excerpt: (candidate.summary || '').slice(0, 1000),
+          summary_excerpt: (candidate.chunkText || candidate.summary || '').slice(0, 1000),
           score_dense: typeof candidate.score === 'number' ? candidate.score : null,
           score_final: typeof candidate.score === 'number' ? candidate.score : null,
           embedding_source: candidate.embedding_source ?? null,
           injected,
           drop_reason: injected ? null : candidate.id === params.articleId ? 'primary_article_excluded' : 'rank_beyond_context_cap',
-          metadata: { lang: params.lang },
+          metadata: {
+            ...(candidate.metadata || {}),
+            lang: params.lang,
+            requested_retriever_mode: params.requestedRetrieverMode,
+            actual_retriever_mode: params.actualRetrieverMode,
+            retriever_selection_reason: params.retrieverSelectionReason,
+            fallback_reason: params.fallbackReason,
+            selected_eval_run_id: '8ba5bdac-88a7-4f7b-8058-1648c734cc33',
+            corpus_health_run_id: '54dcd974-2fa2-4fb7-bb62-6eae9f3880c0',
+          },
         }
       })
       const { error } = await sbService.from('rag_retrieval_candidates').insert(candidateRows)
@@ -267,6 +367,70 @@ async function recordAnswerQuestionTrace(params: {
   }
 }
 
+async function retrieveArticleDenseCandidates(params: {
+  question: string
+  sbHeaders: Record<string, string>
+  env: { supabaseUrl: string; cohereApiKey: string }
+  maxRelated: number
+}): Promise<RelatedArticleCandidate[]> {
+  const cohereRes = await fetch('https://api.cohere.com/v1/embed', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${params.env.cohereApiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'embed-english-v3.0', input_type: 'search_query', texts: [params.question] }),
+  })
+  if (!cohereRes.ok) throw new Error(`cohere_embed_failed:${cohereRes.status}`)
+
+  const cohereData: { embeddings: number[][] } = await cohereRes.json()
+  const queryEmbedding = cohereData.embeddings[0]
+  const rpcRes = await fetch(`${params.env.supabaseUrl}/rest/v1/rpc/match_articles_prefer_analysis`, {
+    method: 'POST',
+    headers: params.sbHeaders,
+    body: JSON.stringify({ query_embedding: queryEmbedding, match_count: params.maxRelated + 1 }),
+  })
+  if (!rpcRes.ok) throw new Error(`match_articles_prefer_analysis_failed:${rpcRes.status}`)
+
+  const rows: RelatedArticleCandidate[] = await rpcRes.json()
+  return rows.map(row => ({
+    ...row,
+    candidateType: 'article',
+    metadata: { ...(row.metadata || {}), retrieval_path: 'article_dense_prefer_analysis' },
+  }))
+}
+
+async function retrieveChunkDenseCandidates(params: {
+  question: string
+  sbHeaders: Record<string, string>
+  env: { supabaseUrl: string }
+  maxRelated: number
+}): Promise<RelatedArticleCandidate[]> {
+  const queryEmbedding = await embedQueryWithBgeM3(params.question)
+  const rpcRes = await fetch(`${params.env.supabaseUrl}/rest/v1/rpc/match_answer_question_chunks`, {
+    method: 'POST',
+    headers: params.sbHeaders,
+    body: JSON.stringify({
+      query_embedding: queryEmbedding,
+      match_count: params.maxRelated + 1,
+      chunking_version_filter: 'paragraph-window-v1-2026-06-02',
+      chunk_overfetch_multiplier: 5,
+      embedding_model_filter: BGE_EMBEDDING_MODEL,
+    }),
+  })
+  if (!rpcRes.ok) throw new Error(`match_answer_question_chunks_failed:${rpcRes.status}`)
+
+  const rows = await rpcRes.json()
+  return rows.map((row: any) => ({
+    id: row.article_id,
+    title: row.title || '',
+    summary: row.chunk_text || row.summary || row.summary_zh || row.summary_en || '',
+    score: row.score_dense ?? null,
+    embedding_source: row.embedding_source || 'answer_question_chunk_dense_bge_m3',
+    candidateType: 'chunk',
+    chunkId: row.chunk_id,
+    chunkText: row.chunk_text,
+    metadata: row.metadata || {},
+  }))
+}
+
 async function retrieve(
   articleId: string,
   question: string,
@@ -274,7 +438,8 @@ async function retrieve(
   article: { article_content: string | null; summary_en: string | null; summary_zh: string | null; questions: { en?: string[]; zh?: string[] } | null },
   env: { supabaseUrl: string; serviceKey: string; cohereApiKey: string },
   caps: { mainContextCap: number; relatedContextCap: number; maxRelated: number },
-  requestId: string
+  requestId: string,
+  retrieverSelection: RetrieverSelection
 ): Promise<RetrievalContext> {
   const sbHeaders = { 'apikey': env.serviceKey, 'Authorization': `Bearer ${env.serviceKey}`, 'Content-Type': 'application/json' }
   const retrievalStart = Date.now()
@@ -307,43 +472,52 @@ async function retrieve(
   let injectedRelatedIds: string[] = []
   let relatedCandidates: RelatedArticleCandidate[] = []
   let ragSuccess = false
+  let fallbackReason: string | null = null
   try {
-    const cohereRes = await fetch('https://api.cohere.com/v1/embed', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${env.cohereApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'embed-english-v3.0', input_type: 'search_query', texts: [question] }),
-    })
-    if (cohereRes.ok) {
-      const cohereData: { embeddings: number[][] } = await cohereRes.json()
-      const queryEmbedding = cohereData.embeddings[0]
-      const rpcRes = await fetch(`${env.supabaseUrl}/rest/v1/rpc/match_articles_prefer_analysis`, {
-        method: 'POST',
-        headers: sbHeaders,
-        body: JSON.stringify({ query_embedding: queryEmbedding, match_count: caps.maxRelated + 1 }),
+    if (retrieverSelection.mode === 'article_dense_prefer_analysis') {
+      relatedCandidates = await retrieveArticleDenseCandidates({
+        question,
+        sbHeaders,
+        env: { supabaseUrl: env.supabaseUrl, cohereApiKey: env.cohereApiKey },
+        maxRelated: caps.maxRelated,
       })
-      if (rpcRes.ok) {
-        const related: RelatedArticleCandidate[] = await rpcRes.json()
-        relatedCandidates = related
-        const filtered = related.filter(r => r.id !== articleId).slice(0, caps.maxRelated)
-        injectedRelatedIds = filtered.map(r => r.id)
-        if (filtered.length > 0) {
-          const label = lang === 'zh' ? '相关文章' : 'Related article'
-          relatedContext = '\n\n' + filtered.map((r, i) => {
-            const trimmed = (r.summary || '').slice(0, caps.relatedContextCap)
-            return `[${label} ${i + 1}] ${r.title}\n${trimmed}`
-          }).join('\n\n')
-        }
-        ragSuccess = true
-      } else {
-        console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'rag_rpc_failed', status: rpcRes.status, body: await rpcRes.text().catch(() => '') }))
-      }
     } else {
-      console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'cohere_embed_failed', status: cohereRes.status, body: await cohereRes.text().catch(() => '') }))
+      try {
+        relatedCandidates = await retrieveChunkDenseCandidates({
+          question,
+          sbHeaders,
+          env: { supabaseUrl: env.supabaseUrl },
+          maxRelated: caps.maxRelated,
+        })
+      } catch (chunkError) {
+        if (!retrieverSelection.allowArticleDenseFallback) throw chunkError
+        fallbackReason = 'chunk_dense_failed_fell_back_to_article_dense'
+        console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'chunk_dense_fallback', error: (chunkError as Error).message }))
+        relatedCandidates = await retrieveArticleDenseCandidates({
+          question,
+          sbHeaders,
+          env: { supabaseUrl: env.supabaseUrl, cohereApiKey: env.cohereApiKey },
+          maxRelated: caps.maxRelated,
+        })
+      }
     }
+
+    const filtered = relatedCandidates.filter(r => r.id !== articleId).slice(0, caps.maxRelated)
+    injectedRelatedIds = filtered.map(r => r.id)
+    if (filtered.length > 0) {
+      const label = lang === 'zh' ? '相关文章' : 'Related article'
+      relatedContext = '\n\n' + filtered.map((r, i) => {
+        const sourceText = r.chunkText || r.summary || ''
+        const trimmed = sourceText.slice(0, caps.relatedContextCap)
+        return `[${label} ${i + 1}] ${r.title}\n${trimmed}`
+      }).join('\n\n')
+    }
+    ragSuccess = true
   } catch (e) {
-    console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'rag_retrieval_failed', error: (e as Error).message }))
+    console.log(JSON.stringify({ ts: new Date().toISOString(), fn: 'answer-question', request_id: requestId, event: 'rag_retrieval_failed', retriever_mode: retrieverSelection.mode, error: (e as Error).message }))
   }
 
+  const actualRetrieverMode: RetrieverMode = fallbackReason ? 'article_dense_prefer_analysis' : retrieverSelection.mode
   const retrievalLatencyMs = Date.now() - retrievalStart
   const retrievalRunId = await recordAnswerQuestionTrace({
     supabaseUrl: env.supabaseUrl,
@@ -358,9 +532,22 @@ async function retrieve(
     relatedContext,
     matchCount: caps.maxRelated + 1,
     latencyMs: retrievalLatencyMs,
+    requestedRetrieverMode: retrieverSelection.mode,
+    actualRetrieverMode,
+    retrieverSelectionReason: retrieverSelection.reason,
+    fallbackReason,
   })
 
-  return { mainContext, relatedContext, injectedRelatedIds, retrievalRunId, ragSuccess }
+  return {
+    mainContext,
+    relatedContext,
+    injectedRelatedIds,
+    retrievalRunId,
+    ragSuccess,
+    retrieverMode: actualRetrieverMode,
+    retrieverSelectionReason: retrieverSelection.reason,
+    fallbackReason,
+  }
 }
 
 async function generate(
@@ -682,14 +869,16 @@ async function orchestrateAnswer(req: Request): Promise<Response> {
     return new Response(stream, { headers: { ...corsHeaders, 'Content-Type': 'text/event-stream' } })
   }
 
-  log('retrieving', { article_id })
+  const retrieverSelection = selectRetrieverMode()
+  log('retrieving', { article_id, retriever_mode: retrieverSelection.mode, retriever_selection_reason: retrieverSelection.reason })
   const retrieval = await retrieve(
     decision.articleId, decision.question, decision.lang, decision.article,
     { supabaseUrl: SUPABASE_URL, serviceKey: SERVICE_KEY, cohereApiKey: COHERE_API_KEY },
     { mainContextCap: MAIN_CONTEXT_CAP, relatedContextCap: RELATED_CONTEXT_CAP, maxRelated: MAX_RELATED },
-    requestId
+    requestId,
+    retrieverSelection
   )
-  log('retrieved', { rag_success: retrieval.ragSuccess, related_count: retrieval.injectedRelatedIds.length })
+  log('retrieved', { rag_success: retrieval.ragSuccess, related_count: retrieval.injectedRelatedIds.length, retriever_mode: retrieval.retrieverMode, fallback_reason: retrieval.fallbackReason })
 
   return generate(
     retrieval,

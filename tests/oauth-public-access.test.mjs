@@ -79,6 +79,20 @@ test('premium article and thread actions render login-required rows when anonymo
   assert.match(app, /<AuthPrompt\s*\n\s*visible=\{authPromptOpen\}\s*\n\s*lang=\{lang\}/)
 })
 
+test('expanded question panels explain click-to-answer and show per-question hover state', () => {
+  const articleCard = read('news-app/components/ArticleCard.tsx')
+  const xThreadCard = read('news-app/components/XThreadCard.tsx')
+
+  for (const [label, source] of [['article', articleCard], ['thread', xThreadCard]]) {
+    assert.match(source, /Click a question to generate an answer/, `${label}: missing English question hint`)
+    assert.match(source, /点击问题即可生成回答/, `${label}: missing Chinese question hint`)
+    assert.match(source, /hoverQuestionRows/, `${label}: missing per-question hover state`)
+    assert.match(source, /styles\.questionRowHovered/, `${label}: missing hovered row style usage`)
+    assert.match(source, /onHoverIn=\{\(\)\s*=>\s*setHoverQuestionRows/, `${label}: missing question hover-in handler`)
+    assert.match(source, /onHoverOut=\{\(\)\s*=>\s*setHoverQuestionRows/, `${label}: missing question hover-out handler`)
+  }
+})
+
 test('public feed rpc nulls premium fields for anonymous callers', () => {
   const sql = read('supabase/sql/20260610_oauth_access_policy.sql')
 

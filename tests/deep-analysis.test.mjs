@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   analysisToEmbeddingText,
@@ -63,6 +64,19 @@ test('analysisToEmbeddingText produces deterministic bilingual content', () => {
   assert.match(text, /Title: A title/)
   assert.match(text, /EN facts:/)
   assert.match(text, /ZH limitations:/)
+})
+
+test('generate-deep-analysis embeds ready analyses with Cloudflare BGE instead of Cohere', () => {
+  const source = readFileSync('supabase/functions/generate-deep-analysis/index.ts', 'utf8')
+
+  assert.match(source, /CLOUDFLARE_ACCOUNT_ID/)
+  assert.match(source, /CLOUDFLARE_API_TOKEN/)
+  assert.match(source, /@cf\/baai\/bge-m3/)
+  assert.match(source, /input_type:\s*'search_document'/)
+  assert.match(source, /Cloudflare BGE returned invalid embedding length/)
+  assert.doesNotMatch(source, /COHERE_EMBED_API/)
+  assert.doesNotMatch(source, /COHERE_API_KEY/)
+  assert.doesNotMatch(source, /Cohere/)
 })
 
 test('extractFirstJson handles braces inside strings and trailing prose', () => {

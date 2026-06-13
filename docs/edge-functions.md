@@ -57,13 +57,15 @@ data: [DONE]
 
 ### Retrieval Behavior Guardrail
 
-The 2026-05-31 trace completeness work did not change retrieval or model behavior. Production `answer-question` still uses article-level dense `match_articles_prefer_analysis`, preferring ready Deep Analysis vectors and falling back to article embeddings. Dense/lexical/hybrid/chunk experiments live in offline eval scripts only until a later metric-gated production plan.
+As of 2026-06-13, production `answer-question` defaults to chunk-level dense retrieval through `match_answer_question_chunks` with Cloudflare Workers AI `@cf/baai/bge-m3` query embeddings and `paragraph-window-v1-2026-06-02` chunks. Article-level dense `match_articles_prefer_analysis` remains available only through explicit rollback mode or emergency fallback. Lexical, hybrid, entity, rerank, and agentic experiments remain offline eval scripts.
 
 ### Required Secrets
 - `TOKENROUTER_API_KEY`
 - `QA_LLM_MODEL` (default path model, e.g. `qwen/qwen3.5-flash`)
 - `GROQ_API_KEY` (fallback)
-- `COHERE_API_KEY`
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_API_TOKEN`
+- `COHERE_API_KEY` (article-dense rollback/fallback only)
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 ### Deploy
