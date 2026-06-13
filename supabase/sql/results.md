@@ -35,7 +35,7 @@ Current strategy-valid replay comparison:
 | eval_run_id | retrieval_strategy | total_cases | recall_at_5 | recall_at_10 | mrr | ndcg_at_10 | hit_at_5 | latency_p50_ms | latency_p95_ms | interpretation |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | `c24ad51f-13ca-4adc-a2e8-8b843cd3c08f` | `rerank_hybrid_vw1_lw1_cw0_dense_query_embedding_article_similarity` | 21 | 0.990 | 1.000 | 0.944 | 0.935 | 1.000 | 40932 | 68056 | quality-best, latency-fails gate |
-| `8ba5bdac-88a7-4f7b-8058-1648c734cc33` | `chunk_dense_dense_query_embedding_article_similarity` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179 | 3425 | selected retrieval candidate |
+| `8ba5bdac-88a7-4f7b-8058-1648c734cc33` | `chunk_dense_dense_query_embedding_article_similarity` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1179 | 3425 | selected chunk-level dense retrieval candidate |
 | `e5f6d233-6908-4b89-a02d-ace206e43a36` | `chunk_dense_dense_query_embedding_article_similarity` | 21 | 0.895 | 0.943 | 0.739 | 0.764 | 0.952 | 1112 | 7221 | repeat run; same quality, higher p95 |
 | `9a265197-b101-4a4d-9302-d7791e95c0fd` | `chunk_hybrid_vw1_lw1_cw1_dense_query_embedding_article_similarity` | 21 | 0.848 | 0.905 | 0.744 | 0.762 | 0.905 | 6753 | 12447 | eval-only; slower and lower recall |
 
@@ -47,7 +47,7 @@ Current generation eval summary:
 
 Interpretation:
 
-- `chunk_dense` is the practical production candidate for the next rollout plan.
+- `chunk_dense @cf/baai/bge-m3` is the practical candidate for the next rollout plan. It is chunk-level dense retrieval, not article-level retrieval.
 - `rerank_hybrid` is the quality ceiling but not a production candidate at current latency.
 - The generation result is strong on faithfulness/relevancy, but `24` judged rows is larger than the 21-case retrieval set. Before quoting it as a locked benchmark, group by `eval_run_id` and use the latest complete 21-case generation run.
 - The taxonomy rows below include historical blocked/legacy output. Use only fresh rows carrying `rag-eval-run-notes-v1`, `valid_for_strategy_selection = true`, and the current passing corpus-health run for release-grade strategy language.

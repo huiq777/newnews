@@ -218,7 +218,7 @@ supabase secrets set GROQ_API_KEY=... --project-ref <ref>
 ## generate-deep-analysis (Supabase Edge Function)
 **Runs automatically:** Every 5 min via pg_cron → `net.http_post`
 
-Generates bilingual structured Deep Analysis for eligible `daily_news` rows (`article_content` length > 500) after `process-queue` publishes the compact article. It writes `article_deep_analysis.status='ready'` only after both JSON analysis and Cohere embedding succeed.
+Generates bilingual structured Deep Analysis for eligible `daily_news` rows (`article_content` length > 500) after `process-queue` publishes the compact article. It writes `article_deep_analysis.status='ready'` only after both JSON analysis and Cloudflare Workers AI BGE embedding succeed.
 
 ```bash
 # Deploy
@@ -259,6 +259,91 @@ order by ada.updated_at desc
 limit 20;
 ```
 
+**Deep Analysis status dashboard:**
+Run these in the Supabase SQL Editor when checking whether Deep Analysis is healthy or stuck.
+
+```sql
+-- Overall status counts and newest update by state.
+select
+  status,
+  count(*) as rows,
+  min(updated_at) as oldest_updated_at,
+  max(updated_at) as newest_updated_at
+from article_deep_analysis
+group by status
+order by status;
+
+-- Eligible article coverage.
+select
+  count(*) filter (where length(coalesce(dn.article_content, '')) > 500) as eligible_articles,
+  count(*) filter (where length(coalesce(dn.article_content, '')) > 500 and ada.status = 'ready') as ready_eligible,
+  count(*) filter (where length(coalesce(dn.article_content, '')) > 500 and ada.status = 'pending') as pending_eligible,
+  count(*) filter (where length(coalesce(dn.article_content, '')) > 500 and ada.status = 'processing') as processing_eligible,
+  count(*) filter (where length(coalesce(dn.article_content, '')) > 500 and ada.status = 'error') as error_eligible
+from daily_news dn
+left join article_deep_analysis ada on ada.article_id = dn.id;
+
+-- Claimable backlog for the next worker run.
+select count(*) as claimable
+from article_deep_analysis ada
+join daily_news dn on dn.id = ada.article_id
+where ada.status in ('pending', 'error')
+  and coalesce(ada.retry_count, 0) < 3
+  and length(coalesce(dn.article_content, '')) > 500;
+
+-- Stale processing rows that may need reset.
+select
+  ada.article_id,
+  left(dn.title, 120) as title,
+  ada.status,
+  ada.retry_count,
+  ada.updated_at,
+  ada.last_error
+from article_deep_analysis ada
+join daily_news dn on dn.id = ada.article_id
+where ada.status = 'processing'
+  and ada.updated_at < now() - interval '15 minutes'
+order by ada.updated_at asc
+limit 50;
+
+-- Recent errors grouped by reason.
+select
+  coalesce(nullif(left(last_error, 120), ''), '<empty>') as error_preview,
+  count(*) as rows,
+  max(updated_at) as newest_updated_at
+from article_deep_analysis
+where status = 'error'
+group by error_preview
+order by rows desc, newest_updated_at desc
+limit 20;
+
+-- Recent ready analyses.
+select
+  ada.article_id,
+  left(dn.title, 120) as title,
+  ada.model,
+  ada.input_chars,
+  ada.truncated,
+  ada.updated_at
+from article_deep_analysis ada
+join daily_news dn on dn.id = ada.article_id
+where ada.status = 'ready'
+order by ada.updated_at desc
+limit 20;
+```
+
+**Reset stale Deep Analysis processing rows:**
+Use only when the stale-processing query above shows rows stuck for more than 15 minutes.
+
+```sql
+update article_deep_analysis
+set status = 'pending',
+    last_error = null,
+    updated_at = now()
+where status = 'processing'
+  and updated_at < now() - interval '15 minutes';
+```
+
 **Secrets** (set in Supabase dashboard — `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are auto-injected):
 ```bash
 supabase secrets set TOKENROUTER_API_KEY=... --project-ref <ref>
@@ -266,7 +351,11 @@ supabase secrets set DEEP_ANALYSIS_LLM_MODEL=qwen/qwen3.6-plus --project-ref <re
 supabase secrets set OPENROUTER_API_KEY=... --project-ref <ref>
 supabase secrets set OPENROUTER_MODEL=... --project-ref <ref>
 supabase secrets set GROQ_API_KEY=... --project-ref <ref>
-supabase secrets set COHERE_API_KEY=... --project-ref <ref>
+supabase secrets set CLOUDFLARE_ACCOUNT_ID=... --project-ref <ref>
+supabase secrets set CLOUDFLARE_API_TOKEN=... --project-ref <ref>
+# Optional override if using another OpenAI-compatible BGE endpoint:
+# supabase secrets set BGE_EMBEDDING_BASE_URL=https://api.cloudflare.com/client/v4/accounts/<account_id>/ai --project-ref <ref>
+# supabase secrets set BGE_EMBEDDING_API_KEY=... --project-ref <ref>
 ```
 
 ---
@@ -398,9 +487,87 @@ curl -X POST https://<project>.supabase.co/functions/v1/refresh-questions \
 supabase secrets set TOKENROUTER_API_KEY=... --project-ref <ref>
 supabase secrets set GROQ_API_KEY=... --project-ref <ref>
 supabase secrets set COHERE_API_KEY=... --project-ref <ref>
+supabase secrets set CLOUDFLARE_ACCOUNT_ID=... --project-ref <ref>
+supabase secrets set CLOUDFLARE_API_TOKEN=... --project-ref <ref>
 supabase secrets set TREND_BRIEF_MODEL=anthropic/claude-opus-4.7 --project-ref <ref>
 supabase secrets set QA_LLM_MODEL=qwen/qwen3.5-flash --project-ref <ref>
 supabase secrets list
+```
+
+### answer-question Chunk Dense Production Retriever
+
+Current production target:
+
+```bash
+ANSWER_QUESTION_RETRIEVER_MODE=chunk_dense_bge_m3
+ANSWER_QUESTION_ALLOW_ARTICLE_DENSE_FALLBACK=true
+```
+
+Apply SQL:
+
+```sql
+\i supabase/sql/20260613_answer_question_chunk_retrieval.sql
+\i supabase/sql/20260613_answer_question_chunk_dense_monitoring.sql
+```
+
+Set BGE secrets:
+
+```bash
+supabase secrets set CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" --project-ref "$SUPABASE_PROJECT_REF"
+supabase secrets set CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" --project-ref "$SUPABASE_PROJECT_REF"
+```
+
+Optional OpenAI-compatible BGE override:
+
+```bash
+supabase secrets set BGE_EMBEDDING_BASE_URL="$BGE_EMBEDDING_BASE_URL" --project-ref "$SUPABASE_PROJECT_REF"
+supabase secrets set BGE_EMBEDDING_API_KEY="$BGE_EMBEDDING_API_KEY" --project-ref "$SUPABASE_PROJECT_REF"
+```
+
+Deploy chunk default:
+
+```bash
+supabase secrets set ANSWER_QUESTION_RETRIEVER_MODE=chunk_dense_bge_m3 --project-ref "$SUPABASE_PROJECT_REF"
+supabase secrets set ANSWER_QUESTION_ALLOW_ARTICLE_DENSE_FALLBACK=true --project-ref "$SUPABASE_PROJECT_REF"
+supabase functions deploy answer-question
+```
+
+Smoke after one authenticated Q&A request:
+
+```sql
+select
+  rr.created_at,
+  rr.retrieval_strategy,
+  rr.retriever_name,
+  rr.query_embedding_model,
+  rr.query_input,
+  rr.candidate_count,
+  rr.injected_count,
+  rr.latency_ms
+from public.rag_retrieval_runs rr
+where rr.surface = 'answer_question_related_articles'
+order by rr.created_at desc
+limit 5;
+```
+
+Expected default trace:
+
+- `retrieval_strategy = 'chunk_dense_bge_m3'`
+- `retriever_name = 'match_answer_question_chunks'`
+- `query_embedding_model = '@cf/baai/bge-m3'`
+- `query_input->>'selected_eval_run_id' = '8ba5bdac-88a7-4f7b-8058-1648c734cc33'`
+
+Monitor:
+
+```sql
+\i supabase/sql/20260613_answer_question_chunk_dense_monitoring.sql
+```
+
+Rollback:
+
+```bash
+supabase secrets set ANSWER_QUESTION_RETRIEVER_MODE=article_dense_prefer_analysis --project-ref "$SUPABASE_PROJECT_REF"
+supabase functions deploy answer-question
 ```
 
 ### Apply new SQL migrations (2026-05-03)
@@ -689,7 +856,7 @@ Then run `supabase/sql/20260602_rag_retrieval_refinement_diagnostics.sql`, espec
 - Query 6: approved-gold readiness preflight.
 - Query 7: latest dense/lexical/hybrid comparison.
 
-As of 2026-06-09, `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3` is the selected corpus-health-valid eval candidate on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. Generation eval aggregate for `chunk_dense` is faithfulness 0.994, answer relevancy 0.950, context precision 0.785, and context recall 0.819, but group by `eval_run_id` before quoting it as a locked benchmark. Do not change production `answer-question` without a separate feature-flagged integration and rollback plan.
+As of 2026-06-13, production `answer-question` defaults to `chunk_dense` with Cloudflare Workers AI `@cf/baai/bge-m3`. This is chunk-level dense retrieval, not article-level retrieval. Metrics from the selected corpus-health-valid eval candidate on 21 approved cases: Recall@5 0.895, Recall@10 0.943, MRR 0.739, NDCG@10 0.764, Hit@5 0.952, p50/p95 as low as 1179/3425ms. Generation eval aggregate for `chunk_dense` is faithfulness 0.994, answer relevancy 0.950, context precision 0.785, and context recall 0.819, but group by `eval_run_id` before quoting it as a locked benchmark. The older article-level retriever remains available only through explicit rollback mode or emergency fallback.
 
 ---
 

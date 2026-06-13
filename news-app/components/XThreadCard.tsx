@@ -49,6 +49,7 @@ function TweetRow({
   const [answers, setAnswers] = useState<Record<number, AnswerState>>({})
   const [localQuestions, setLocalQuestions] = useState(tweet.questions)
   const [thinkingExpanded, setThinkingExpanded] = useState<Record<number, boolean>>({})
+  const [hoverQuestionRows, setHoverQuestionRows] = useState<Record<number, boolean>>({})
   const [hoverRefreshQuestions, setHoverRefreshQuestions] = useState(false)
   const spinAnim = useRef(new Animated.Value(0)).current
 
@@ -261,6 +262,9 @@ function TweetRow({
           <View style={styles.questionsDivider}>
             <View style={styles.dividerLine} />
             <Text style={styles.dividerText}>{lang === 'en' ? 'Questions' : '问题'}</Text>
+            <Text style={styles.questionsHint}>
+              {lang === 'en' ? 'Click a question to generate an answer.' : '点击问题即可生成回答。'}
+            </Text>
             <Pressable
               onPress={() => { innerPressed.current = true; handleRefresh() }}
               disabled={refreshing}
@@ -295,9 +299,15 @@ function TweetRow({
             const ans = answers[i]
             return (
               <View key={i}>
-                <TouchableOpacity onPress={() => { innerPressed.current = true; handleAsk(i, q) }} style={styles.questionRow}>
+                <Pressable
+                  onPress={() => { innerPressed.current = true; handleAsk(i, q) }}
+                  onHoverIn={() => setHoverQuestionRows(prev => ({ ...prev, [i]: true }))}
+                  onHoverOut={() => setHoverQuestionRows(prev => ({ ...prev, [i]: false }))}
+                  accessibilityRole="button"
+                  style={[styles.questionRow, hoverQuestionRows[i] && styles.questionRowHovered]}
+                >
                   <Text style={styles.questionText}>Q: {q}</Text>
-                </TouchableOpacity>
+                </Pressable>
                 {ans && (
                   <View style={styles.answerBlock}>
                     {ans.streaming && !ans.content && (
@@ -551,7 +561,25 @@ const styles = StyleSheet.create({
     color: colors.text.inverse,
     fontWeight: typography.weight.semibold,
   },
-  questionRow: { paddingVertical: spacing[2] },
+  questionsHint: {
+    fontSize: typography.size.base,
+    color: colors.text.muted,
+    lineHeight: typography.leading.normal,
+    flexShrink: 1,
+    maxWidth: 240,
+  },
+  questionRow: {
+    paddingVertical: spacing[2],
+    paddingHorizontal: spacing[2],
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  questionRowHovered: {
+    backgroundColor: '#FAF9F7',
+    borderColor: colors.border.warm,
+    transform: [{ translateX: 2 }],
+  },
   questionText: { fontSize: typography.size.lg, color: '#3D3935', lineHeight: typography.leading.normal },
   answerBlock: { marginBottom: spacing[2] },
   thinkingHeader: { paddingVertical: spacing[1] },

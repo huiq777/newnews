@@ -11,7 +11,7 @@ import {
 const TOKENROUTER_API = 'https://api.tokenrouter.com/v1/chat/completions'
 const OPENROUTER_API = 'https://openrouter.ai/api/v1/chat/completions'
 const GROQ_API = 'https://api.groq.com/openai/v1/chat/completions'
-const COHERE_EMBED_API = 'https://api.cohere.com/v1/embed'
+const BGE_EMBEDDING_MODEL = '@cf/baai/bge-m3'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,6 +55,21 @@ function sbHeaders() {
     'Authorization': `Bearer ${key}`,
     'Content-Type': 'application/json',
   }
+}
+
+function bgeEmbeddingsUrl() {
+  const baseUrl = env('BGE_EMBEDDING_BASE_URL')
+  if (baseUrl) return `${baseUrl.replace(/\/$/, '')}/v1/embeddings`
+
+  const accountId = env('CLOUDFLARE_ACCOUNT_ID')
+  if (!accountId) throw new Error('Missing CLOUDFLARE_ACCOUNT_ID')
+  return `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/embeddings`
+}
+
+function bgeApiToken() {
+  const token = env('BGE_EMBEDDING_API_KEY') || env('CLOUDFLARE_API_TOKEN')
+  if (!token) throw new Error('Missing CLOUDFLARE_API_TOKEN')
+  return token
 }
 
 function log(event: string, payload: Record<string, unknown> = {}) {
@@ -244,28 +259,29 @@ async function callLLM(row: ClaimedRow): Promise<LlmResult> {
 }
 
 async function embedAnalysis(row: ClaimedRow, analysis: ReturnType<typeof validateDeepAnalysis>): Promise<number[]> {
-  if (!env('COHERE_API_KEY')) throw new Error('Missing COHERE_API_KEY')
   const text = analysisToEmbeddingText(analysis, row.title_en || row.title)
-  const res = await fetch(COHERE_EMBED_API, {
+  const res = await fetch(bgeEmbeddingsUrl(), {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${env('COHERE_API_KEY')}`,
+      'Authorization': `Bearer ${bgeApiToken()}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'embed-english-v3.0',
+      model: BGE_EMBEDDING_MODEL,
       input_type: 'search_document',
-      texts: [text],
+      input: [text],
     }),
   })
   if (!res.ok) {
     const errBody = await res.text().catch(() => '')
-    throw new Error(`Cohere ${res.status}: ${errBody.substring(0, 300)}`)
+    throw new Error(`Cloudflare BGE ${res.status}: ${errBody.substring(0, 300)}`)
   }
-  const data = await res.json() as { embeddings?: number[][] }
-  const embedding = data.embeddings?.[0]
+  const data = await res.json() as { data?: Array<{ embedding?: number[] }>; embeddings?: number[][] }
+  const embedding = Array.isArray(data.data)
+    ? data.data[0]?.embedding
+    : data.embeddings?.[0]
   if (!Array.isArray(embedding) || embedding.length !== 1024) {
-    throw new Error(`Cohere returned invalid embedding length=${embedding?.length ?? 'null'}`)
+    throw new Error(`Cloudflare BGE returned invalid embedding length=${embedding?.length ?? 'null'}`)
   }
   return embedding
 }

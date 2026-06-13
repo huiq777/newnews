@@ -22,13 +22,13 @@ Latest valid offline RAG eval uses corpus-health run `54dcd974-2fa2-4fb7-bb62-6e
 
 | Track | Result |
 |---|---|
-| Selected retrieval candidate | `chunk_dense @cf/baai/bge-m3` |
+| Latest eval / selected candidate | `chunk_dense @cf/baai/bge-m3` — chunk-level dense retrieval |
 | Retrieval eval, 21 approved cases | Recall@5 `0.895`, Recall@10 `0.943`, MRR `0.739`, NDCG@10 `0.764`, Hit@5 `0.952` |
 | Latency for selected candidate | p50/p95 as low as `1179/3425ms` |
 | Generation eval, latest aggregate | Faithfulness `0.994`, answer relevancy `0.950`, context precision `0.785`, context recall `0.819` |
 | Quality ceiling | `rerank_hybrid` reached Recall@10 `1.000`, but p95 `68056ms`, so it stays eval-only |
 
-Production `answer-question` still uses the existing article-level retriever until a feature-flagged rollout plan is executed. The chunk, hybrid, rerank, generation, and agentic paths are eval-gated.
+Production `answer-question` now defaults to **chunk-level dense retrieval** via `chunk_dense @cf/baai/bge-m3`. The older article-level retriever remains available only as rollback/fallback.
 
 These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief need separate surface-specific evals before their quality can be quoted. Agentic RAG is an eval-only orchestration path for harder multi-hop/comparison questions; GraphRAG is deferred until relation-based failures justify a graph layer.
 
@@ -37,7 +37,7 @@ These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief
 - **Frontend:** Expo/React Native web app, deployed through Cloudflare Pages.
 - **Data + Auth:** Supabase Postgres, pgvector, RLS, Auth OAuth providers.
 - **Ingestion:** Cloudflare Workers cron jobs plus Supabase Edge Function webhooks.
-- **AI:** TokenRouter primary LLM path, OpenRouter/Groq fallback, Cohere article embeddings, Cloudflare Workers AI BGE for eval chunk embeddings.
+- **AI:** TokenRouter primary LLM path, OpenRouter/Groq fallback, Cohere article/query embeddings, Cloudflare Workers AI BGE for Deep Analysis and eval chunk embeddings.
 - **Observability:** `pipeline_events`, `qa_logs`, `rag_retrieval_*`, and `rag_eval_*` tables.
 - **Access model:** anonymous public feed; OAuth-gated analysis; `user_article_questions` and `user_trend_briefs` for user-scoped overrides.
 
@@ -61,13 +61,13 @@ These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief
 
 | 项目 | 结果 |
 |---|---|
-| 当前选择的检索候选 | `chunk_dense @cf/baai/bge-m3` |
+| Latest eval / 当前选择的候选 | `chunk_dense @cf/baai/bge-m3` — chunk-level dense retrieval |
 | 21 个 approved case 检索评估 | Recall@5 `0.895`，Recall@10 `0.943`，MRR `0.739`，NDCG@10 `0.764`，Hit@5 `0.952` |
 | 候选方案延迟 | p50/p95 最好达到 `1179/3425ms` |
 | 最新 generation eval 聚合 | Faithfulness `0.994`，Answer relevancy `0.950`，Context precision `0.785`，Context recall `0.819` |
 | 质量上限参考 | `rerank_hybrid` Recall@10 达到 `1.000`，但 p95 `68056ms`，因此仍保留为 eval-only |
 
-生产环境的 `answer-question` 仍使用现有 article-level retriever。chunk、hybrid、rerank、generation eval 和 agentic 路径都必须先通过评估、延迟和回滚门槛，才能进入生产 rollout。
+当前生产 `answer-question` 默认使用 **chunk-level dense retrieval**：`chunk_dense @cf/baai/bge-m3`。原 article-level retriever 仅保留为 fallback/回滚路径。
 
 这些指标描述的是 **Q&A RAG eval track**。Deep Analysis 和 Trend Brief 需要单独的 surface-specific eval，不能直接套用 Q&A 的 Recall/MRR/NDCG。Agentic RAG 目前是 eval-only 的编排层，用于未来更复杂的 multi-hop/comparison 问题；GraphRAG 暂缓，直到评估证明 chunk/hybrid/rerank 无法解决关系型证据问题。
 
@@ -76,7 +76,7 @@ These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief
 - **前端:** Expo/React Native Web，通过 Cloudflare Pages 部署。
 - **数据与认证:** Supabase Postgres、pgvector、RLS、Supabase Auth OAuth providers。
 - **采集:** Cloudflare Workers 定时任务 + Supabase Edge Function webhook。
-- **AI:** TokenRouter 主路径，OpenRouter/Groq fallback，Cohere 文章向量，Cloudflare Workers AI BGE 用于 eval chunk embedding。
+- **AI:** TokenRouter 主路径，OpenRouter/Groq fallback，Cohere 文章/查询向量，Cloudflare Workers AI BGE 用于 Deep Analysis 和 eval chunk embedding。
 - **可观测性:** `pipeline_events`、`qa_logs`、`rag_retrieval_*`、`rag_eval_*`。
 - **访问模型:** 匿名用户可看公开 feed；OAuth 用户可用生成式分析；`user_article_questions` 和 `user_trend_briefs` 保存用户级 override。
 
