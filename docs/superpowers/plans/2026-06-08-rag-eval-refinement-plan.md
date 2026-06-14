@@ -16,13 +16,13 @@ This plan has been implemented as an eval-only stack. Corpus health now passes f
 
 Latest strategy-valid replay selects `chunk_dense @cf/baai/bge-m3` as the practical production candidate on 21 approved cases: Recall@5 `0.895`, Recall@10 `0.943`, MRR `0.739`, NDCG@10 `0.764`, Hit@5 `0.952`, with p50/p95 as low as `1179/3425ms`. `rerank_hybrid` is quality-best but latency-fails at p95 `68056ms`. Generation eval for `chunk_dense` currently aggregates to faithfulness `0.994`, answer relevancy `0.950`, context precision `0.785`, and context recall `0.819` across 24 judged rows; group by `eval_run_id` before treating that as a locked benchmark.
 
-Production `answer-question` remains unchanged. The next implementation plan should be a feature-flagged chunk retrieval rollout with rollback and production trace checks.
+2026-06-13 supersession: the follow-up production rollout landed. Production `answer-question` now defaults to `chunk_dense @cf/baai/bge-m3` through `match_answer_question_chunks`; `match_articles_prefer_analysis` is rollback/fallback only. This document remains the historical eval-refinement plan.
 
 ---
 
 ## Current Truth
 
-- Production `answer-question` still uses article-level dense retrieval via `match_articles_prefer_analysis`, which prefers ready Deep Analysis when available and falls back to article embeddings. Older docs may use `match_articles` as shorthand for the article-level dense retriever family; this plan uses the exact deployed RPC name.
+- Historical baseline when this plan was written: production `answer-question` used article-level dense retrieval via `match_articles_prefer_analysis`, which preferred ready Deep Analysis when available and fell back to article embeddings. As of 2026-06-13, production defaults to chunk dense and this article-level path is rollback/fallback only.
 - Latest leading offline chunk baseline is `chunk_dense @cf/baai/bge-m3`, pending Task 0 corpus-health preflight before release-grade strategy selection.
 - Latest recorded metrics on 21 approved cases:
   - Recall@5 `0.710`

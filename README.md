@@ -37,7 +37,7 @@ These metrics describe the **Q&A RAG eval track**. Deep Analysis and Trend Brief
 - **Frontend:** Expo/React Native web app, deployed through Cloudflare Pages.
 - **Data + Auth:** Supabase Postgres, pgvector, RLS, Auth OAuth providers.
 - **Ingestion:** Cloudflare Workers cron jobs plus Supabase Edge Function webhooks.
-- **AI:** TokenRouter primary LLM path, OpenRouter/Groq fallback, Cohere article/query embeddings, Cloudflare Workers AI BGE for Deep Analysis and eval chunk embeddings.
+- **AI:** TokenRouter primary LLM path, OpenRouter/Groq fallback, Cloudflare Workers AI BGE for production Q&A chunk retrieval and Deep Analysis embeddings, plus Cohere for legacy article embeddings/rollback paths.
 - **Observability:** `pipeline_events`, `qa_logs`, `rag_retrieval_*`, and `rag_eval_*` tables.
 - **Access model:** anonymous public feed; OAuth-gated analysis; `user_article_questions` and `user_trend_briefs` for user-scoped overrides.
 
@@ -98,7 +98,8 @@ Core invariants:
 - Closed-beta invite auth is legacy/rollback only.
 - Do not expose `SUPABASE_SERVICE_ROLE_KEY` or AI provider keys to the frontend.
 - Browser analysis should go through Edge Functions, not direct broad reads from `article_deep_analysis`, `trend_briefs`, `user_article_questions`, or `user_trend_briefs`.
-- Production `answer-question` has not yet switched to chunk retrieval; chunk/hybrid/rerank/agentic work is eval-gated until a rollout plan lands.
+- Production `answer-question` defaults to chunk-level dense retrieval through `match_answer_question_chunks` with `@cf/baai/bge-m3`; article-level dense retrieval is rollback/fallback only.
+- Hybrid, rerank, agentic RAG, and GraphRAG remain eval-gated until their own rollout plans land.
 - When quoting RAG results, use corpus-health-valid runs only and preserve the offline-vs-production distinction.
 - Q&A RAG, Deep Analysis eval, Trend Brief eval, Agentic RAG, and GraphRAG are separate terms. Do not transfer metrics from one surface to another.
 - Future plan: [Deep Analysis and Trend Brief RAG eval refinement](docs/superpowers/plans/2026-06-11-deep-analysis-trend-brief-rag-eval-refinement-plan.md).

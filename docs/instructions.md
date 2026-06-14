@@ -5,6 +5,38 @@
 
 ---
 
+## Safe Git Push Without Secrets
+
+Local secret files must stay local. Before any commit or push:
+
+```bash
+git status --short -uall
+git ls-files workers/embed-batch/.dev.vars .env.local news-app/.env.local
+git check-ignore -v .env.local news-app/.env.local workers/embed-batch/.dev.vars
+git grep -I -n -E 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{80,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}'
+git log --all -- workers/embed-batch/.dev.vars
+```
+
+Expected:
+
+- `git ls-files ...` prints no secret env files.
+- `git check-ignore ...` shows `.env.local` and `.dev.vars` are ignored.
+- strict token grep prints no real tokens.
+- `git log --all -- workers/embed-batch/.dev.vars` prints no output after history cleanup.
+
+Commit only tracked source/docs changes:
+
+```bash
+git add .gitignore README.md docs/current-state.md docs/instructions.md docs/api-keys-and-env.md docs/edge-functions.md docs/keep-in-mind.md docs/project-interview-resume-brief.md docs/superpowers/rag-retrieval-refinement-progress.md supabase/functions/answer-question/index.ts supabase/sql/20260613_answer_question_chunk_retrieval.sql supabase/sql/20260613_answer_question_chunk_dense_monitoring.sql tests/answer-question-production-chunk-dense.test.mjs
+git status --short
+git commit -m "feat: ship chunk dense answer-question retrieval"
+git push origin main
+```
+
+Never use `git add -f` on `.env*` or `.dev.vars`. If GitHub rejects because remote history was rewritten, fetch first and inspect before force-pushing.
+
+---
+
 ## RAG Eval Remediation Gates
 
 Before treating replay metrics as strategy-selection evidence, run the corpus-health SQL and use its latest run id in every replay/generation/agentic command:
